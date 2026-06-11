@@ -54,37 +54,38 @@ os.makedirs(LEARN_DIR, exist_ok=True)
 # ============================================================
 # MODELOS
 # ============================================================
-PREFERRED_MODELS = ["qwen3:4b", "qwen3-coder", "qwen3:30b-a3b", "qwen2.5:14b", "llama3.1:8b"]
-CHAT_MODEL_PATTERNS = ["llama3.1:8b", "qwen3:4b", "mistral:7b"]  # Modelos rapidos para chat
-CODE_MODEL_PATTERNS = ["qwen2.5:14b", "qwen3-coder", "qwen3:30b-a3b"]  # Modelos potentes para codigo
+PREFERRED_MODELS = ["llama3.1:8b", "qwen2.5-coder:7b", "qwen2.5:14b", "qwen3:4b", "qwen3-coder", "qwen3:30b-a3b"]
+CHAT_MODEL_PATTERNS = ["llama3.1:8b", "qwen2.5-coder:7b", "qwen3:4b", "mistral:7b"]  # Modelos rapidos para chat
+CODE_MODEL_PATTERNS = ["qwen2.5:14b", "qwen2.5-coder:7b", "qwen3-coder", "qwen3:30b-a3b"]  # Modelos potentes para codigo
 EMBED_MODEL_CANDIDATES = ["nomic-embed-text", "mxbai-embed-large", "all-minilm"]
 
 # ============================================================
 # LIMITES
 # ============================================================
-MAX_REACT_ITERATIONS = 8         # Max vueltas del bucle ReAct
-MAX_CONVERSATION_MEMORY = 20     # Mensajes de contexto que recuerda
-MAX_CONTEXT_CHARS = 3000         # Budget de chars para contexto enriquecido
+MAX_REACT_ITERATIONS = 6         # Max vueltas del bucle ReAct (reducido de 8 para velocidad)
+MAX_CONVERSATION_MEMORY = 15     # Mensajes de contexto que recuerda (reducido de 20)
+MAX_CONTEXT_CHARS = 2000         # Budget de chars para contexto enriquecido (reducido de 3000)
 MAX_FILE_READ = 8000             # Max chars al leer un archivo
 MAX_TOOL_OUTPUT = 3000           # Max chars en salida de herramienta
 MAX_EMBED_CACHE = 200            # Maximo entradas en cache de embeddings
 MAX_VECTORS_IN_MEMORY = 500      # Maximo vectores cargados en RAM
 CONNECTION_CACHE_DAYS = 7        # Dias que se guarda la conexion Ollama cacheada
-MEMORY_DECAY_HALF_LIFE = 30      # Dias para decaimiento de recuerdos
-MEMORY_CLEANUP_INTERVAL = 50     # Ops entre auto-cleanup
-MEMORY_MAX_ENTRIES = 1000        # Maximo entradas en vector store
-DEDUP_SIMILARITY_THRESHOLD = 0.95 # Umbral para deduplicacion semantica
-SUMMARY_MIN_MESSAGES = 10        # Minimo mensajes para generar resumen LLM
+
+# ============================================================
+# RENDIMIENTO
+# ============================================================
+SKIP_EMBED_ON_INTERACTION = True  # Saltar embedding al guardar interacciones (mas rapido)
+USE_STREAMING = True              # Usar streaming por defecto
+GPU_CHECK_ON_START = True         # Verificar GPU al iniciar el agente
 
 # ============================================================
 # TIMEOUTS
 # ============================================================
-DEFAULT_TIMEOUT = 120            # Segundos para comandos normales
+DEFAULT_TIMEOUT = 90             # Segundos para comandos normales (reducido)
 LONG_TIMEOUT = 300               # Segundos para install/build/docker
-LLM_TIMEOUT_SMALL = 120          # Timeout para modelos <=8b
-LLM_TIMEOUT_LARGE = 180          # Timeout para modelos >=14b
-LLM_SUMMARY_TIMEOUT = 30         # Timeout para resumen LLM
-EMBED_TIMEOUT = 15               # Timeout para embeddings
+LLM_TIMEOUT_SMALL = 90           # Timeout para modelos <=8b (reducido de 120)
+LLM_TIMEOUT_LARGE = 150          # Timeout para modelos >=14b (reducido de 180)
+EMBED_TIMEOUT = 10               # Timeout para embeddings (reducido de 15)
 WEB_TIMEOUT = 10                 # Timeout para busquedas web
 
 # ============================================================

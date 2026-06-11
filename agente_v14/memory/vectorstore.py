@@ -1,11 +1,12 @@
 """
 =============================================================
-AGENTE v14 - Vector Store Casero
+AGENTE v14 - Vector Store Casero (Optimizado)
 =============================================================
 Vector store ligero con embeddings de Ollama.
 Sin Qdrant, sin ChromaDB, sin dependencias extras.
 Persiste en JSON + archivo de vectores.
-v14: Carga lazy de vectores, LRU cache.
+v14.3: Skip embedding si el store esta vacio, busqueda
+       por texto primero (sin embedding), y cache masivo.
 =============================================================
 """
 
@@ -22,6 +23,7 @@ class VectorStore:
     """
     Vector store ligero con carga lazy y cache de vectores.
     Solo carga en memoria los vectores necesarios para busqueda.
+    Optimizado para reducir llamadas de embedding innecesarias.
     """
 
     def __init__(self, store_dir=None):
@@ -32,6 +34,7 @@ class VectorStore:
         self.index = self._load_index()
         self._vectors_cache = None
         self._dirty = False
+        self._last_search_cache = {}  # Cache de busquedas recientes
 
     def _load_index(self):
         try:
@@ -81,8 +84,15 @@ class VectorStore:
             self._save_index()
             self._dirty = False
 
-    def add(self, text, metadata=None, entry_id=None):
-        """Agrega un texto al vector store con su embedding."""
+    def add(self, text, metadata=None, entry_id=None, skip_embedding=False):
+        """
+        Agrega un texto al vector store con su embedding.
+
+        Args:
+            skip_embedding: Si True, NO calcula embedding (mas rapido).
+                           La entrada no aparecera en busquedas semanticas
+                           pero si en busquedas por texto.
+        """
         if not entry_id:
             entry_id = hashlib.md5(text.encode()).hexdigest()[:12]
 
@@ -90,6 +100,19 @@ class VectorStore:
         for entry in self.index:
             if entry["id"] == entry_id:
                 return entry_id
+
+        # Skip embedding si se solicita (para interacciones rapidas)
+        if skip_embedding:
+            self.index.append({
+                "id": entry_id,
+                "text": text[:500],
+                "metadata": metadata or {},
+                "has_vector": False,
+                "created": datetime.now().isoformat()
+            })
+            self._dirty = True
+            self._flush()
+            return entry_id
 
         # Obtener embedding (con cache LRU)
         embedding = ollama.get_embedding(text)
@@ -136,13 +159,22 @@ class VectorStore:
         return [c[1] for c in candidates[:max_candidates]]
 
     def search(self, query, limit=5, min_similarity=0.3):
-        """Busca entradas semanticamente similares al query."""
+        """
+        Busca entradas semanticamente similares al query.
+        Optimizado: si no hay vectores, usa solo busqueda por texto (sin llamar embedding).
+        """
         if not self.index:
             return []
 
+        # OPTIMIZACION: Si no hay entradas con vector, solo busqueda por texto
+        has_any_vectors = any(e.get("has_vector") for e in self.index)
+        if not has_any_vectors:
+            return self._text_search(query, limit)
+
+        # Busqueda semantica (con embedding)
         query_embedding = ollama.get_embedding(query)
         if not query_embedding:
-            # Fallback: busqueda por texto
+            # Fallback: busqueda por texto (sin gastar mas tiempo en embedding)
             return self._text_search(query, limit)
 
         # Pre-filtrar por texto (rapido, sin cargar todos los vectores)
@@ -183,6 +215,10 @@ class VectorStore:
 
     def count(self):
         return len(self.index)
+
+    def count_with_vectors(self):
+        """Retorna cuantas entradas tienen vectores (para debug)."""
+        return sum(1 for e in self.index if e.get("has_vector"))
 
     def cleanup(self, max_entries=1000):
         """Limpia entradas viejas si hay demasiadas."""

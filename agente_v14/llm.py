@@ -7,6 +7,7 @@ Singleton con cache de conexion persistente.
 - Timeout agresivo con 1 solo reintento
 - Modelo dual: chat rapido vs code potente
 - Streaming para respuestas en tiempo real
+- Deteccion de GPU para diagnosticar lentitud
 =============================================================
 """
 
@@ -84,6 +85,7 @@ class OllamaClient:
         self._models_list = None
         self._detected = False
         self._client = None
+        self._gpu_status = None  # None = no verificado, True/False
 
     @classmethod
     def get(cls):
@@ -95,9 +97,9 @@ class OllamaClient:
     # DETECCION DE MODELOS
     # ----------------------------------------------------------
 
-    def _fetch_available_models(self):
+    def _fetch_available_models(self, refresh=False):
         """Obtiene la lista de modelos disponibles en Ollama."""
-        if self._models_list is not None:
+        if self._models_list is not None and not refresh:
             return self._models_list
         try:
             import urllib.request
@@ -122,6 +124,19 @@ class OllamaClient:
             self.host = cached.get("host")
             self.method = cached.get("method")
             logger.info(f"Cache de conexion cargado: {self.model}@{self.host}")
+            # IMPORTANTE: Verificar que el modelo cacheado siga instalado
+            available_check = self._fetch_available_models(refresh=True)
+            if self.model and self.model not in available_check:
+                logger.warning(f"Modelo cacheado '{self.model}' ya no esta instalado. Reseteando cache.")
+                self.model = None
+                self.host = None
+                self.method = None
+                # Borrar cache invalido
+                try:
+                    if os.path.exists(CONNECTION_CACHE_FILE):
+                        os.remove(CONNECTION_CACHE_FILE)
+                except Exception:
+                    pass
 
         available = self._fetch_available_models()
         if not available:
@@ -132,24 +147,44 @@ class OllamaClient:
             self._detected = True
             return self.model
 
-        # Buscar el mejor modelo en orden de preferencia
+        # Buscar el mejor modelo en orden de preferencia (match EXACTO primero)
         for preferred in PREFERRED_MODELS:
+            # 1. Match exacto: "qwen3:4b" == "qwen3:4b"
             for avail in available:
-                if preferred in avail or avail.startswith(preferred.split(":")[0]):
+                if avail == preferred or avail.startswith(preferred + ":"):
                     self.model = avail
-                    # El fallback es el segundo mejor
+                    break
+            if not self.model:
+                # 2. Match parcial: modelo base coincide ("qwen3" en "qwen3:30b-a3b")
+                #    PERO solo si no hay ya un match exacto de otro preferred
+                preferred_base = preferred.split(":")[0]
+                for avail in available:
+                    if avail.split(":")[0] == preferred_base:
+                        self.model = avail
+                        break
+            if self.model:
+                # El fallback es el segundo mejor
+                for fb in PREFERRED_MODELS:
+                    if fb != preferred:
+                        for avail2 in available:
+                            if avail2 == fb or avail2.startswith(fb + ":"):
+                                self.fallback_model = avail2
+                                break
+                        if self.fallback_model:
+                            break
+                if not self.fallback_model:
+                    # Buscar fallback por modelo base
                     for fb in PREFERRED_MODELS:
                         if fb != preferred:
+                            fb_base = fb.split(":")[0]
                             for avail2 in available:
-                                if fb in avail2 or avail2.startswith(fb.split(":")[0]):
+                                if avail2.split(":")[0] == fb_base:
                                     self.fallback_model = avail2
                                     break
                             if self.fallback_model:
                                 break
-                    if not self.fallback_model:
-                        self.fallback_model = available[0] if len(available) > 1 else self.model
-                    break
-            if self.model:
+                if not self.fallback_model:
+                    self.fallback_model = available[0] if len(available) > 1 else self.model
                 break
 
         if not self.model:
@@ -202,6 +237,52 @@ class OllamaClient:
                     logger.info(f"Modelo de embeddings detectado: {candidate}")
                     return
         self.embed_model = "nomic-embed-text"  # Default
+
+    # ----------------------------------------------------------
+    # DETECCION DE GPU
+    # ----------------------------------------------------------
+
+    def check_gpu_status(self):
+        """
+        Verifica si Ollama esta usando la GPU.
+        Retorna: True (GPU), False (CPU), None (no se pudo determinar)
+        """
+        if self._gpu_status is not None:
+            return self._gpu_status
+
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["ollama", "ps"],
+                capture_output=True, text=True, timeout=5
+            )
+            output = result.stdout
+            if "100% CPU" in output:
+                self._gpu_status = False
+                logger.warning("GPU NO detectada por Ollama - corriendo en CPU (LENTO)")
+            elif "GPU" in output:
+                self._gpu_status = True
+                logger.info("Ollama esta usando GPU")
+            else:
+                # No hay modelo cargado, verificar con nvidia-smi
+                try:
+                    nvidia = subprocess.run(
+                        ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    if nvidia.returncode == 0 and nvidia.stdout.strip():
+                        logger.info(f"GPU NVIDIA detectada: {nvidia.stdout.strip()}")
+                        # GPU existe pero no sabemos si Ollama la usa
+                        self._gpu_status = None
+                    else:
+                        self._gpu_status = False
+                except Exception:
+                    self._gpu_status = False
+        except Exception as e:
+            logger.debug(f"No se pudo verificar GPU: {e}")
+            self._gpu_status = None
+
+        return self._gpu_status
 
     # ----------------------------------------------------------
     # CACHE PERSISTENTE DE CONEXION
@@ -462,8 +543,6 @@ class OllamaClient:
             logger.debug(f"Client streaming setup failed: {e}")
         return None
 
-
-
     # ----------------------------------------------------------
     # METODOS INTERNOS
     # ----------------------------------------------------------
@@ -549,7 +628,7 @@ class OllamaClient:
                 pass
 
     # ----------------------------------------------------------
-    # EMBEDDINGS
+    # EMBEDDINGS (con cache optimizado)
     # ----------------------------------------------------------
 
     def get_embedding(self, text):

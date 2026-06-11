@@ -3,7 +3,7 @@
 AGENTE LOCAL AUTONOMO v14 - Entry Point Streamlit
 =============================================================
 Arquitectura modular: importa los modulos que necesita.
-Streaming de respuestas + confirmacion de comandos + metacognicion.
+Streaming de respuestas + metacognicion + diagnostico GPU.
 Para ejecutar: streamlit run app.py
 =============================================================
 """
@@ -27,6 +27,13 @@ def init_session():
         st.session_state.pending_dangerous_cmd = None
         st.session_state.last_meta_status = None
         ollama.detect_models()
+
+        # Verificar GPU al inicio
+        gpu = ollama.check_gpu_status()
+        if gpu is False:
+            st.session_state.gpu_warning = True
+        else:
+            st.session_state.gpu_warning = False
 
 init_session()
 
@@ -96,6 +103,12 @@ def main():
         background: #3a2a1a; color: #ffaa00;
     }
 
+    .gpu-warning {
+        background: linear-gradient(135deg, #3a2a1a, #5a3a1a);
+        color: #ffaa00; padding: 12px; border-radius: 8px;
+        border: 1px solid #ff8800; margin: 8px 0; font-size: 13px;
+    }
+
     [data-testid="stChatMessage"] { border-radius: 12px; padding: 12px 16px; margin: 4px 0; }
 
     .stButton > button { border-radius: 8px; transition: all 0.2s; }
@@ -110,13 +123,33 @@ def main():
     # Titulo
     st.markdown('<h1 class="main-title">Agente Autonomo v14</h1>', unsafe_allow_html=True)
 
-    # Info del modelo
+    # Info del modelo + GPU
     model_info = f"Modelo: {ollama.model or 'detectando...'}"
     if ollama.chat_model and ollama.chat_model != ollama.model:
         model_info += f" | Chat: {ollama.chat_model}"
     if ollama.code_model and ollama.code_model != ollama.model:
         model_info += f" | Code: {ollama.code_model}"
+
+    # Indicador GPU
+    gpu_status = ollama._gpu_status
+    if gpu_status is True:
+        model_info += " | GPU: ACTIVA"
+    elif gpu_status is False:
+        model_info += " | GPU: NO DETECTADA (CPU lento)"
+    else:
+        model_info += " | GPU: desconocido"
+
     st.markdown(f'<p class="main-subtitle">{model_info}</p>', unsafe_allow_html=True)
+
+    # Advertencia GPU
+    if st.session_state.get("gpu_warning"):
+        st.markdown("""
+        <div class="gpu-warning">
+            <strong>GPU NO detectada por Ollama</strong> - El agente corre en CPU, lo cual es MUY lento.<br>
+            Ejecuta <code>python check_gpu.py</code> para diagnosticar y solucionar.<br>
+            Solucion rapida: Panel de Control NVIDIA > "Alto rendimiento" para ollama.exe
+        </div>
+        """, unsafe_allow_html=True)
 
     # Chat
     if "messages" not in st.session_state:
@@ -343,16 +376,26 @@ def _render_sidebar():
             st.metric("Correcciones", stats.get("corrections", 0))
             st.metric("Cache Embed", stats.get("embed_cache_size", 0))
 
-        # Tipo de vector store
-        vs_type = stats.get("long_term_type", "?")
-        st.metric("Vector Store", vs_type)
-
         # Modelo activo
         st.subheader("Modelo")
         st.text(f"Principal: {ollama.model or '?'}")
         st.text(f"Chat: {ollama.chat_model or '?'}")
         st.text(f"Code: {ollama.code_model or '?'}")
         st.text(f"Embed: {ollama.embed_model or '?'}")
+
+        # Estado GPU
+        st.subheader("GPU")
+        gpu = ollama._gpu_status
+        if gpu is True:
+            st.success("GPU ACTIVA - Inferencia rapida")
+        elif gpu is False:
+            st.error("GPU NO detectada - CPU lento!")
+            st.caption("Ejecuta: python check_gpu.py")
+        else:
+            st.warning("GPU desconocida")
+            if st.button("Verificar GPU"):
+                gpu = ollama.check_gpu_status()
+                st.rerun()
 
         # Estado metacognitivo de la ultima consulta
         meta = st.session_state.get("last_meta_status")
