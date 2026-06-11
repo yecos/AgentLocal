@@ -744,6 +744,10 @@ class AgentBrain:
 
     def _execute_tool(self, action: str, params: dict) -> str:
         """Ejecuta una herramienta por nombre."""
+        # Accion especial: conversar (no es una herramienta real)
+        if action == "conversar":
+            return self._conversar(params.get("mensaje", ""))
+
         if action in TOOL_FUNCTIONS:
             try:
                 return TOOL_FUNCTIONS[action](**params)
@@ -753,6 +757,72 @@ class AgentBrain:
             return ejecutar_comando(params.get("comando", ""))
         else:
             return f"Herramienta no encontrada: {action}"
+
+    def _conversar(self, mensaje: str) -> str:
+        """Responde al usuario de forma conversacional."""
+        msg = mensaje.lower().strip()
+
+        # Respuestas predefinidas rapidas (sin necesidad de LLM)
+        saludos = ["hola", "hi", "hello", "hey", "buenos dias", "buenas", "que tal", "que onda", "saludos"]
+        if any(msg.startswith(s) for s in saludos):
+            return ("Hola! Soy tu agente autonomo local. Puedo hacer cosas como:\n"
+                    "- Clonar y analizar repos de GitHub\n"
+                    "- Instalar dependencias\n"
+                    "- Abrir aplicaciones\n"
+                    "- Leer y escribir archivos\n"
+                    "- Ejecutar comandos en la terminal\n"
+                    "- Consultar IA cloud si necesito ayuda\n\n"
+                    "Dime que necesitas y yo me encargo!")
+
+        if any(w in msg for w in ["como estas", "como te va", "como andas", "todo bien"]):
+            return ("Estoy listo para trabajar! Tengo acceso a tu terminal y puedo ejecutar comandos. "
+                    "Solo dime que necesitas.")
+
+        if any(w in msg for w in ["quien eres", "que eres", "que haces"]):
+            return ("Soy un agente autonomo local que PIENSA antes de actuar.\n"
+                    "- Analizo tu solicitud y creo un plan\n"
+                    "- Ejecuto paso a paso y evaluo los resultados\n"
+                    "- Si algo falla, busco alternativas\n"
+                    "- Si me atasco, consulto IA cloud\n"
+                    "- Aprendo de mis errores\n\n"
+                    "Todo corre localmente en tu PC con Ollama (qwen2.5:14b).")
+
+        if any(w in msg for w in ["gracias", "thanks", "genial", "perfecto"]):
+            return "De nada! Estoy aqui para lo que necesites. 😊"
+
+        if any(w in msg for w in ["ayuda", "help", "que puedes hacer"]):
+            return ("Puedo hacer muchas cosas:\n\n"
+                    "📦 **Repositorios:**\n"
+                    "- 'clona https://github.com/usuario/repo'\n"
+                    "- 'analiza signalTrade'\n"
+                    "- 'instalar dependencias signalTrade'\n\n"
+                    "🖥️ **Aplicaciones:**\n"
+                    "- 'abre chrome'\n"
+                    "- 'abre vscode'\n"
+                    "- 'abre notepad'\n\n"
+                    "📁 **Archivos:**\n"
+                    "- 'leer README.md de signalTrade'\n"
+                    "- 'listar archivos'\n\n"
+                    "⚙️ **Terminal:**\n"
+                    "- 'ejecuta git status'\n"
+                    "- 'ejecuta npm run dev'\n\n"
+                    "🧠 **Lo especial:** Yo PIENSO antes de actuar y busco soluciones si algo falla.")
+
+        # Si no es un patron conocido, intentar con el LLM
+        respuesta_llm = self._ask_llm([
+            {"role": "system", "content": "Eres un asistente amigable que habla español. Responde de forma concisa."},
+            {"role": "user", "content": mensaje}
+        ])
+        if respuesta_llm:
+            return respuesta_llm
+
+        # Si el LLM tampoco responde (Ollama caido)
+        return ("No puedo pensar bien ahora porque Ollama no esta corriendo. "
+                "Pero puedo ejecutar acciones! Prueba con:\n"
+                "- 'clona https://github.com/...'\n"
+                "- 'abre chrome'\n"
+                "- 'analiza signalTrade'\n"
+                "Para que piense, ejecuta 'ollama serve' en otra terminal.")
 
     def _try_alternative(self, alternative: str, original_action: str, params: dict) -> str:
         """Intenta una solucion alternativa cuando algo falla."""
@@ -782,9 +852,36 @@ class AgentBrain:
 
     def _fallback_plan(self, user_message: str) -> dict:
         """Plan de emergencia cuando el LLM no responde."""
-        msg = user_message.lower()
+        msg = user_message.lower().strip()
 
-        # Deteccion rapida de intenciones comunes
+        # === PRIMERO: Detectar si es CONVERSACION (saludos, preguntas, etc.) ===
+        conversacion_patterns = [
+            r'^(hola|hi|hello|hey|buenos dias|buenas|que tal|que onda|saludos)',
+            r'^(como estas|como te va|como andas|todo bien|que haces)',
+            r'^(gracias|thanks|genial|perfecto|ok|vale|bien|excelente)',
+            r'^(quien eres|que eres|que haces|para que sirves|que puedes hacer)',
+            r'^(ayuda|help|que puedes hacer|como funcionas)',
+            r'^(si|no|ok|vale|bien|ahora|ya)',
+        ]
+        for pattern in conversacion_patterns:
+            if re.match(pattern, msg):
+                return {
+                    "analisis": "El usuario esta conversando",
+                    "plan": [{"paso": 1, "accion": "conversar", "params": {"mensaje": user_message}, "razon": "Responder al usuario"}],
+                    "riesgos": [],
+                    "siguiente_paso_sugerido": ""
+                }
+
+        # Si es solo "hola?" o algo corto sin intencion de accion
+        if len(msg.split()) <= 2 and not any(w in msg for w in ["clona", "abre", "instal", "ejecuta", "analiz", "leer", "listar"]):
+            return {
+                "analisis": "El usuario esta conversando o preguntando algo simple",
+                "plan": [{"paso": 1, "accion": "conversar", "params": {"mensaje": user_message}, "razon": "Responder al usuario"}],
+                "riesgos": [],
+                "siguiente_paso_sugerido": ""
+            }
+
+        # === SEGUNDO: Deteccion rapida de intenciones de accion ===
         github_urls = re.findall(r'https?://github\.com/[\w\-]+/[\w\-\.]+', user_message, re.IGNORECASE)
         if github_urls:
             url = github_urls[0].rstrip("/")
@@ -800,8 +897,8 @@ class AgentBrain:
                 "siguiente_paso_sugerido": "Instalar dependencias si necesita"
             }
 
-        if any(w in msg for w in ["abre", "abrir", "open"]):
-            app_match = re.search(r'(?:abre|abrir|open)\s+(.+)', msg, re.IGNORECASE)
+        if any(w in msg for w in ["abre", "abrir", "open", "inicia", "lanza"]):
+            app_match = re.search(r'(?:abre|abrir|open|inicia|lanza)\s+(.+)', msg, re.IGNORECASE)
             app = app_match.group(1).strip() if app_match else ""
             if app:
                 return {
@@ -811,7 +908,7 @@ class AgentBrain:
                     "siguiente_paso_sugerido": ""
                 }
 
-        if any(w in msg for w in ["instal", "dependencias"]):
+        if any(w in msg for w in ["instal", "dependencias", "npm install"]):
             for d in os.listdir(REPOS_DIR):
                 if d.lower() in msg:
                     return {
@@ -821,14 +918,42 @@ class AgentBrain:
                         "siguiente_paso_sugerido": "Ejecutar el proyecto"
                     }
 
-        # Plan generico: investigar primero
+        if any(w in msg for w in ["analiz", "revis", "examin"]):
+            for d in os.listdir(REPOS_DIR):
+                if d.lower() in msg:
+                    return {
+                        "analisis": f"Analizar proyecto {d}",
+                        "plan": [{"paso": 1, "accion": "analizar_proyecto", "params": {"ruta": os.path.join(REPOS_DIR, d)}, "razon": "Analizar estructura"}],
+                        "riesgos": [],
+                        "siguiente_paso_sugerido": ""
+                    }
+
+        if any(w in msg for w in ["leer", "mostrar", "ver archivo"]):
+            file_match = re.search(r'[\w\-]+\.\w+', user_message)
+            if file_match:
+                return {
+                    "analisis": f"Leer archivo",
+                    "plan": [{"paso": 1, "accion": "leer_archivo", "params": {"ruta": file_match.group(0)}, "razon": "Leer archivo solicitado"}],
+                    "riesgos": [],
+                    "siguiente_paso_sugerido": ""
+                }
+
+        if any(w in msg for w in ["ejecuta", "correr", "run "]):
+            cmd_match = re.search(r'(?:ejecuta|correr|run)\s+(.+)', msg, re.IGNORECASE)
+            if cmd_match:
+                return {
+                    "analisis": f"Ejecutar comando",
+                    "plan": [{"paso": 1, "accion": "ejecutar_comando", "params": {"comando": cmd_match.group(1).strip()}, "razon": "Ejecutar comando del usuario"}],
+                    "riesgos": [],
+                    "siguiente_paso_sugerido": ""
+                }
+
+        # === Si no reconoce nada: conversar (NO listar archivos) ===
         return {
-            "analisis": "Necesito investigar antes de actuar",
-            "plan": [
-                {"paso": 1, "accion": "listar_archivos", "params": {"ruta": REPOS_DIR}, "razon": "Ver que hay disponible"},
-            ],
+            "analisis": "El usuario dice algo que no es una accion clara",
+            "plan": [{"paso": 1, "accion": "conversar", "params": {"mensaje": user_message}, "razon": "Responder al usuario"}],
             "riesgos": [],
-            "siguiente_paso_sugerido": "Analizar lo que se encuentre"
+            "siguiente_paso_sugerido": ""
         }
 
     def _get_repos(self) -> list:
@@ -867,7 +992,11 @@ def procesar_mensaje(user_message: str) -> tuple:
         evaluation = r.get("evaluation", {})
 
         if evaluation.get("exitoso", True):
-            respuesta += f"✅ **Paso {i}: {action}** — {reason}\n```\n{result}\n```\n\n"
+            # Conversacion: mostrar directamente sin caja de codigo
+            if action == "conversar":
+                respuesta += f"{result}\n\n"
+            else:
+                respuesta += f"✅ **Paso {i}: {action}** — {reason}\n```\n{result}\n```\n\n"
         else:
             respuesta += f"❌ **Paso {i}: {action}** — {reason}\n```\n{result}\n```\n"
             if evaluation.get("solucion_alternativa"):
