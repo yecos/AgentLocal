@@ -49,3 +49,21 @@ Work Log:
 Stage Summary:
 - v13 completa con 15 herramientas, todas consistentes
 - Sin errores de sintaxis, listo para deploy
+
+---
+Task ID: 4
+Agent: Main Agent
+Task: Fase 2 - Mejorar Triple Memoria (embedding cache, persistencia, contexto inteligente)
+
+Work Log:
+- _get_embedding: cache global con FIFO, soporte para multiples modelos de embedding (nomic-embed-text, mxbai-embed-large, all-minilm)
+- VectorStore: cache de vectores en memoria (_vectors_cache), carga lazy, dirty flag para escritura optimizada, cleanup de entradas viejas y vectores huerfanos
+- TripleMemory: MAX_CONTEXT_CHARS budget (3000 chars), contexto inteligente con prioridades (trabajo > correcciones > largo plazo > resumen), auto-save cada 5 mensajes
+- TripleMemory: save_session/load_session con TTL de 24 horas, clear_session completo
+- TripleMemory: _generate_llm_summary para conversaciones largas (>30 mensajes)
+- UI: embed_cache_size en sidebar, memory.clear_session() al limpiar historial
+- Verificado: 2240 lineas, 15 herramientas consistentes, sin errores de sintaxis
+
+Stage Summary:
+- Fase 2 al ~80%: VectorStore mejorado con cache, TripleMemory con persistencia y contexto inteligente
+- Falta: Qdrant (opcional, el VectorStore casero funciona bien), knowledge graph

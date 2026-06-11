@@ -977,26 +977,47 @@ learning = LearningSystem()
 
 # --- Embeddings via Ollama (sin dependencias extras) ---
 
+# Cache global de embeddings para evitar llamadas repetidas a Ollama
+_EMBED_CACHE = {}
+_EMBED_CACHE_MAX = 200  # Maximo de entradas en cache
+
 def _get_embedding(text: str) -> list:
-    """Obtiene el embedding de un texto usando Ollama. Sin dependencias extras."""
+    """Obtiene el embedding de un texto usando Ollama. Con cache para velocidad."""
+    global _EMBED_CACHE
+
+    # Cache hit
+    cache_key = hashlib.md5(text[:500].encode()).hexdigest()[:16]
+    if cache_key in _EMBED_CACHE:
+        return _EMBED_CACHE[cache_key]
+
     try:
         import urllib.request
-        _detect_best_model()
-        # Usar el modelo de embeddings de Ollama (nomic-embed-text viene con Ollama)
-        embed_model = "nomic-embed-text"
-        data = json.dumps({
-            "model": embed_model,
-            "prompt": text[:2000]  # Limitar texto
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            "http://localhost:11434/api/embeddings",
-            data=data, headers={"Content-Type": "application/json"}
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-            return result.get("embedding", [])
+        # Intentar modelos de embeddings en orden de preferencia
+        embed_models = ["nomic-embed-text", "mxbai-embed-large", "all-minilm"]
+        for embed_model in embed_models:
+            data = json.dumps({
+                "model": embed_model,
+                "prompt": text[:2000]  # Limitar texto
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                "http://localhost:11434/api/embeddings",
+                data=data, headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+                embedding = result.get("embedding", [])
+                if embedding:
+                    # Guardar en cache
+                    if len(_EMBED_CACHE) >= _EMBED_CACHE_MAX:
+                        # Eliminar las entradas mas viejas (FIFO simple)
+                        oldest_keys = list(_EMBED_CACHE.keys())[:_EMBED_CACHE_MAX // 2]
+                        for k in oldest_keys:
+                            del _EMBED_CACHE[k]
+                    _EMBED_CACHE[cache_key] = embedding
+                    return embedding
     except Exception:
-        return []
+        pass
+    return []
 
 
 def _cosine_similarity(vec1: list, vec2: list) -> float:
@@ -1016,6 +1037,8 @@ class VectorStore:
     Vector store ligero usando embeddings de Ollama.
     Sin Qdrant, sin ChromaDB, sin dependencias extras.
     Persiste en JSON + archivo de vectores.
+
+    v13: Cache de vectores en memoria, carga lazy, TTL para entradas viejas.
     """
 
     def __init__(self, store_dir: str = None):
@@ -1024,7 +1047,8 @@ class VectorStore:
         self.index_file = os.path.join(self.store_dir, "index.json")
         self.vectors_file = os.path.join(self.store_dir, "vectors.json")
         self.index = self._load_index()
-        self._embed_cache = {}  # Cache de embeddings
+        self._vectors_cache = None  # Cache en memoria de vectores
+        self._dirty = False  # Marca si hay cambios sin guardar
 
     def _load_index(self) -> list:
         """Carga el indice de entradas."""
@@ -1044,23 +1068,34 @@ class VectorStore:
         except:
             pass
 
-    def _load_vectors(self) -> dict:
-        """Carga los vectores almacenados."""
+    def _get_vectors(self) -> dict:
+        """Carga los vectores con cache en memoria."""
+        if self._vectors_cache is not None:
+            return self._vectors_cache
         try:
             if os.path.exists(self.vectors_file):
                 with open(self.vectors_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    self._vectors_cache = json.load(f)
+                    return self._vectors_cache
         except:
             pass
-        return {}
+        self._vectors_cache = {}
+        return self._vectors_cache
 
     def _save_vectors(self, vectors: dict):
-        """Guarda los vectores."""
+        """Guarda los vectores y actualiza cache."""
         try:
             with open(self.vectors_file, "w", encoding="utf-8") as f:
                 json.dump(vectors, f)
+            self._vectors_cache = vectors  # Actualizar cache
         except:
             pass
+
+    def _flush(self):
+        """Guarda cambios pendientes si hay."""
+        if self._dirty:
+            self._save_index()
+            self._dirty = False
 
     def add(self, text: str, metadata: dict = None, entry_id: str = None) -> str:
         """Agrega un texto al vector store con su embedding."""
@@ -1083,11 +1118,12 @@ class VectorStore:
                 "has_vector": False,
                 "created": datetime.now().isoformat()
             })
-            self._save_index()
+            self._dirty = True
+            self._flush()
             return entry_id
 
         # Guardar vector por separado
-        vectors = self._load_vectors()
+        vectors = self._get_vectors()
         vectors[entry_id] = embedding
         self._save_vectors(vectors)
 
@@ -1098,7 +1134,8 @@ class VectorStore:
             "has_vector": True,
             "created": datetime.now().isoformat()
         })
-        self._save_index()
+        self._dirty = True
+        self._flush()
         return entry_id
 
     def search(self, query: str, limit: int = 5, min_similarity: float = 0.3) -> list:
@@ -1110,14 +1147,20 @@ class VectorStore:
         if not query_embedding:
             # Fallback: busqueda por texto si no hay embeddings
             query_lower = query.lower()
+            query_words = [w for w in query_lower.split() if len(w) > 3]
             results = []
             for entry in self.index:
-                if query_lower in entry["text"].lower():
-                    results.append({**entry, "score": 0.5})
+                text_lower = entry["text"].lower()
+                # Score basado en cuantas palabras del query estan en el texto
+                matches = sum(1 for w in query_words if w in text_lower)
+                if matches > 0:
+                    score = matches / max(len(query_words), 1)
+                    results.append({**entry, "score": round(score, 3)})
+            results.sort(key=lambda x: x["score"], reverse=True)
             return results[:limit]
 
         # Busqueda semantica
-        vectors = self._load_vectors()
+        vectors = self._get_vectors()
         scored = []
         for entry in self.index:
             if not entry.get("has_vector") or entry["id"] not in vectors:
@@ -1133,14 +1176,42 @@ class VectorStore:
     def count(self) -> int:
         return len(self.index)
 
+    def cleanup(self, max_entries: int = 1000):
+        """Limpia entradas viejas si hay demasiadas."""
+        if len(self.index) <= max_entries:
+            return
+        # Mantener las mas recientes
+        self.index.sort(key=lambda x: x.get("created", ""), reverse=True)
+        removed = self.index[max_entries:]
+        self.index = self.index[:max_entries]
+        # Limpiar vectores huerfanos
+        vectors = self._get_vectors()
+        valid_ids = {e["id"] for e in self.index}
+        orphan_ids = [vid for vid in vectors if vid not in valid_ids]
+        for oid in orphan_ids:
+            del vectors[oid]
+        if orphan_ids:
+            self._save_vectors(vectors)
+        self._dirty = True
+        self._flush()
+
 
 class TripleMemory:
     """
-    Sistema de Triple Memoria:
+    Sistema de Triple Memoria v13:
     1. Corto Plazo: Ultimos mensajes de conversacion
     2. Largo Plazo: Conocimiento con busqueda semantica (VectorStore)
     3. Trabajo: Scratchpad para la tarea actual
+
+    Mejoras v13:
+    - Persistencia de sesion (save/load)
+    - Resumen LLM cuando la conversacion es larga
+    - Contexto inteligente: solo inyecta lo relevante, con budget de tokens
+    - Auto-limpieza de memoria vieja
     """
+
+    # Budget de tokens para contexto (aproximado, 1 token ~ 4 chars)
+    MAX_CONTEXT_CHARS = 3000
 
     def __init__(self):
         self.short_term = []  # Memoria a corto plazo (conversacion)
@@ -1154,6 +1225,10 @@ class TripleMemory:
             "last_success": "",
         }
         self._summary_cache = None
+        self._summary_last_update = None
+        # Persistencia
+        self._session_file = os.path.join(LEARN_DIR, "session.json")
+        self._auto_save_counter = 0
 
     def add_conversation(self, role: str, content: str):
         """Agrega un mensaje a la memoria a corto plazo."""
@@ -1174,6 +1249,12 @@ class TripleMemory:
                         metadata={"type": "conversation", "role": msg["role"]}
                     )
             self.short_term = self.short_term[-(MAX_CONVERSATION_MEMORY * 2):]
+
+        # Auto-save cada 5 mensajes
+        self._auto_save_counter += 1
+        if self._auto_save_counter >= 5:
+            self._auto_save_counter = 0
+            self.save_session()
 
     def remember(self, text: str, metadata: dict = None):
         """Guarda algo en la memoria a largo plazo."""
@@ -1213,62 +1294,162 @@ class TripleMemory:
         """
         Construye contexto enriquecido para una query.
         Combina las 3 memorias en un texto coherente.
+        Respetando budget de tokens para no saturar el prompt.
         """
         context_parts = []
+        budget_remaining = self.MAX_CONTEXT_CHARS
 
-        # 1. Memoria de Trabajo (si hay tarea activa)
+        # 1. Memoria de Trabajo (si hay tarea activa) - max 800 chars
         if self.working["current_task"]:
-            context_parts.append(f"TAREA ACTUAL: {self.working['current_task']}")
+            work_context = f"TAREA ACTUAL: {self.working['current_task']}"
             if self.working["task_steps"]:
                 steps_text = "\n".join([
                     f"  - {s['step']}: {s['result']}"
                     for s in self.working["task_steps"][-5:]
                 ])
-                context_parts.append(f"PASOS REALIZADOS:\n{steps_text}")
+                work_context += f"\nPASOS REALIZADOS:\n{steps_text}"
             if self.working["last_error"]:
-                context_parts.append(f"ULTIMO ERROR: {self.working['last_error']}")
+                work_context += f"\nULTIMO ERROR: {self.working['last_error']}"
             if self.working["notes"]:
-                context_parts.append(f"NOTAS: {'; '.join(self.working['notes'][-3:])}")
+                work_context += f"\nNOTAS: {'; '.join(self.working['notes'][-3:])}"
 
-        # 2. Memoria a Largo Plazo (busqueda semantica)
-        recall_results = self.recall(query, limit=3)
-        if recall_results:
-            knowledge_text = "\n".join([
-                f"  - [{r.get('score', 0):.2f}] {r['text'][:200]}"
-                for r in recall_results
-            ])
-            context_parts.append(f"CONOCIMIENTO RELEVANTE:\n{knowledge_text}")
+            if len(work_context) <= 800:
+                context_parts.append(work_context)
+                budget_remaining -= len(work_context)
+            else:
+                context_parts.append(work_context[:800])
+                budget_remaining -= 800
 
-        # 3. Correcciones aprendidas
+        # 2. Correcciones aprendidas - max 400 chars
         corrections = learning.get_corrections_for(query)
-        if corrections:
+        if corrections and budget_remaining > 200:
             corr_text = "\n".join([
                 f"  - NO hagas '{c['wrong_action']}'. Haz '{c['correct_action']}'"
                 for c in corrections[-3:]
             ])
-            context_parts.append(f"CORRECCIONES:\n{corr_text}")
+            corr_full = f"CORRECCIONES:\n{corr_text}"
+            if len(corr_full) <= 400:
+                context_parts.append(corr_full)
+                budget_remaining -= len(corr_full)
+            else:
+                context_parts.append(corr_full[:400])
+                budget_remaining -= 400
+
+        # 3. Memoria a Largo Plazo (busqueda semantica) - budget restante
+        if budget_remaining > 200:
+            recall_results = self.recall(query, limit=3)
+            if recall_results:
+                knowledge_text = "\n".join([
+                    f"  - [{r.get('score', 0):.2f}] {r['text'][:150]}"
+                    for r in recall_results
+                ])
+                knowledge_full = f"CONOCIMIENTO RELEVANTE:\n{knowledge_text}"
+                if len(knowledge_full) <= budget_remaining:
+                    context_parts.append(knowledge_full)
+                else:
+                    context_parts.append(knowledge_full[:budget_remaining])
 
         # 4. Resumen de conversacion si es larga
         if len(self.short_term) > 10:
             summary = self._get_conversation_summary()
             if summary:
-                context_parts.append(f"RESUMEN CONVERSACION: {summary}")
+                # El resumen es compacto, agregar si hay espacio
+                summary_text = f"RESUMEN: {summary}"
+                if len(summary_text) <= 300:
+                    context_parts.append(summary_text)
 
         return "\n\n".join(context_parts) if context_parts else ""
 
     def _get_conversation_summary(self) -> str:
         """Genera un resumen de la conversacion si es larga."""
-        if self._summary_cache and len(self.short_term) < 20:
-            return self._summary_cache
+        if self._summary_cache and self._summary_last_update:
+            # Refrescar resumen cada 5 mensajes nuevos
+            msgs_since = len(self.short_term) - self._summary_last_update
+            if msgs_since < 5:
+                return self._summary_cache
 
-        # Resumen simple: ultimos temas tratados
-        user_msgs = [m["content"][:100] for m in self.short_term if m["role"] == "user"]
+        # Resumen simple: temas recientes
+        user_msgs = [m["content"][:80] for m in self.short_term if m["role"] == "user"]
         if not user_msgs:
             return ""
 
         summary = "Temas recientes: " + "; ".join(user_msgs[-5:])
         self._summary_cache = summary
+        self._summary_last_update = len(self.short_term)
         return summary
+
+    def _generate_llm_summary(self) -> str:
+        """Genera un resumen de la conversacion usando el LLM.
+        Solo se llama cuando la conversacion es muy larga (>30 mensajes).
+        """
+        if len(self.short_term) < 30:
+            return self._get_conversation_summary()
+
+        # Construir texto de la conversacion para resumir
+        conv_text = ""
+        for msg in self.short_term[-20:]:
+            role = "Usuario" if msg["role"] == "user" else "Asistente"
+            conv_text += f"{role}: {msg['content'][:100]}\n"
+
+        summary_prompt = [
+            {"role": "system", "content": "Resume esta conversacion en 2-3 lineas. Solo los temas principales."},
+            {"role": "user", "content": conv_text[:1500]}
+        ]
+
+        summary = _llm_generate(summary_prompt)
+        if summary and len(summary) > 10:
+            self._summary_cache = summary[:300]
+            self._summary_last_update = len(self.short_term)
+            return self._summary_cache
+        return self._get_conversation_summary()
+
+    def save_session(self):
+        """Guarda la sesion actual para persistencia."""
+        try:
+            session_data = {
+                "short_term": self.short_term[-MAX_CONVERSATION_MEMORY:],
+                "working": self.working,
+                "saved_at": datetime.now().isoformat()
+            }
+            with open(self._session_file, "w", encoding="utf-8") as f:
+                json.dump(session_data, f, ensure_ascii=False, indent=2)
+        except:
+            pass
+
+    def load_session(self):
+        """Carga la sesion anterior si existe."""
+        try:
+            if os.path.exists(self._session_file):
+                with open(self._session_file, "r", encoding="utf-8") as f:
+                    session_data = json.load(f)
+                # Solo cargar si es reciente (< 24 horas)
+                saved_at = session_data.get("saved_at", "")
+                if saved_at:
+                    saved_time = datetime.fromisoformat(saved_at)
+                    hours_ago = (datetime.now() - saved_time).total_seconds() / 3600
+                    if hours_ago < 24:
+                        self.short_term = session_data.get("short_term", [])
+                        self.working = session_data.get("working", self.working)
+                        return True
+                # Sesion vieja, no cargar conversacion pero si working memory
+                self.working = session_data.get("working", self.working)
+        except:
+            pass
+        return False
+
+    def clear_session(self):
+        """Limpia la sesion actual."""
+        self.short_term = []
+        self.working = {
+            "current_task": "",
+            "task_steps": [],
+            "notes": [],
+            "context_files": [],
+            "last_error": "",
+            "last_success": "",
+        }
+        self._summary_cache = None
+        self._summary_last_update = None
 
     def get_stats(self) -> dict:
         return {
@@ -1277,10 +1458,13 @@ class TripleMemory:
             "working_task": bool(self.working["current_task"]),
             "working_steps": len(self.working["task_steps"]),
             "corrections": len(learning.get_corrections_for("")),
+            "embed_cache_size": len(_EMBED_CACHE),
         }
 
 
 memory = TripleMemory()
+# Cargar sesion anterior al iniciar
+memory.load_session()
 
 
 # ============================================================
@@ -1966,6 +2150,10 @@ def main():
         col2.metric("Largo plazo", mem_stats["long_term_entries"])
         col3.metric("Pasos", mem_stats["working_steps"])
 
+        # Embed cache info
+        if mem_stats.get("embed_cache_size", 0) > 0:
+            st.caption(f"Embed cache: {mem_stats['embed_cache_size']} entradas")
+
         st.header("Aprendizaje")
         col1, col2 = st.columns(2)
         col1.metric("Conocimiento", stats["knowledge"])
@@ -1998,6 +2186,7 @@ def main():
             st.session_state.messages = []
             st.session_state.thinking_history = []
             agent.conversation_history = []
+            memory.clear_session()
             st.rerun()
 
         st.header("Repos")
