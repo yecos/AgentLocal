@@ -685,11 +685,59 @@ class AgentBrain:
         self.thinking_log.append(f"[{timestamp}] [{category.upper()}] {message}")
 
     def _ask_llm(self, messages: list) -> str:
-        """Consulta al LLM local (Ollama)."""
+        """Consulta al LLM local (Ollama). Prueba multiples formas de conectar."""
         try:
             import ollama
-            response = ollama.chat(model=AGENT_MODEL, messages=messages)
-            return response.get("message", {}).get("content", "")
+
+            # Metodo 1: Conexion directa (default)
+            try:
+                response = ollama.chat(model=AGENT_MODEL, messages=messages)
+                return response.get("message", {}).get("content", "")
+            except Exception:
+                pass
+
+            # Metodo 2: Cliente explicito con localhost
+            try:
+                client = ollama.Client(host='http://localhost:11434')
+                response = client.chat(model=AGENT_MODEL, messages=messages)
+                return response.get("message", {}).get("content", "")
+            except Exception:
+                pass
+
+            # Metodo 3: Cliente con 127.0.0.1
+            try:
+                client = ollama.Client(host='http://127.0.0.1:11434')
+                response = client.chat(model=AGENT_MODEL, messages=messages)
+                return response.get("message", {}).get("content", "")
+            except Exception:
+                pass
+
+            # Metodo 4: HTTP directo con urllib (sin depender de la lib ollama)
+            try:
+                import urllib.request
+                data = json.dumps({
+                    "model": AGENT_MODEL,
+                    "messages": messages,
+                    "stream": False
+                }).encode("utf-8")
+
+                req = urllib.request.Request(
+                    "http://localhost:11434/api/chat",
+                    data=data,
+                    headers={"Content-Type": "application/json"}
+                )
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    result = json.loads(resp.read().decode("utf-8"))
+                    return result.get("message", {}).get("content", "")
+            except Exception as e2:
+                self._log(f"Error HTTP directo: {e2}", "error")
+
+            self._log("Todos los metodos de conexion a Ollama fallaron", "error")
+            return ""
+
+        except ImportError:
+            self._log("Libreria ollama no instalada", "error")
+            return ""
         except Exception as e:
             self._log(f"Error LLM: {e}", "error")
             return ""
@@ -1055,6 +1103,63 @@ def main():
         st.header("⚙️ Config")
         st.write(f"**Modelo:** {AGENT_MODEL}")
         st.write(f"**Repos:** {REPOS_DIR}")
+
+        # === TEST DE CONEXION OLLAMA ===
+        st.header("🔌 Ollama Status")
+        if st.button("🔄 Test conexion Ollama", use_container_width=True):
+            # Probar conexion de 4 formas
+            results = []
+            try:
+                import ollama
+                try:
+                    r = ollama.list()
+                    st.success("✅ ollama.chat() - CONECTA")
+                    results.append("chat OK")
+                except:
+                    st.error("❌ ollama.chat() - FALLA")
+                    results.append("chat FAIL")
+
+                try:
+                    client = ollama.Client(host='http://localhost:11434')
+                    r = client.list()
+                    st.success("✅ Client(localhost:11434) - CONECTA")
+                    results.append("localhost OK")
+                except Exception as e:
+                    st.error(f"❌ Client(localhost) - FALLA: {e}")
+                    results.append("localhost FAIL")
+
+                try:
+                    client = ollama.Client(host='http://127.0.0.1:11434')
+                    r = client.list()
+                    st.success("✅ Client(127.0.0.1) - CONECTA")
+                    results.append("127.0.0.1 OK")
+                except Exception as e:
+                    st.error(f"❌ Client(127.0.0.1) - FALLA: {e}")
+                    results.append("127.0.0.1 FAIL")
+            except ImportError:
+                st.error("❌ Libreria ollama no instalada")
+
+            # Test HTTP directo
+            try:
+                import urllib.request
+                req = urllib.request.Request("http://localhost:11434/api/tags")
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    models = [m["name"] for m in data.get("models", [])]
+                    st.success(f"✅ HTTP directo - CONECTA. Modelos: {models}")
+            except Exception as e:
+                st.error(f"❌ HTTP directo - FALLA: {e}")
+
+        # Mostrar estado rapido
+        try:
+            import urllib.request
+            req = urllib.request.Request("http://localhost:11434/api/tags")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                models = [m["name"] for m in data.get("models", [])]
+                st.success(f"🟢 Ollama OK - {len(models)} modelos")
+        except:
+            st.error("🔴 Ollama NO conecta")
 
         stats = learning.get_stats()
         st.header("📊 Aprendizaje")
