@@ -1,0 +1,18 @@
+{
+  "code": 200,
+  "data": {
+    "description": "",
+    "html": "<html><head><meta name=\"color-scheme\" content=\"light dark\"></head><body><pre style=\"word-wrap: break-word; white-space: pre-wrap;\">{\n  \"name\": \"open-design\",\n  \"version\": \"0.10.0\",\n  \"private\": true,\n  \"packageManager\": \"pnpm@10.33.2\",\n  \"type\": \"module\",\n  \"description\": \"Local-first design product: detects your installed code-agent CLI, runs design skills + design systems, streams artifacts into a sandboxed preview.\",\n  \"license\": \"Apache-2.0\",\n  \"bin\": {\n    \"od\": \"./apps/daemon/bin/od.mjs\"\n  },\n  \"scripts\": {\n    \"postinstall\": \"node ./scripts/postinstall.mjs\",\n    \"tools-dev\": \"pnpm exec tools-dev\",\n    \"tools-pack\": \"pnpm exec tools-pack\",\n    \"tools-serve\": \"pnpm exec tools-serve\",\n    \"nix:update-hash\": \"node --experimental-strip-types ./scripts/update-nix-pnpm-deps-hash.ts\",\n    \"guard\": \"tsx ./scripts/guard.ts && tsx ./scripts/check-ui-p0-path-parity.ts && node --import tsx --test scripts/style-policy.test.ts scripts/product-neutrality.test.ts scripts/check-cross-app-imports.test.ts scripts/approve-fork-pr-workflows.test.ts scripts/postinstall.test.ts\",\n    \"i18n:check\": \"tsx ./scripts/i18n-check.ts\",\n    \"i18n:coverage\": \"tsx ./scripts/i18n-coverage-report.ts\",\n    \"sync:community-pets\": \"node --experimental-strip-types scripts/sync-community-pets.ts\",\n    \"bake:community-pets\": \"node --experimental-strip-types scripts/bake-community-pets.ts\",\n    \"seed:test-projects\": \"node --experimental-strip-types scripts/seed-test-projects.ts\",\n    \"seed:curated-design-skills\": \"node --experimental-strip-types scripts/seed-curated-design-skills.ts\",\n    \"backfill:failed-runs\": \"node --experimental-strip-types scripts/backfill-failed-runs-with-artifacts.ts\",\n    \"typecheck\": \"pnpm -r --workspace-concurrency=4 --if-present run typecheck && tsc -p scripts/tsconfig.json --noEmit\"\n  },\n  \"devDependencies\": {\n    \"@open-design/components\": \"workspace:*\",\n    \"@open-design/daemon\": \"workspace:*\",\n    \"@open-design/tools-dev\": \"workspace:*\",\n    \"@open-design/tools-pack\": \"workspace:*\",\n    \"@open-design/tools-serve\": \"workspace:*\",\n    \"@types/node\": \"20.19.39\",\n    \"tsx\": \"4.22.3\",\n    \"typescript\": \"5.9.3\"\n  },\n  \"engines\": {\n    \"node\": \"~24\",\n    \"pnpm\": \">=10.33.2 <11\"\n  },\n  \"pnpm\": {\n    \"overrides\": {\n      \"brace-expansion\": \"5.0.6\",\n      \"devalue\": \"5.8.1\",\n      \"fast-uri\": \"3.1.2\",\n      \"hono\": \"4.12.19\",\n      \"ip-address\": \"10.2.0\",\n      \"postcss\": \"8.5.15\",\n      \"protobufjs\": \"8.4.0\",\n      \"qs\": \"6.15.2\",\n      \"tmp\": \"0.2.7\",\n      \"yaml\": \"2.9.0\"\n    },\n    \"onlyBuiltDependencies\": [\n      \"better-sqlite3\",\n      \"core-js\",\n      \"electron\",\n      \"electron-winstaller\",\n      \"esbuild\",\n      \"protobufjs\",\n      \"sharp\"\n    ]\n  }\n}\n</pre></body></html>",
+    "title": "",
+    "url": "https://raw.githubusercontent.com/nexu-io/open-design/main/package.json",
+    "usage": {
+      "tokens": 806
+    }
+  },
+  "meta": {
+    "usage": {
+      "tokens": 806
+    }
+  },
+  "status": 20000
+}

@@ -1,0 +1,18 @@
+{
+  "code": 200,
+  "data": {
+    "description": "",
+    "html": "<html><head><meta name=\"color-scheme\" content=\"light dark\"></head><body><pre style=\"word-wrap: break-word; white-space: pre-wrap;\">{\n  \"name\": \"@open-design/tools-dev\",\n  \"version\": \"0.10.0\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"bin\": {\n    \"tools-dev\": \"./bin/tools-dev.mjs\"\n  },\n  \"scripts\": {\n    \"build\": \"node ./esbuild.config.mjs && node --experimental-strip-types ../../packages/metatool/src/cli.ts write .\",\n    \"dev\": \"tsx ./src/index.ts\",\n    \"test\": \"node --import tsx --test tests/*.test.ts\",\n    \"typecheck\": \"tsc -p tsconfig.json --noEmit\"\n  },\n  \"dependencies\": {\n    \"@open-design/platform\": \"workspace:*\",\n    \"@open-design/sidecar\": \"workspace:*\",\n    \"@open-design/sidecar-proto\": \"workspace:*\",\n    \"cac\": \"6.7.14\"\n  },\n  \"devDependencies\": {\n    \"@types/node\": \"24.12.2\",\n    \"esbuild\": \"0.28.0\",\n    \"tsx\": \"4.22.3\",\n    \"typescript\": \"6.0.3\"\n  },\n  \"engines\": {\n    \"node\": \"~24\"\n  }\n}\n</pre></body></html>",
+    "title": "",
+    "url": "https://raw.githubusercontent.com/nexu-io/open-design/main/tools/dev/package.json",
+    "usage": {
+      "tokens": 302
+    }
+  },
+  "meta": {
+    "usage": {
+      "tokens": 302
+    }
+  },
+  "status": 20000
+}

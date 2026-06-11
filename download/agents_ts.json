@@ -1,0 +1,18 @@
+{
+  "code": 200,
+  "data": {
+    "description": "",
+    "html": "<html><head><meta name=\"color-scheme\" content=\"light dark\"></head><body><pre style=\"word-wrap: break-word; white-space: pre-wrap;\">// @ts-nocheck\nexport {\n  AGENT_DEFS,\n  getAgentDef,\n  readLocalAgentProfileDefs,\n} from './runtimes/registry.js';\nexport { detectAgents, detectAgentsStream } from './runtimes/detection.js';\nexport {\n  resolveOnPath,\n  inspectAgentExecutableResolution,\n  resolveAgentExecutable,\n} from './runtimes/executables.js';\nexport { applyAgentLaunchEnv, resolveAgentLaunch } from './runtimes/launch.js';\nexport { resolveAgentBin } from './runtimes/resolution.js';\nexport { openDesignAmrTraceEnv, spawnEnvForAgent } from './runtimes/env.js';\nexport { buildLiveArtifactsMcpServersForAgent } from './runtimes/mcp.js';\nexport {\n  checkPromptArgvBudget,\n  checkWindowsCmdShimCommandLineBudget,\n  checkWindowsDirectExeCommandLineBudget,\n} from './runtimes/prompt-budget.js';\nexport {\n  rememberLiveModels,\n  isKnownModel,\n  sanitizeCustomModel,\n} from './runtimes/models.js';\n</pre></body></html>",
+    "title": "",
+    "url": "https://raw.githubusercontent.com/nexu-io/open-design/main/apps/daemon/src/agents.ts",
+    "usage": {
+      "tokens": 267
+    }
+  },
+  "meta": {
+    "usage": {
+      "tokens": 267
+    }
+  },
+  "status": 20000
+}

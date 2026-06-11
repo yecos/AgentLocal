@@ -1,0 +1,18 @@
+{
+  "code": 200,
+  "data": {
+    "description": "",
+    "html": "<html><head><meta name=\"color-scheme\" content=\"light dark\"></head><body><pre style=\"word-wrap: break-word; white-space: pre-wrap;\">24\n</pre></body></html>",
+    "title": "",
+    "url": "https://raw.githubusercontent.com/nexu-io/open-design/main/.node-version",
+    "usage": {
+      "tokens": 44
+    }
+  },
+  "meta": {
+    "usage": {
+      "tokens": 44
+    }
+  },
+  "status": 20000
+}
