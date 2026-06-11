@@ -10,6 +10,14 @@ from .codigo import generar_codigo
 from .web import buscar_web
 from .schemas import TOOL_SCHEMAS
 
+
+def analizar_imagen(ruta: str, pregunta: str = "Describe esta imagen") -> str:
+    """Analiza una imagen usando el modelo de vision del LLM."""
+    from llm import ollama
+    result = ollama.generate_with_image(pregunta, ruta)
+    return result
+
+
 TOOL_FUNCTIONS = {
     "ejecutar_comando": ejecutar_comando,
     "abrir_aplicacion": abrir_aplicacion,
@@ -26,4 +34,5 @@ TOOL_FUNCTIONS = {
     "procesos_activos": procesos_activos,
     "matar_proceso": matar_proceso,
     "buscar_web": buscar_web,
+    "analizar_imagen": analizar_imagen,
 }

@@ -74,6 +74,19 @@ class ReactAgent:
 
             if action_result[0] == "respond":
                 final_response = action_result[1]
+                # Inyectar reflexion metacognitiva si el proceso tuvo problemas
+                reflection_prompt = self.metacognition.get_final_reflection_prompt()
+                if reflection_prompt:
+                    self._log("Reflexion metacognitiva inyectada en respuesta final", "evaluation")
+                    # Re-generar con contexto de reflexion (solo si la respuesta puede mejorar)
+                    if len(final_response) < 100 and self.metacognition.error_count > 0:
+                        messages.append({"role": "assistant", "content": final_response})
+                        messages.append({"role": "user", "content": reflection_prompt + "\n\nMejora tu respuesta anterior si es incompleta."})
+                        improved = ollama.generate_chat(messages)
+                        if improved and len(improved) > len(final_response):
+                            final_response = improved
+                            self._log("Respuesta mejorada via metacognicion", "success")
+
                 reflection = self.metacognition.evaluate_result(
                     user_message, final_response, iteration + 1
                 )
@@ -194,6 +207,20 @@ class ReactAgent:
 
             # Procesar resultado de esta iteracion
             if is_final_response and not tool_calls_found:
+                # Reflexion metacognitiva para respuestas problematicas
+                reflection_prompt = self.metacognition.get_final_reflection_prompt()
+                if reflection_prompt and len(full_text) < 100 and self.metacognition.error_count > 0:
+                    self._log("Reflexion metacognitiva: reintentando respuesta mejorada", "evaluation")
+                    try:
+                        messages.append({"role": "assistant", "content": full_text})
+                        messages.append({"role": "user", "content": reflection_prompt + "\n\nDa una respuesta mas completa."})
+                        improved = ollama.generate_chat(messages)
+                        if improved and len(improved) > len(full_text):
+                            full_text = improved
+                            yield {"type": "text", "data": "\n\n[Respuesta mejorada] " + improved}
+                    except Exception:
+                        pass
+
                 # Respuesta final - terminar
                 reflection = self.metacognition.evaluate_result(
                     user_message, full_text, iteration + 1
@@ -445,33 +472,100 @@ class ReactAgent:
         return text
 
     # ----------------------------------------------------------
-    # EJECUCION DE TOOLS (multiple)
+    # EJECUCION DE TOOLS (paralelo + retry)
     # ----------------------------------------------------------
     def _execute_tool_calls(self, tool_calls, messages):
-        """Ejecuta multiples tool calls y retorna lista de resultados."""
-        results = []
+        """Ejecuta multiples tool calls (paralelo cuando es seguro) y retorna lista de resultados."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # Validar parametros de todos los tool calls primero
         for tc in tool_calls:
-            tool_name = tc["name"]
-            tool_params = tc["params"]
+            tc["params"] = self._validate_tool_params(tc["name"], tc["params"])
 
-            self._log(f"Ejecutando: {tool_name}({tool_params})", "execution")
-            tool_result = self._execute_tool(tool_name, tool_params)
-            self._log(f"Resultado: {tool_result[:150]}...", "observation")
+        # Si hay solo 1 tool, ejecutar directamente (sin overhead de threads)
+        if len(tool_calls) == 1:
+            return [self._execute_single_tool(tool_calls[0], messages)]
 
-            # Alimentar memoria de trabajo
-            self.memory.add_step(f"{tool_name}({tool_params})", tool_result[:200])
-            if "ERROR" in tool_result:
-                self.memory.set_error(f"{tool_name}: {tool_result[:100]}")
-            if "PELIGROSO" in tool_result:
-                self._log(f"Comando peligroso bloqueado: {tool_name}", "warning")
-            if len(tool_result) > 50 and "ERROR" not in tool_result:
-                self.memory.remember(
-                    f"Resultado de {tool_name}: {tool_result[:300]}",
-                    metadata={"type": "tool_result", "tool": tool_name}
-                )
+        # Si hay multiples tools, ejecutar en paralelo
+        # PERO no paralelizar si alguno es "ejecutar_comando" (puede tener side effects)
+        has_sequential = any(tc["name"] == "ejecutar_comando" for tc in tool_calls)
+        
+        if has_sequential:
+            # Ejecutar secuencialmente para evitar race conditions
+            results = []
+            for tc in tool_calls:
+                results.append(self._execute_single_tool(tc, messages))
+            return results
 
-            results.append(tool_result)
+        # Ejecucion paralela para tools de solo lectura
+        results = [None] * len(tool_calls)
+        with ThreadPoolExecutor(max_workers=min(len(tool_calls), 3)) as executor:
+            futures = {}
+            for i, tc in enumerate(tool_calls):
+                future = executor.submit(self._execute_single_tool, tc, messages)
+                futures[future] = i
+            
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    results[idx] = future.result(timeout=30)
+                except Exception as e:
+                    results[idx] = f"ERROR: {e}"
+
         return results
+
+    def _execute_single_tool(self, tc, messages, max_retries=1):
+        """Ejecuta un solo tool call con retry automatico."""
+        tool_name = tc["name"]
+        tool_params = tc["params"]
+
+        self._log(f"Ejecutando: {tool_name}({tool_params})", "execution")
+        tool_result = self._execute_tool(tool_name, tool_params)
+
+        # Retry si fallo y el tool es reintentable
+        if "ERROR" in tool_result and max_retries > 0:
+            retryable_errors = ["TIMEOUT", "ConnectionError", "empty", "vacia"]
+            if any(err in tool_result for err in retryable_errors):
+                self._log(f"Reintentando {tool_name} (error transitorio)...", "execution")
+                tool_result = self._execute_tool(tool_name, tool_params)
+
+        self._log(f"Resultado: {tool_result[:150]}...", "observation")
+
+        # Alimentar memoria de trabajo
+        self.memory.add_step(f"{tool_name}({tool_params})", tool_result[:200])
+        if "ERROR" in tool_result:
+            self.memory.set_error(f"{tool_name}: {tool_result[:100]}")
+        if "PELIGROSO" in tool_result:
+            self._log(f"Comando peligroso bloqueado: {tool_name}", "warning")
+        if len(tool_result) > 50 and "ERROR" not in tool_result:
+            self.memory.remember(
+                f"Resultado de {tool_name}: {tool_result[:300]}",
+                metadata={"type": "tool_result", "tool": tool_name}
+            )
+
+        return tool_result
+
+    def _validate_tool_params(self, tool_name, params):
+        """Valida y limpia parametros de un tool call antes de ejecutar."""
+        if not isinstance(params, dict):
+            params = {}
+        
+        # Asegurar que params tenga las claves correctas
+        clean_params = {}
+        for key, value in params.items():
+            if isinstance(key, str) and len(key) < 50:
+                # Limpiar valores string de posibles inyecciones
+                if isinstance(value, str):
+                    # No sanitizar contenido de archivos (puede tener codigo legitimo)
+                    if tool_name in ("escribir_archivo", "generar_codigo"):
+                        clean_params[key] = value
+                    else:
+                        from utils.security import sanitize_input
+                        clean_params[key] = sanitize_input(value)
+                else:
+                    clean_params[key] = value
+        
+        return clean_params
 
     def _feed_tool_results(self, tool_calls, results, messages):
         """Alimenta resultados de tools de vuelta al agente."""

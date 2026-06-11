@@ -20,6 +20,7 @@ from config import (
     SKIP_EMBED_ON_INTERACTION, logger
 )
 from memory.vectorstore import VectorStore
+from memory.chroma_store import create_vector_store
 from memory.learning import LearningSystem
 from llm import embed_cache
 
@@ -34,7 +35,14 @@ class TripleMemory:
 
     def __init__(self):
         self.short_term = []  # Memoria a corto plazo (conversacion)
-        self.long_term = VectorStore()  # Memoria a largo plazo (semantica)
+        # Usar factory: ChromaDB si esta disponible, sino VectorStore casero
+        # Ambos incluyen decaimiento temporal y deduplicacion
+        try:
+            self.long_term = create_vector_store()
+            logger.info("TripleMemory: vector store inicializado via factory")
+        except Exception as e:
+            logger.warning(f"Factory fallo, usando VectorStore basico: {e}")
+            self.long_term = VectorStore()
         self.working = {  # Memoria de trabajo (scratchpad)
             "current_task": "",
             "task_steps": [],
@@ -80,7 +88,16 @@ class TripleMemory:
             fast: Si True, salta el calculo de embedding (mas rapido).
                   La entrada solo aparecera en busquedas por texto.
         """
-        return self.long_term.add(text, metadata=metadata, skip_embedding=fast)
+        # Soportar ambos backends: VectorStore (skip_embedding) y SimpleVectorStore/ChromaDB (sin skip_embedding)
+        try:
+            return self.long_term.add(text, metadata=metadata, skip_embedding=fast)
+        except TypeError:
+            # Backend sin soporte skip_embedding (SimpleVectorStore/ChromaDB)
+            if fast:
+                # Agregar sin embedding manualmente: poner has_vector=False via metadata
+                metadata = metadata or {}
+                metadata["no_embedding"] = True
+            return self.long_term.add(text, metadata=metadata)
 
     def recall(self, query, limit=5):
         """Recupera recuerdos relevantes de la memoria a largo plazo."""
@@ -218,7 +235,7 @@ class TripleMemory:
         self._summary_last_update = None
 
     def get_stats(self):
-        return {
+        stats = {
             "short_term_messages": len(self.short_term),
             "long_term_entries": self.long_term.count(),
             "working_task": bool(self.working["current_task"]),
@@ -226,3 +243,9 @@ class TripleMemory:
             "corrections": len(learning.get_corrections_for("")),
             "embed_cache_size": len(embed_cache),
         }
+        # Detectar tipo de backend
+        backend_type = type(self.long_term).__name__
+        stats["vector_backend"] = backend_type
+        if hasattr(self.long_term, "count_with_vectors"):
+            stats["long_term_with_vectors"] = self.long_term.count_with_vectors()
+        return stats
