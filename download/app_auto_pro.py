@@ -1,19 +1,20 @@
 """
 =============================================================
- AGENTE LOCAL AUTONOMO v7 - AGENTE QUE PIENSA
- Piensa → Planifica → Ejecuta → Evalua → Ajusta
- Consulta IA cloud si necesita ayuda
+AGENTE LOCAL AUTONOMO v8 - AGENTE QUE PIENSA DE VERDAD
+Piensa → Planifica → Ejecuta → Evalua → Ajusta
+Consulta IA cloud si necesita ayuda
 =============================================================
 
 ARQUITECTURA:
-  Usuario → Agente PIENSA (LLM local) → Plan → Ejecuta → Evalua
-                ↑                                              |
-                └── Si falla, ajusta y reintenta ←─────────────┘
-                └── Si se atasca, consulta IA cloud ←──────────┘
+  Usuario → Pre-filtro (conversacion?) → Si: responder directamente
+                                  → No: Agente PIENSA (LLM) → Plan → Ejecuta → Evalua
+                ↑                                                              |
+                └── Si falla, ajusta y reintenta ←────────────────────────────┘
+                └── Si se atasca, consulta IA cloud ←─────────────────────────┘
 
-DIFERENCIA vs v5/v6:
-  v5/v6: "Detectar intencion → Ejecutar mecanicamente"
-  v7:    "Entender el problema → PENSAR como resolverlo → Ejecutar → Aprender"
+DIFERENCIA vs v7:
+  v7: "Todo va al LLM, incluso los saludos → elige escribir_archivo para 'hola'"
+  v8: "Detecta conversacion ANTES del LLM → responde natural → solo usa herramientas cuando hace falta"
 =============================================================
 """
 
@@ -286,6 +287,7 @@ TOOL_FUNCTIONS = {
 
 # Descripcion de herramientas para el LLM
 TOOL_DESCRIPTIONS = """
+- conversar(mensaje) - Para SALUDOS, preguntas generales, charla. Usa esta cuando NO necesitas ejecutar nada.
 - ejecutar_comando(comando) - Ejecuta CUALQUIER comando en la terminal. Use para todo lo que no tenga herramienta especifica.
 - clonar_repositorio(url) - Clona un repo de GitHub.
 - instalar_dependencias(ruta, gestor="auto") - Instala deps. Detecta npm/pip/poetry automaticamente.
@@ -362,12 +364,68 @@ learning = LearningSystem()
 
 
 # ============================================================
+# DETECTOR DE CONVERSACION (pre-filtro rapido, SIN LLM)
+# ============================================================
+
+def es_conversacion(mensaje: str) -> bool:
+    """
+    Detecta rapidamente si un mensaje es conversacional (saludos, preguntas genericas, etc.)
+    ANTES de enviar al LLM. Esto ahorra tokens y evita planes absurdos como
+    escribir_archivo para un simple 'hola'.
+    """
+    msg = mensaje.lower().strip()
+
+    # Patrones de saludo
+    saludos = ["hola", "hi", "hello", "hey", "buenos dias", "buenas", "que tal",
+               "que onda", "saludos", "buen dia", "buenas noches", "buenas tardes"]
+    if any(msg.startswith(s) for s in saludos):
+        return True
+
+    # Preguntas personales / estado
+    estado = ["como estas", "como te va", "como andas", "todo bien", "que haces",
+              "que tal tu", "como estas tu", "como te encuentras"]
+    if any(e in msg for e in estado):
+        return True
+
+    # Identidad
+    identidad = ["quien eres", "que eres", "que haces", "para que sirves",
+                 "que puedes hacer", "como funcionas", "que sabes hacer"]
+    if any(i in msg for i in identidad):
+        return True
+
+    # Agradecimientos
+    gracias = ["gracias", "thanks", "genial", "perfecto", "excelente", "muy bien", "cool"]
+    if any(msg.startswith(g) for g in gracias):
+        return True
+
+    # Confirmaciones cortas sin contexto de accion
+    confirmaciones = ["si", "no", "ok", "vale", "bien", "ya", "ahora", "enterado", "entendido"]
+    if msg in confirmaciones:
+        return True
+
+    # Mensajes muy cortos sin verbos de accion
+    verbos_accion = ["clona", "abre", "instal", "ejecuta", "analiz", "leer", "listar",
+                     "busca", "crea", "borra", "elimina", "modifica", "escribe", "corre",
+                     "compila", "despliega", "descarga", "sube", "mueve"]
+    if len(msg.split()) <= 3 and not any(v in msg for v in verbos_accion):
+        return True
+
+    return False
+
+
+# ============================================================
 # CEREBRO DEL AGENTE - Piensa, Planifica, Decide
 # ============================================================
 
 THINKING_PROMPT = """Eres un agente autonomo que PIENSA antes de actuar.
 
-Tu trabajo es ANALIZAR la solicitud del usuario y crear un PLAN de ejecucion.
+Tu trabajo es ANALIZAR la solicitud del usuario y decidir que hacer.
+
+REGLA MAS IMPORTANTE:
+- Si el usuario esta SALUDANDO, PREGUNTANDO algo general, o CONVERSANDO, usa la accion "conversar".
+- NUNCA uses escribir_archivo para responder a un saludo o pregunta.
+- NUNCA uses herramientas de accion para mensajes conversacionales.
+- Solo usa herramientas de accion (clonar, ejecutar, abrir, etc.) cuando el usuario pide HACER algo concreto.
 
 CONTEXTO DEL SISTEMA:
 - SO: {so}
@@ -379,11 +437,12 @@ HERRAMIENTAS DISPONIBLES:
 {tools}
 
 REGLAS DE PENSAMIENTO:
-1. ANALIZA: Que quiere realmente el usuario? Que necesita pasar?
-2. PLANIFICA: Cual es la mejor secuencia de acciones? Piensa paso a paso.
-3. ANTICIPA: Que puede salir mal? Que informacion necesitas primero?
-4. DECIDE: Es suficiente con ejecucion directa, o necesitas explorar primero?
-5. Si no estas seguro, INVESTIGA primero (lista archivos, lee configs, etc.)
+1. ANALIZA: Que quiere realmente el usuario? Es una ACCION o una CONVERSACION?
+2. Si es CONVERSACION (saludo, pregunta, charla) → usar "conversar"
+3. Si es ACCION (clonar, abrir, ejecutar) → crear un plan con las herramientas necesarias
+4. PLANIFICA: Cual es la mejor secuencia de acciones? Piensa paso a paso.
+5. ANTICIPA: Que puede salir mal? Que informacion necesitas primero?
+6. Si no estas seguro, INVESTIGA primero (lista archivos, lee configs, etc.)
 
 FORMATO DE RESPUESTA - Responde SOLO con JSON valido:
 {{
@@ -401,6 +460,28 @@ FORMATO DE RESPUESTA - Responde SOLO con JSON valido:
 }}
 
 EJEMPLOS:
+
+Usuario: "hola como estas?"
+Respuesta:
+{{
+    "analisis": "El usuario esta saludando y preguntando como estoy. Es una conversacion, no una accion.",
+    "plan": [
+        {{"paso": 1, "accion": "conversar", "params": {{"mensaje": "hola como estas?"}}, "razon": "Es un saludo, responder de forma natural"}}
+    ],
+    "riesgos": [],
+    "siguiente_paso_sugerido": ""
+}}
+
+Usuario: "que puedes hacer?"
+Respuesta:
+{{
+    "analisis": "El usuario pregunta por mis capacidades. Es una conversacion.",
+    "plan": [
+        {{"paso": 1, "accion": "conversar", "params": {{"mensaje": "que puedes hacer?"}}, "razon": "Pregunta sobre capacidades, responder directamente"}}
+    ],
+    "riesgos": [],
+    "siguiente_paso_sugerido": ""
+}}
 
 Usuario: "clona mi repo https://github.com/yecos/signalTrade"
 Respuesta:
@@ -488,10 +569,26 @@ class AgentBrain:
     def think(self, user_message: str, context: str = "") -> dict:
         """
         El agente PIENSA sobre el mensaje del usuario y genera un plan.
-        Este es el paso clave: razonar antes de ejecutar.
+
+        FLUJO v8:
+        1. Pre-filtro: Si es conversacion, responder directamente (SIN LLM)
+        2. Si es accion: enviar al LLM para planificar
+        3. Si el LLM no responde: usar fallback
         """
         self.thinking_log = []
-        self._log("🧠 Pensando...", "thinking")
+        self._log("Pensando...", "thinking")
+
+        # === PRE-FILTRO v8: Detectar conversacion ANTES del LLM ===
+        if es_conversacion(user_message):
+            self._log("Detectado como CONVERSACION (pre-filtro)", "thinking")
+            respuesta = self._conversar(user_message)
+            return {
+                "analisis": "Conversacion detectada por pre-filtro",
+                "plan": [{"paso": 1, "accion": "conversar", "params": {"mensaje": user_message}, "razon": "Responder al usuario"}],
+                "riesgos": [],
+                "siguiente_paso_sugerido": "",
+                "_respuesta_directa": respuesta  # Ya tenemos la respuesta, no ejecutar de nuevo
+            }
 
         # Recopilar contexto
         repos = self._get_repos()
@@ -543,6 +640,19 @@ class AgentBrain:
         Si el plan esta vacio (conversacion), responde directamente.
         """
         results = []
+
+        # === v8: Si ya tenemos respuesta directa del pre-filtro, usarla ===
+        if "_respuesta_directa" in plan:
+            respuesta = plan["_respuesta_directa"]
+            results.append({
+                "action": "conversar",
+                "params": {"mensaje": plan.get("plan", [{}])[0].get("params", {}).get("mensaje", "")},
+                "reason": "Conversacion (pre-filtro)",
+                "result": respuesta,
+                "evaluation": {"exitoso": True}
+            })
+            return results
+
         steps = plan.get("plan", [])
 
         # Si el plan esta vacio, es una conversacion — responder directamente
@@ -564,7 +674,7 @@ class AgentBrain:
             params = step.get("params", {})
             reason = step.get("razon", "")
 
-            self._log(f"▶ Ejecutando paso: {action}({params}) — {reason}", "execution")
+            self._log(f"Ejecutando paso: {action}({params}) — {reason}", "execution")
 
             # Resolver parametros dinamicos (como RUTA_DEL_REPO)
             params = self._resolve_params(params)
@@ -587,7 +697,7 @@ class AgentBrain:
 
             # Si fallo, intentar solucion alternativa
             if not evaluation.get("exitoso", True) and evaluation.get("solucion_alternativa"):
-                self._log(f"⚠ Fallo detectado, intentando alternativa...", "warning")
+                self._log(f"Fallo detectado, intentando alternativa...", "warning")
                 alt_result = self._try_alternative(evaluation["solucion_alternativa"], action, params)
                 if alt_result:
                     results[-1]["result"] = alt_result
@@ -616,12 +726,12 @@ class AgentBrain:
             eval_result = self._ask_llm([{"role": "user", "content": prompt}])
             parsed = self._parse_json(eval_result)
             if parsed:
-                self._log(f"🔍 Evaluacion: fallo - {parsed.get('problema', 'desconocido')}", "evaluation")
+                self._log(f"Evaluacion: fallo - {parsed.get('problema', 'desconocido')}", "evaluation")
                 return parsed
 
             return {"exitoso": False, "problema": result[:200], "solucion_alternativa": ""}
 
-        self._log(f"✅ Evaluacion: exitoso", "evaluation")
+        self._log(f"Evaluacion: exitoso", "evaluation")
         return {"exitoso": True, "leccion": "", "proximo_paso": "continuar"}
 
     def consult_cloud(self, user_task: str, problem: str) -> str:
@@ -629,7 +739,7 @@ class AgentBrain:
         Consulta a una IA cloud cuando el agente local se atasca.
         Usa APIs de Groq, OpenRouter, o DeepSeek.
         """
-        self._log("☁ Consultando IA cloud para ayuda...", "cloud")
+        self._log("Consultando IA cloud para ayuda...", "cloud")
 
         prompt = CLOUD_CONSULT_PROMPT.format(
             user_task=user_task,
@@ -647,10 +757,10 @@ class AgentBrain:
                 spec.loader.exec_module(bridge)
                 if hasattr(bridge, 'consultar_ia'):
                     result = bridge.consultar_ia(prompt)
-                    self._log("☁ Respuesta cloud recibida", "cloud")
+                    self._log("Respuesta cloud recibida", "cloud")
                     return result
             except Exception as e:
-                self._log(f"☁ Error con ia_bridge: {e}", "warning")
+                self._log(f"Error con ia_bridge: {e}", "warning")
 
         # Intentar con API directa (Groq - gratis y rapido)
         try:
@@ -686,10 +796,10 @@ class AgentBrain:
                 with urllib.request.urlopen(req, timeout=15) as resp:
                     response = json.loads(resp.read().decode("utf-8"))
                     result = response["choices"][0]["message"]["content"]
-                    self._log("☁ Respuesta de Groq recibida", "cloud")
+                    self._log("Respuesta de Groq recibida", "cloud")
                     return result
         except Exception as e:
-            self._log(f"☁ Error con API cloud: {e}", "warning")
+            self._log(f"Error con API cloud: {e}", "warning")
 
         return "No se pudo consultar IA cloud. Verifica la conexion o configura una API key."
 
@@ -822,7 +932,7 @@ class AgentBrain:
             return f"Herramienta no encontrada: {action}"
 
     def _conversar(self, mensaje: str) -> str:
-        """Responde al usuario de forma conversacional."""
+        """Responde al usuario de forma conversacional. Usa LLM para respuestas ricas."""
         msg = mensaje.lower().strip()
 
         # Respuestas predefinidas rapidas (sin necesidad de LLM)
@@ -851,29 +961,29 @@ class AgentBrain:
                     "Todo corre localmente en tu PC con Ollama (qwen2.5:14b).")
 
         if any(w in msg for w in ["gracias", "thanks", "genial", "perfecto"]):
-            return "De nada! Estoy aqui para lo que necesites. 😊"
+            return "De nada! Estoy aqui para lo que necesites."
 
         if any(w in msg for w in ["ayuda", "help", "que puedes hacer"]):
             return ("Puedo hacer muchas cosas:\n\n"
-                    "📦 **Repositorios:**\n"
+                    "**Repositorios:**\n"
                     "- 'clona https://github.com/usuario/repo'\n"
                     "- 'analiza signalTrade'\n"
                     "- 'instalar dependencias signalTrade'\n\n"
-                    "🖥️ **Aplicaciones:**\n"
+                    "**Aplicaciones:**\n"
                     "- 'abre chrome'\n"
                     "- 'abre vscode'\n"
                     "- 'abre notepad'\n\n"
-                    "📁 **Archivos:**\n"
+                    "**Archivos:**\n"
                     "- 'leer README.md de signalTrade'\n"
                     "- 'listar archivos'\n\n"
-                    "⚙️ **Terminal:**\n"
+                    "**Terminal:**\n"
                     "- 'ejecuta git status'\n"
                     "- 'ejecuta npm run dev'\n\n"
-                    "🧠 **Lo especial:** Yo PIENSO antes de actuar y busco soluciones si algo falla.")
+                    "**Lo especial:** Yo PIENSO antes de actuar y busco soluciones si algo falla.")
 
-        # Si no es un patron conocido, intentar con el LLM
+        # Si no es un patron conocido, intentar con el LLM para respuesta mas inteligente
         respuesta_llm = self._ask_llm([
-            {"role": "system", "content": "Eres un asistente amigable que habla español. Responde de forma concisa."},
+            {"role": "system", "content": "Eres un asistente amigable que habla espanol. Responde de forma concisa y natural. No uses markdown, solo texto plano."},
             {"role": "user", "content": mensaje}
         ])
         if respuesta_llm:
@@ -977,44 +1087,67 @@ class AgentBrain:
                     return {
                         "analisis": f"Instalar dependencias de {d}",
                         "plan": [{"paso": 1, "accion": "instalar_dependencias", "params": {"ruta": os.path.join(REPOS_DIR, d)}, "razon": "Instalar deps"}],
-                        "riesgos": [],
-                        "siguiente_paso_sugerido": "Ejecutar el proyecto"
+                        "riesgos": ["Pueden faltar herramientas"],
+                        "siguiente_paso_sugerido": ""
                     }
 
-        if any(w in msg for w in ["analiz", "revis", "examin"]):
+        if any(w in msg for w in ["analiz", "analiza", "analizar"]):
             for d in os.listdir(REPOS_DIR):
                 if d.lower() in msg:
                     return {
                         "analisis": f"Analizar proyecto {d}",
-                        "plan": [{"paso": 1, "accion": "analizar_proyecto", "params": {"ruta": os.path.join(REPOS_DIR, d)}, "razon": "Analizar estructura"}],
+                        "plan": [
+                            {"paso": 1, "accion": "analizar_proyecto", "params": {"ruta": os.path.join(REPOS_DIR, d)}, "razon": "Analizar estructura"},
+                            {"paso": 2, "accion": "leer_archivo", "params": {"ruta": os.path.join(REPOS_DIR, d, "README.md")}, "razon": "Leer documentacion"},
+                        ],
                         "riesgos": [],
-                        "siguiente_paso_sugerido": ""
+                        "siguiente_paso_sugerido": "Instalar dependencias o revisar archivos especificos"
                     }
 
-        if any(w in msg for w in ["leer", "mostrar", "ver archivo"]):
-            file_match = re.search(r'[\w\-]+\.\w+', user_message)
-            if file_match:
+        if any(w in msg for w in ["leer", "muestra", "ver"]):
+            archivo_match = re.search(r'(?:leer|muestra|ver)\s+(.+)', msg, re.IGNORECASE)
+            archivo = archivo_match.group(1).strip() if archivo_match else ""
+            if archivo:
                 return {
-                    "analisis": f"Leer archivo",
-                    "plan": [{"paso": 1, "accion": "leer_archivo", "params": {"ruta": file_match.group(0)}, "razon": "Leer archivo solicitado"}],
-                    "riesgos": [],
+                    "analisis": f"Leer archivo: {archivo}",
+                    "plan": [{"paso": 1, "accion": "leer_archivo", "params": {"ruta": archivo}, "razon": "Mostrar contenido"}],
+                    "riesgos": ["Archivo puede no existir"],
                     "siguiente_paso_sugerido": ""
                 }
 
-        if any(w in msg for w in ["ejecuta", "correr", "run "]):
-            cmd_match = re.search(r'(?:ejecuta|correr|run)\s+(.+)', msg, re.IGNORECASE)
-            if cmd_match:
+        if any(w in msg for w in ["listar", "lista", "archivos", "carpetas"]):
+            return {
+                "analisis": "Listar archivos del directorio de trabajo",
+                "plan": [{"paso": 1, "accion": "listar_archivos", "params": {"ruta": REPOS_DIR}, "razon": "Mostrar contenido del directorio"}],
+                "riesgos": [],
+                "siguiente_paso_sugerido": ""
+            }
+
+        if any(w in msg for w in ["ejecuta", "corre", "run", "comando"]):
+            cmd_match = re.search(r'(?:ejecuta|corre|run|comando)\s+(.+)', msg, re.IGNORECASE)
+            cmd = cmd_match.group(1).strip() if cmd_match else ""
+            if cmd:
                 return {
-                    "analisis": f"Ejecutar comando",
-                    "plan": [{"paso": 1, "accion": "ejecutar_comando", "params": {"comando": cmd_match.group(1).strip()}, "razon": "Ejecutar comando del usuario"}],
-                    "riesgos": [],
+                    "analisis": f"Ejecutar comando: {cmd}",
+                    "plan": [{"paso": 1, "accion": "ejecutar_comando", "params": {"comando": cmd}, "razon": "Ejecutar el comando solicitado"}],
+                    "riesgos": ["El comando puede fallar"],
                     "siguiente_paso_sugerido": ""
                 }
 
-        # === Si no reconoce nada: conversar (NO listar archivos) ===
+        if any(w in msg for w in ["busca", "buscar", "encuentra", "search"]):
+            # Busqueda web o en archivos
+            busqueda = re.sub(r'(?:busca|buscar|encuentra|search)\s+', '', msg, flags=re.IGNORECASE).strip()
+            return {
+                "analisis": f"Busqueda: {busqueda}",
+                "plan": [{"paso": 1, "accion": "conversar", "params": {"mensaje": user_message}, "razon": "Responder sobre la busqueda"}],
+                "riesgos": [],
+                "siguiente_paso_sugerido": "Si necesito buscar en internet, requeriria API de busqueda"
+            }
+
+        # Si no se detecta nada claro, usar conversacion con LLM
         return {
-            "analisis": "El usuario dice algo que no es una accion clara",
-            "plan": [{"paso": 1, "accion": "conversar", "params": {"mensaje": user_message}, "razon": "Responder al usuario"}],
+            "analisis": "No se detecto una accion clara, conversar con el usuario",
+            "plan": [{"paso": 1, "accion": "conversar", "params": {"mensaje": user_message}, "razon": "No es una accion clara, responder conversacionalmente"}],
             "riesgos": [],
             "siguiente_paso_sugerido": ""
         }
@@ -1040,7 +1173,7 @@ def procesar_mensaje(user_message: str) -> tuple:
     brain.actions_taken = []
 
     # === PASO 1: PENSAR ===
-    brain._log(f"📩 Mensaje del usuario: {user_message}", "input")
+    brain._log(f"Mensaje del usuario: {user_message}", "input")
     plan = brain.think(user_message)
 
     # === PASO 2: EJECUTAR ===
@@ -1059,41 +1192,77 @@ def procesar_mensaje(user_message: str) -> tuple:
             if action == "conversar":
                 respuesta += f"{result}\n\n"
             else:
-                respuesta += f"✅ **Paso {i}: {action}** — {reason}\n```\n{result}\n```\n\n"
+                respuesta += f"**Paso {i}: {action}** — {reason}\n```\n{result}\n```\n\n"
         else:
-            respuesta += f"❌ **Paso {i}: {action}** — {reason}\n```\n{result}\n```\n"
+            respuesta += f"**Paso {i}: {action}** — {reason}\n```\n{result}\n```\n"
             if evaluation.get("solucion_alternativa"):
-                respuesta += f"🔧 Intentando: {evaluation['solucion_alternativa']}\n\n"
+                respuesta += f"Intentando: {evaluation['solucion_alternativa']}\n\n"
 
     # Agregar sugerencia de siguiente paso (solo si no es conversacion)
     is_conversation = any(r.get("action") == "conversar" for r in results)
     if plan.get("siguiente_paso_sugerido") and not is_conversation:
-        respuesta += f"💡 **Siguiente paso sugerido:** {plan['siguiente_paso_sugerido']}"
+        respuesta += f"**Siguiente paso sugerido:** {plan['siguiente_paso_sugerido']}"
 
     # Si no hubo resultados utiles Y no es conversacion, ofrecer consulta cloud
     if not is_conversation and (not results or all(not r.get("evaluation", {}).get("exitoso", True) for r in results)):
-        respuesta += "\n\n⚠ Tuve problemas con la ejecucion. ¿Quieres que consulte una IA cloud para encontrar una solucion?"
+        respuesta += "\n\nTuve problemas con la ejecucion. Quieres que consulte una IA cloud para encontrar una solucion?"
 
     return respuesta, brain.thinking_log
 
 
 # ============================================================
-# INTERFAZ STREAMLIT
+# INTERFAZ STREAMLIT - Mejorada visualmente
 # ============================================================
 
 def main():
     st.set_page_config(
-        page_title="Agente Autonomo v7 - Piensa",
+        page_title="Agente Autonomo v8",
         page_icon="🧠",
         layout="wide"
     )
 
+    # === ESTILOS CSS MEJORADOS ===
     st.markdown("""
     <style>
-    .stApp { max-width: 1200px; margin: 0 auto; }
-    .thinking-box { background: #1a1a2e; color: #00ff88; padding: 12px; border-radius: 8px;
-                    font-family: monospace; font-size: 11px; max-height: 400px; overflow-y: auto;
-                    white-space: pre-wrap; word-break: break-all; border: 1px solid #333; }
+    /* Fondo general */
+    .stApp {
+        max-width: 1200px;
+        margin: 0 auto;
+    }
+
+    /* Titulo principal */
+    .main-title {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-size: 2.2rem;
+        font-weight: 800;
+        text-align: center;
+        margin-bottom: 0.3rem;
+    }
+
+    .main-subtitle {
+        text-align: center;
+        color: #888;
+        font-size: 0.9rem;
+        margin-bottom: 1.5rem;
+    }
+
+    /* Caja de pensamiento */
+    .thinking-box {
+        background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+        color: #00ff88;
+        padding: 16px;
+        border-radius: 12px;
+        font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+        font-size: 11px;
+        max-height: 400px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        word-break: break-all;
+        border: 1px solid rgba(100, 100, 255, 0.2);
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+    }
     .thinking-box .thinking { color: #88aaff; }
     .thinking-box .plan { color: #ffaa44; }
     .thinking-box .execution { color: #00ff88; }
@@ -1102,6 +1271,79 @@ def main():
     .thinking-box .error { color: #ff4444; }
     .thinking-box .cloud { color: #44aaff; }
     .thinking-box .input { color: #88ff88; }
+
+    /* Mensajes del chat mejorados */
+    [data-testid="stChatMessage"] {
+        border-radius: 12px;
+        padding: 12px 16px;
+        margin: 4px 0;
+    }
+
+    /* Mensaje del usuario */
+    [data-testid="stChatMessage"][data-testid="stChatMessage-user"] {
+        background: linear-gradient(135deg, #1a1a3e 0%, #2d2d5e 100%);
+        border: 1px solid rgba(100, 100, 255, 0.15);
+    }
+
+    /* Mensaje del asistente */
+    [data-testid="stChatMessage"][data-testid="stChatMessage-assistant"] {
+        background: linear-gradient(135deg, #1a2e1a 0%, #1a3e2d 100%);
+        border: 1px solid rgba(0, 255, 136, 0.1);
+    }
+
+    /* Input del chat */
+    [data-testid="stChatInput"] {
+        border-radius: 16px;
+    }
+
+    /* Botones del sidebar */
+    .stButton > button {
+        border-radius: 8px;
+        transition: all 0.2s;
+    }
+    .stButton > button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(100, 100, 255, 0.3);
+    }
+
+    /* Metricas */
+    [data-testid="stMetricValue"] {
+        font-size: 1.5rem;
+        font-weight: 700;
+    }
+
+    /* Scrollbar personalizada */
+    ::-webkit-scrollbar {
+        width: 6px;
+    }
+    ::-webkit-scrollbar-track {
+        background: rgba(0, 0, 0, 0.1);
+        border-radius: 3px;
+    }
+    ::-webkit-scrollbar-thumb {
+        background: rgba(100, 100, 255, 0.3);
+        border-radius: 3px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: rgba(100, 100, 255, 0.5);
+    }
+
+    /* Expander de pensamiento */
+    .streamlit-expanderHeader {
+        background: linear-gradient(135deg, #1a1a3e 0%, #2d2d5e 100%) !important;
+        border-radius: 8px !important;
+        border: 1px solid rgba(100, 100, 255, 0.15) !important;
+    }
+
+    /* Status indicators */
+    .status-ok {
+        color: #00ff88;
+        font-weight: 600;
+    }
+    .status-fail {
+        color: #ff4444;
+        font-weight: 600;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -1111,60 +1353,55 @@ def main():
     if "thinking_history" not in st.session_state:
         st.session_state.thinking_history = []
 
-    st.title("🧠 Agente Autonomo v7")
-    st.caption("Piensa → Planifica → Ejecuta → Evalua → Aprende — Consulta IA cloud si se atasca")
+    # Titulo con estilo
+    st.markdown('<div class="main-title">Agente Autonomo v8</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-subtitle">Piensa → Planifica → Ejecuta → Evalua → Aprende — Consulta IA cloud si se atasca</div>', unsafe_allow_html=True)
 
     # === SIDEBAR ===
     with st.sidebar:
-        st.header("⚙️ Config")
+        st.header("Config")
         st.write(f"**Modelo:** {AGENT_MODEL}")
         st.write(f"**Repos:** {REPOS_DIR}")
 
         # === TEST DE CONEXION OLLAMA ===
-        st.header("🔌 Ollama Status")
-        if st.button("🔄 Test conexion Ollama", use_container_width=True):
-            # Probar conexion de 4 formas
-            results = []
-            try:
-                import ollama
+        st.header("Ollama Status")
+        if st.button("Test conexion Ollama", use_container_width=True):
+            with st.spinner("Probando conexion..."):
+                # Probar conexion de 4 formas
                 try:
-                    r = ollama.list()
-                    st.success("✅ ollama.chat() - CONECTA")
-                    results.append("chat OK")
-                except:
-                    st.error("❌ ollama.chat() - FALLA")
-                    results.append("chat FAIL")
+                    import ollama
+                    try:
+                        r = ollama.list()
+                        st.success("ollama.chat() - CONECTA")
+                    except:
+                        st.error("ollama.chat() - FALLA")
 
+                    try:
+                        client = ollama.Client(host='http://localhost:11434')
+                        r = client.list()
+                        st.success("Client(localhost:11434) - CONECTA")
+                    except Exception as e:
+                        st.error(f"Client(localhost) - FALLA: {e}")
+
+                    try:
+                        client = ollama.Client(host='http://127.0.0.1:11434')
+                        r = client.list()
+                        st.success("Client(127.0.0.1) - CONECTA")
+                    except Exception as e:
+                        st.error(f"Client(127.0.0.1) - FALLA: {e}")
+                except ImportError:
+                    st.error("Libreria ollama no instalada")
+
+                # Test HTTP directo
                 try:
-                    client = ollama.Client(host='http://localhost:11434')
-                    r = client.list()
-                    st.success("✅ Client(localhost:11434) - CONECTA")
-                    results.append("localhost OK")
+                    import urllib.request
+                    req = urllib.request.Request("http://localhost:11434/api/tags")
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        data = json.loads(resp.read().decode("utf-8"))
+                        models = [m["name"] for m in data.get("models", [])]
+                        st.success(f"HTTP directo - CONECTA. Modelos: {models}")
                 except Exception as e:
-                    st.error(f"❌ Client(localhost) - FALLA: {e}")
-                    results.append("localhost FAIL")
-
-                try:
-                    client = ollama.Client(host='http://127.0.0.1:11434')
-                    r = client.list()
-                    st.success("✅ Client(127.0.0.1) - CONECTA")
-                    results.append("127.0.0.1 OK")
-                except Exception as e:
-                    st.error(f"❌ Client(127.0.0.1) - FALLA: {e}")
-                    results.append("127.0.0.1 FAIL")
-            except ImportError:
-                st.error("❌ Libreria ollama no instalada")
-
-            # Test HTTP directo
-            try:
-                import urllib.request
-                req = urllib.request.Request("http://localhost:11434/api/tags")
-                with urllib.request.urlopen(req, timeout=5) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    models = [m["name"] for m in data.get("models", [])]
-                    st.success(f"✅ HTTP directo - CONECTA. Modelos: {models}")
-            except Exception as e:
-                st.error(f"❌ HTTP directo - FALLA: {e}")
+                    st.error(f"HTTP directo - FALLA: {e}")
 
         # Mostrar estado rapido
         try:
@@ -1173,17 +1410,17 @@ def main():
             with urllib.request.urlopen(req, timeout=2) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 models = [m["name"] for m in data.get("models", [])]
-                st.success(f"🟢 Ollama OK - {len(models)} modelos")
+                st.success(f"Ollama OK - {len(models)} modelos")
         except:
-            st.error("🔴 Ollama NO conecta")
+            st.error("Ollama NO conecta")
 
         stats = learning.get_stats()
-        st.header("📊 Aprendizaje")
+        st.header("Aprendizaje")
         col1, col2 = st.columns(2)
         col1.metric("Conocimiento", stats["knowledge"])
         col2.metric("Correcciones", stats["corrections"])
 
-        st.header("☁️ IA Cloud")
+        st.header("IA Cloud")
         groq_key = os.environ.get("GROQ_API_KEY", "")
         if groq_key:
             st.success("Groq API configurada")
@@ -1194,22 +1431,22 @@ def main():
                 os.environ["GROQ_API_KEY"] = groq_input
                 st.success("Key guardada para esta sesion")
 
-        if st.button("🗑️ Limpiar historial", use_container_width=True):
+        if st.button("Limpiar historial", use_container_width=True):
             st.session_state.messages = []
             st.session_state.thinking_history = []
             st.rerun()
 
-        st.header("📁 Repos")
+        st.header("Repos")
         try:
             repos = [d for d in os.listdir(REPOS_DIR)
                      if os.path.isdir(os.path.join(REPOS_DIR, d)) and not d.startswith(".")]
             for repo in repos:
-                st.write(f"📂 {repo}")
+                st.write(f" {repo}")
         except:
             st.write("Sin repos")
 
         # Ver pensamiento historico
-        st.header("🧠 Historial de pensamiento")
+        st.header("Historial de pensamiento")
         if st.session_state.thinking_history:
             for i, th in enumerate(st.session_state.thinking_history[-5:]):
                 with st.expander(f"Pensamiento #{i+1}", expanded=False):
@@ -1227,7 +1464,7 @@ def main():
         st.session_state.messages.append({"role": "user", "content": prompt})
 
         with st.chat_message("assistant"):
-            with st.spinner("🧠 Pensando..."):
+            with st.spinner("Pensando..."):
                 try:
                     respuesta, thinking_log = procesar_mensaje(prompt)
 
@@ -1236,7 +1473,7 @@ def main():
                         thinking_text = "\n".join(thinking_log)
                         st.session_state.thinking_history.append(thinking_text)
 
-                        with st.expander("🧠 Proceso de pensamiento (click para ver)", expanded=True):
+                        with st.expander("Proceso de pensamiento (click para ver)", expanded=False):
                             st.markdown(f'<div class="thinking-box">{thinking_text}</div>',
                                        unsafe_allow_html=True)
 
