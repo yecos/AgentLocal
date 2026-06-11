@@ -1,142 +1,94 @@
 """
 =============================================================
- AGENTE LOCAL AUTÓNOMO v4 - EJECUCIÓN GARANTIZADA
- Enfoque híbrido: Detección de intención + Ejecución directa
-=============================================================
-
-ESTA VERSIÓN ES DIFERENTE:
-- Detecta la intención del usuario ANTES de enviar al LLM
-- Si la intención es clara (ej: URL de GitHub), EJECUTA directamente
-- El LLM solo se usa para análisis y decisiones complejas
-- NUNCA da instrucciones - SIEMPRE ejecuta
-
-Modelo: qwen2.5:14b (agente con herramientas)
-Puerto: 8501
+ AGENTE LOCAL AUTONOMO v5 - CON DEBUG VISIBLE
+ Detecta intencion + Ejecuta directamente + Muestra cada paso
 =============================================================
 """
 
 import streamlit as st
-import ollama
 import subprocess
 import os
 import re
 import json
-import shutil
 import platform
 from datetime import datetime
-from pathlib import Path
 
 # ============================================================
-# CONFIGURACIÓN
+# CONFIGURACION
 # ============================================================
 
 AGENT_MODEL = "qwen2.5:14b"
-CHAT_MODEL = "llama3.1:8b"
-MAX_ITERATIONS = 8
-HISTORY_FILE = "chat_history.json"
+MAX_ITERATIONS = 6
 
-# Directorio base para operaciones
 if platform.system() == "Windows":
-    BASE_DIR = os.path.expanduser("~")
-    REPOS_DIR = os.path.join(BASE_DIR, "Documents")
+    REPOS_DIR = os.path.join(os.path.expanduser("~"), "Documents")
 else:
-    BASE_DIR = os.path.expanduser("~")
-    REPOS_DIR = os.path.join(BASE_DIR, "repos")
+    REPOS_DIR = os.path.join(os.path.expanduser("~"), "repos")
 
-# Asegurar que el directorio de repos existe
 os.makedirs(REPOS_DIR, exist_ok=True)
 
 # ============================================================
-# HERRAMIENTAS REALES - Funciones que EJECUTAN
+# HERRAMIENTAS - Funciones que EJECUTAN de verdad
 # ============================================================
 
 def ejecutar_comando(comando: str) -> str:
-    """Ejecuta un comando en la terminal y devuelve la salida."""
     try:
-        # Detectar si es Windows
-        is_windows = platform.system() == "Windows"
-        if is_windows:
-            result = subprocess.run(
-                comando, shell=True, capture_output=True, text=True,
-                timeout=120, cwd=REPOS_DIR
-            )
-        else:
-            result = subprocess.run(
-                comando, shell=True, capture_output=True, text=True,
-                timeout=120, cwd=REPOS_DIR
-            )
+        result = subprocess.run(
+            comando, shell=True, capture_output=True, text=True,
+            timeout=120, cwd=REPOS_DIR
+        )
         output = ""
         if result.stdout:
             output += result.stdout.strip()
         if result.stderr:
-            output += ("\n--- STDERR ---\n" + result.stderr.strip()) if output else result.stderr.strip()
+            output += ("\n[STDERR] " + result.stderr.strip()) if output else result.stderr.strip()
         if not output:
-            output = "Comando ejecutado (sin salida)."
+            output = "(Comando ejecutado sin salida)"
         return output
     except subprocess.TimeoutExpired:
-        return "Error: El comando tardó demasiado (>120s). Se canceló."
+        return "ERROR: Comando cancelado por timeout (>120s)"
     except Exception as e:
-        return f"Error ejecutando comando: {e}"
+        return f"ERROR: {e}"
 
 
 def clonar_repositorio(url: str) -> str:
-    """Clona un repositorio Git y devuelve el resultado."""
-    # Extraer nombre del repo de la URL
     repo_name = url.rstrip("/").split("/")[-1].replace(".git", "")
     target_dir = os.path.join(REPOS_DIR, repo_name)
 
-    # Verificar si ya existe
     if os.path.exists(target_dir):
-        return f"El repositorio ya existe en: {target_dir}\nPara actualizar, primero elimínalo o usa 'git pull' dentro del directorio."
+        return f"Ya existe en: {target_dir}"
 
-    # Ejecutar git clone
     comando = f'git clone {url} "{target_dir}"'
     resultado = ejecutar_comando(comando)
 
-    # Verificar que se clonó correctamente
     if os.path.exists(target_dir):
-        # Listar contenido para confirmar
-        try:
-            contenido = os.listdir(target_dir)
-            archivos = [f for f in contenido if os.path.isfile(os.path.join(target_dir, f))]
-            carpetas = [f for f in contenido if os.path.isdir(os.path.join(target_dir, f))]
-            resumen = f"Repositorio clonado exitosamente en: {target_dir}\n\n"
-            resumen += f"Carpetas: {', '.join(carpetas)}\n"
-            resumen += f"Archivos: {', '.join(archivos)}"
-            return resumen
-        except Exception:
-            return f"Repositorio clonado en: {target_dir}\n{resultado}"
+        contenido = os.listdir(target_dir)
+        carpetas = [f for f in contenido if os.path.isdir(os.path.join(target_dir, f))]
+        archivos = [f for f in contenido if os.path.isfile(os.path.join(target_dir, f))]
+        return f"CLONADO OK en: {target_dir}\nCarpetas: {carpetas}\nArchivos: {archivos}"
     else:
-        return f"Error al clonar. Salida del comando:\n{resultado}"
+        return f"ERROR al clonar:\n{resultado}"
 
 
-def instalar_dependencias(ruta: str = None, gestor: str = "auto") -> str:
-    """Instala dependencias de un proyecto (npm, pip, etc.)."""
-    if ruta is None:
-        ruta = REPOS_DIR
-
+def instalar_dependencias(ruta: str, gestor: str = "auto") -> str:
     if not os.path.exists(ruta):
-        return f"La ruta no existe: {ruta}"
+        return f"Ruta no existe: {ruta}"
 
-    # Detectar gestor de paquetes
     if gestor == "auto":
         if os.path.exists(os.path.join(ruta, "package.json")):
             gestor = "npm"
         elif os.path.exists(os.path.join(ruta, "requirements.txt")):
             gestor = "pip"
-        elif os.path.exists(os.path.join(ruta, "Pipfile")):
-            gestor = "pipenv"
         elif os.path.exists(os.path.join(ruta, "pyproject.toml")):
             gestor = "poetry"
         else:
-            return "No se detectó gestor de paquetes (package.json, requirements.txt, etc.)"
+            return "No se detecto gestor de paquetes"
 
     comandos = {
         "npm": f'cd "{ruta}" && npm install',
-        "yarn": f'cd "{ruta}" && yarn install',
         "pip": f'cd "{ruta}" && pip install -r requirements.txt',
-        "pipenv": f'cd "{ruta}" && pipenv install',
         "poetry": f'cd "{ruta}" && poetry install',
+        "yarn": f'cd "{ruta}" && yarn install',
     }
 
     comando = comandos.get(gestor, f'cd "{ruta}" && {gestor} install')
@@ -144,48 +96,42 @@ def instalar_dependencias(ruta: str = None, gestor: str = "auto") -> str:
 
 
 def leer_archivo(ruta: str) -> str:
-    """Lee el contenido de un archivo de texto."""
-    if not os.path.exists(ruta):
-        # Intentar buscar en directorios comunes
-        posibles = [
-            ruta,
-            os.path.join(REPOS_DIR, ruta),
-        ]
-        # Si es una ruta relativa, buscar en subdirectorios
-        for repo_dir in os.listdir(REPOS_DIR):
-            full_path = os.path.join(REPOS_DIR, repo_dir, ruta)
-            if os.path.exists(full_path):
-                ruta = full_path
-                break
-        else:
-            # Último intento con búsqueda
-            if not os.path.exists(ruta):
-                return f"El archivo no existe: {ruta}"
+    # Buscar en múltiples ubicaciones
+    rutas_posibles = [ruta]
+    if not os.path.isabs(ruta):
+        rutas_posibles.append(os.path.join(REPOS_DIR, ruta))
+        # Buscar en subdirectorios de REPOS_DIR
+        try:
+            for d in os.listdir(REPOS_DIR):
+                full = os.path.join(REPOS_DIR, d, ruta)
+                rutas_posibles.append(full)
+        except:
+            pass
 
-    try:
-        with open(ruta, "r", encoding="utf-8", errors="replace") as f:
-            contenido = f.read()
-        # Limitar tamaño
-        if len(contenido) > 10000:
-            contenido = contenido[:10000] + "\n\n... [Archivo truncado - muy largo] ..."
-        return contenido
-    except Exception as e:
-        return f"Error leyendo archivo: {e}"
+    for r in rutas_posibles:
+        if os.path.exists(r) and os.path.isfile(r):
+            try:
+                with open(r, "r", encoding="utf-8", errors="replace") as f:
+                    contenido = f.read()
+                if len(contenido) > 8000:
+                    contenido = contenido[:8000] + "\n... [truncado]"
+                return contenido
+            except Exception as e:
+                return f"ERROR leyendo: {e}"
+
+    return f"Archivo no encontrado: {ruta}"
 
 
 def listar_archivos(ruta: str = None) -> str:
-    """Lista archivos y carpetas en un directorio."""
     if ruta is None:
         ruta = REPOS_DIR
 
-    # Intentar encontrar la ruta
     if not os.path.exists(ruta):
-        # Buscar en REPOS_DIR
-        alt = os.path.join(REPOS_DIR, ruta)
+        alt = os.path.join(REPOS_DIR, ruta) if not os.path.isabs(ruta) else ruta
         if os.path.exists(alt):
             ruta = alt
         else:
-            return f"El directorio no existe: {ruta}"
+            return f"Directorio no existe: {ruta}"
 
     try:
         items = os.listdir(ruta)
@@ -197,91 +143,59 @@ def listar_archivos(ruta: str = None) -> str:
                 carpetas.append(item)
             else:
                 archivos.append(item)
-
-        resultado = f"Contenido de {ruta}:\n\n"
+        resultado = f"Contenido de {ruta}:\n"
         for c in carpetas:
             resultado += f"  [CARPETA] {c}\n"
         for a in archivos:
-            size = os.path.getsize(os.path.join(ruta, a))
-            resultado += f"  [ARCHIVO] {a} ({size} bytes)\n"
-        resultado += f"\nTotal: {len(carpetas)} carpetas, {len(archivos)} archivos"
+            resultado += f"  [ARCHIVO] {a}\n"
+        resultado += f"Total: {len(carpetas)} carpetas, {len(archivos)} archivos"
         return resultado
     except Exception as e:
-        return f"Error listando directorio: {e}"
+        return f"ERROR: {e}"
 
 
-def escribir_archivo(ruta: str, contenido: str) -> str:
-    """Escribe contenido en un archivo."""
-    try:
-        os.makedirs(os.path.dirname(ruta) if os.path.dirname(ruta) else ".", exist_ok=True)
-        with open(ruta, "w", encoding="utf-8") as f:
-            f.write(contenido)
-        return f"Archivo escrito exitosamente: {ruta}"
-    except Exception as e:
-        return f"Error escribiendo archivo: {e}"
-
-
-def buscar_texto(patron: str, ruta: str = None) -> str:
-    """Busca un patrón de texto en archivos."""
-    if ruta is None:
-        ruta = REPOS_DIR
-    if not os.path.exists(ruta):
-        ruta = os.path.join(REPOS_DIR, ruta) if not os.path.isabs(ruta) else ruta
-
-    comando = f'findstr /S /I /N "{patron}" "{ruta}\\*" 2>nul' if platform.system() == "Windows" else f'grep -r -n "{patron}" "{ruta}" 2>/dev/null'
-    return ejecutar_comando(comando)
-
-
-def analizar_proyecto(ruta: str = None) -> str:
-    """Analiza la estructura de un proyecto y devuelve un resumen."""
-    if ruta is None:
-        ruta = REPOS_DIR
-
+def analizar_proyecto(ruta: str) -> str:
     if not os.path.exists(ruta):
         alt = os.path.join(REPOS_DIR, ruta) if not os.path.isabs(ruta) else ruta
         if os.path.exists(alt):
             ruta = alt
         else:
-            return f"El directorio no existe: {ruta}"
+            return f"Directorio no existe: {ruta}"
 
-    resultado = f"Análisis del proyecto en: {ruta}\n"
-    resultado += "=" * 50 + "\n\n"
+    resultado = f"Analisis de: {ruta}\n"
+    resultado += "=" * 40 + "\n\n"
 
-    # Listar estructura de directorios (2 niveles)
+    # Estructura de directorios (3 niveles)
     for root, dirs, files in os.walk(ruta):
         level = root.replace(ruta, "").count(os.sep)
-        if level > 2:  # Limitar profundidad
+        if level > 3:
+            dirs.clear()
             continue
         indent = "  " * level
         resultado += f"{indent}{os.path.basename(root)}/\n"
         subindent = "  " * (level + 1)
-        for f in sorted(files)[:15]:  # Limitar archivos por carpeta
+        for f in sorted(files)[:20]:
             resultado += f"{subindent}{f}\n"
-        if len(files) > 15:
-            resultado += f"{subindent}... y {len(files) - 15} archivos más\n"
+        if len(files) > 20:
+            resultado += f"{subindent}... y {len(files) - 20} mas\n"
 
-    # Detectar tipo de proyecto
-    resultado += "\n" + "=" * 50 + "\nDetección automática:\n"
-
+    # Detectar tipo
+    resultado += "\nDeteccion:\n"
     checks = {
-        "package.json": "Proyecto Node.js/JavaScript",
-        "tsconfig.json": "Proyecto TypeScript",
-        "next.config.js": "Proyecto Next.js",
-        "next.config.ts": "Proyecto Next.js",
-        "requirements.txt": "Proyecto Python (pip)",
-        "pyproject.toml": "Proyecto Python (poetry/pyproject)",
-        "Dockerfile": "Proyecto con Docker",
-        "docker-compose.yml": "Proyecto con Docker Compose",
+        "package.json": "Node.js",
+        "tsconfig.json": "TypeScript",
+        "next.config.js": "Next.js",
+        "next.config.ts": "Next.js",
+        "requirements.txt": "Python (pip)",
+        "Dockerfile": "Docker",
         ".git": "Repositorio Git",
-        "README.md": "Tiene documentación README",
-        ".env.example": "Tiene variables de entorno de ejemplo",
+        "README.md": "Tiene README",
     }
+    for fname, desc in checks.items():
+        if os.path.exists(os.path.join(ruta, fname)):
+            resultado += f"  - {desc} ({fname})\n"
 
-    for filename, desc in checks.items():
-        if os.path.exists(os.path.join(ruta, filename)):
-            resultado += f"  - {desc} ({filename})\n"
-
-    # Leer package.json si existe
+    # Leer package.json
     pkg_path = os.path.join(ruta, "package.json")
     if os.path.exists(pkg_path):
         try:
@@ -289,441 +203,347 @@ def analizar_proyecto(ruta: str = None) -> str:
                 pkg = json.load(f)
             resultado += f"\npackage.json:\n"
             resultado += f"  Nombre: {pkg.get('name', 'N/A')}\n"
-            resultado += f"  Versión: {pkg.get('version', 'N/A')}\n"
-            resultado += f"  Descripción: {pkg.get('description', 'N/A')}\n"
+            resultado += f"  Version: {pkg.get('version', 'N/A')}\n"
+            resultado += f"  Descripcion: {pkg.get('description', 'N/A')}\n"
             deps = pkg.get("dependencies", {})
-            dev_deps = pkg.get("devDependencies", {})
             if deps:
-                resultado += f"  Dependencias: {', '.join(deps.keys())}\n"
+                resultado += f"  Deps: {', '.join(list(deps.keys())[:15])}\n"
+            dev_deps = pkg.get("devDependencies", {})
             if dev_deps:
-                resultado += f"  Dev Dependencies: {', '.join(dev_deps.keys())}\n"
+                resultado += f"  DevDeps: {', '.join(list(dev_deps.keys())[:15])}\n"
             scripts = pkg.get("scripts", {})
             if scripts:
                 resultado += f"  Scripts: {', '.join(scripts.keys())}\n"
-        except Exception:
+        except:
             pass
 
-    # Leer README.md si existe
+    # Leer README
     readme_path = os.path.join(ruta, "README.md")
     if os.path.exists(readme_path):
         try:
             with open(readme_path, "r", encoding="utf-8") as f:
                 readme = f.read()
-            if len(readme) > 2000:
-                readme = readme[:2000] + "\n... [truncado]"
+            if len(readme) > 1500:
+                readme = readme[:1500] + "\n... [truncado]"
             resultado += f"\nREADME.md:\n{readme}\n"
-        except Exception:
+        except:
             pass
 
     return resultado
 
 
-def ejecutar_proyecto(ruta: str = None, comando: str = None) -> str:
-    """Ejecuta un proyecto (npm run dev, python main.py, etc.)."""
-    if ruta is None:
-        ruta = REPOS_DIR
-    if not os.path.exists(ruta):
-        alt = os.path.join(REPOS_DIR, ruta) if not os.path.isabs(ruta) else ruta
-        if os.path.exists(alt):
-            ruta = alt
-
-    if comando:
-        return ejecutar_comando(f'cd "{ruta}" && {comando}')
-
-    # Auto-detectar
-    if os.path.exists(os.path.join(ruta, "package.json")):
-        return ejecutar_comando(f'cd "{ruta}" && npm run dev')
-    elif os.path.exists(os.path.join(ruta, "main.py")):
-        return ejecutar_comando(f'cd "{ruta}" && python main.py')
-    elif os.path.exists(os.path.join(ruta, "app.py")):
-        return ejecutar_comando(f'cd "{ruta}" && python app.py')
-    else:
-        return "No se pudo detectar cómo ejecutar el proyecto. Especifica el comando."
+def escribir_archivo(ruta: str, contenido: str) -> str:
+    try:
+        dir_name = os.path.dirname(ruta)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
+        with open(ruta, "w", encoding="utf-8") as f:
+            f.write(contenido)
+        return f"Archivo escrito: {ruta}"
+    except Exception as e:
+        return f"ERROR: {e}"
 
 
 # ============================================================
-# DETECCIÓN DE INTENCIÓN - El corazón de v4
+# DETECCION DE INTENCION - El corazon de v5
 # ============================================================
 
-class IntentDetector:
+GITHUB_URL_PATTERN = re.compile(
+    r'https?://github\.com/[\w\-]+/[\w\-\.]+(?:\.git)?',
+    re.IGNORECASE
+)
+
+
+def detectar_intencion(mensaje: str) -> dict:
     """
-    Detecta la intención del usuario ANTES de enviar al LLM.
-    Si la intención es clara, ejecuta directamente.
+    Detecta que quiere el usuario ANTES de enviar al LLM.
+    Retorna: {"intencion": str, "params": dict, "confianza": float}
     """
+    msg = mensaje.lower()
+    params = {}
 
-    # Patrones de URL de GitHub
-    GITHUB_PATTERN = re.compile(
-        r'https?://github\.com/[\w\-]+/[\w\-\.]+(?:\.git)?',
-        re.IGNORECASE
-    )
-
-    # Patrones de intención
-    INTENT_PATTERNS = {
-        "clonar": [
-            r'\b(clon[aá]r?|clone|descarg[aá]r?|download|bajar)\b.*\b(repo|repositorio|proyecto|c[oó]digo)\b',
-            r'\b(repo|repositorio)\b.*\b(clon[aá]r?|descarg[aá]r?|download)\b',
-            r'github\.com/[\w\-]+/[\w\-\.]+',  # Cualquier URL de GitHub
-        ],
-        "instalar": [
-            r'\b(instal[aá]r?|install|configur[aá]r?|setup|dependencias|dependencies)\b',
-            r'\bnpm\s+install\b',
-            r'\bpip\s+install\b',
-        ],
-        "leer": [
-            r'\b(le[eé]r?|read|mostr[aá]r?|show|ver|conteni?do|c[oó]digo)\b.*\b(archivo|file|c[oó]digo|fuente|source)\b',
-            r'\b(qu[eé]|what)\b.*\b(hay|contiene|tiene|inside)\b.*\b(archivo|file|repo|proyecto)\b',
-        ],
-        "listar": [
-            r'\b(list[aá]r?|ls|dir|mostr[aá]r?)\b.*\b(archivo|files|carpeta|folder|directorio|directory|contenido)\b',
-            r'\b(qu[eé]\s+hay)\b.*\b(carpeta|directorio|folder|dentro)\b',
-        ],
-        "analizar": [
-            r'\b(analiz[aá]r?|analyze|revis[aá]r?|review|examin[aá]r?|examine|estudi[aá]r?)\b.*\b(proyecto|repo|c[oó]digo|code)\b',
-            r'\b(qu[eé]\s+(es|hace|tiene))\b.*\b(proyecto|repo|esto)\b',
-        ],
-        "ejecutar": [
-            r'\b(ejecut[aá]r?|run|correr|inici[aá]r?|start|levant[aá]r?)\b.*\b(proyecto|app|servidor|server|c[oó]digo)\b',
-            r'\bnpm\s+run\b',
-            r'\bnpm\s+start\b',
-            r'\bnpm\s+dev\b',
-        ],
-        "comando": [
-            r'\b(ejecut[aá]r?|run|correr)\b.*\b(comando|command|terminal|consola|cmd|shell)\b',
-        ],
-        "buscar": [
-            r'\b(busc[aá]r?|search|encontr[aá]r?|find|buscar)\b.*\b(texto|cadena|string|patr[oó]n|pattern|archivo|file)\b',
-        ],
-        "escribir": [
-            r'\b(cre[aá]r?|create|escrib[aá]r?|write|modific[aá]r?|modify|edit[aá]r?)\b.*\b(archivo|file|fichero)\b',
-        ],
-    }
-
-    @classmethod
-    def detect(cls, message: str) -> dict:
-        """
-        Detecta la intención del usuario.
-        Retorna: {"intent": str, "params": dict, "confidence": float}
-        """
-        message_lower = message.lower()
-
-        # 1. Detectar URLs de GitHub - PRIORIDAD MÁXIMA
-        github_urls = cls.GITHUB_PATTERN.findall(message)
-        if github_urls:
-            url = github_urls[0]
-            # Si hay URL de GitHub, casi siempre quieren clonar
-            return {
-                "intent": "clonar",
-                "params": {"url": url},
-                "confidence": 0.95
-            }
-
-        # 2. Detectar otras intenciones por patrones
-        best_intent = None
-        best_confidence = 0.0
-
-        for intent, patterns in cls.INTENT_PATTERNS.items():
-            for pattern in patterns:
-                match = re.search(pattern, message_lower)
-                if match:
-                    confidence = 0.7 + (0.1 * len(match.group()) / max(len(message), 1))
-                    if confidence > best_confidence:
-                        best_confidence = confidence
-                        best_intent = intent
-
-        # 3. Extraer parámetros según la intención
-        params = {}
-        if best_intent:
-            params = cls._extract_params(message, best_intent)
-
-        if best_intent and best_confidence >= 0.6:
-            return {
-                "intent": best_intent,
-                "params": params,
-                "confidence": best_confidence
-            }
-
-        # 4. No se detectó intención clara
+    # === PRIORIDAD 1: URL de GitHub ===
+    urls = GITHUB_URL_PATTERN.findall(mensaje)
+    if urls:
+        url = urls[0].rstrip("/")
+        repo_name = url.split("/")[-1].replace(".git", "")
+        # Si tiene URL de GitHub + palabras de clonar/descargar/analizar
         return {
-            "intent": "conversar",
-            "params": {},
-            "confidence": 0.0
+            "intencion": "clonar_y_analizar",
+            "params": {"url": url, "repo_name": repo_name},
+            "confianza": 0.95
         }
 
-    @classmethod
-    def _extract_params(cls, message: str, intent: str) -> dict:
-        """Extrae parámetros del mensaje según la intención."""
-        params = {}
+    # === PRIORIDAD 2: Patrones de intencion ===
 
-        if intent == "clonar":
-            urls = cls.GITHUB_PATTERN.findall(message)
-            if urls:
-                params["url"] = urls[0]
+    # Instalar
+    if any(w in msg for w in ["instal", "npm install", "pip install", "dependencias", "dependencies"]):
+        # Buscar nombre de proyecto
+        for d in os.listdir(REPOS_DIR):
+            if d.lower() in msg:
+                params["repo_name"] = d
+                break
+        return {"intencion": "instalar", "params": params, "confianza": 0.85}
 
-        elif intent == "leer":
-            # Buscar rutas de archivo
-            file_patterns = [
-                r'[\w\\/:]+\.\w+',  # Rutas con extensión
-                r'"([^"]+)"',  # Entre comillas
-                r"'([^']+)'",
-            ]
-            for pattern in file_patterns:
-                match = re.search(pattern, message)
-                if match:
-                    params["ruta"] = match.group(1) if match.lastindex else match.group(0)
-                    break
+    # Analizar
+    if any(w in msg for w in ["analiz", "revis", "examin", "que es", "que tiene", "estructura"]):
+        for d in os.listdir(REPOS_DIR):
+            if d.lower() in msg:
+                params["repo_name"] = d
+                break
+        return {"intencion": "analizar", "params": params, "confianza": 0.80}
 
-        elif intent == "listar":
-            # Buscar ruta de directorio
-            dir_match = re.search(r'(?:en|de|del|in)\s+([\w\\:]+)', message)
-            if dir_match:
-                params["ruta"] = dir_match.group(1)
+    # Leer archivo
+    if any(w in msg for w in ["leer", "mostrar", "ver archivo", "contenido de", "que hay en"]):
+        # Buscar nombre de archivo
+        for d in os.listdir(REPOS_DIR):
+            if d.lower() in msg:
+                params["repo_name"] = d
+                break
+        file_match = re.search(r'[\w\-]+\.\w+', mensaje)
+        if file_match:
+            params["archivo"] = file_match.group(0)
+        return {"intencion": "leer", "params": params, "confianza": 0.75}
 
-        elif intent == "analizar":
-            # Buscar nombre de proyecto o ruta
-            repo_match = cls.GITHUB_PATTERN.findall(message)
-            if repo_match:
-                params["url"] = repo_match[0]
-                params["repo_name"] = repo_match[0].rstrip("/").split("/")[-1].replace(".git", "")
+    # Listar
+    if any(w in msg for w in ["listar", "que hay", "mostrar archivos", "que archivos"]):
+        return {"intencion": "listar", "params": params, "confianza": 0.75}
 
-        elif intent == "ejecutar":
-            # Buscar comando específico
-            cmd_match = re.search(r'(?:comando|cmd|run)\s+[:=]?\s*([^\.,]+)', message, re.IGNORECASE)
-            if cmd_match:
-                params["comando"] = cmd_match.group(1).strip()
+    # Ejecutar comando
+    if any(w in msg for w in ["ejecuta", "correr", "run ", "npm run", "npm start"]):
+        cmd_match = re.search(r'(?:ejecuta|correr|run)\s+(.+)', msg)
+        if cmd_match:
+            params["comando"] = cmd_match.group(1).strip()
+        return {"intencion": "comando", "params": params, "confianza": 0.70}
 
-        elif intent == "comando":
-            # Extraer el comando a ejecutar
-            cmd_match = re.search(r'(?:ejecutar|run|correr)\s+["\']?([^"\']+?)["\']?\s*$', message, re.IGNORECASE)
-            if cmd_match:
-                params["comando"] = cmd_match.group(1).strip()
-            else:
-                # Buscar comandos comunes
-                for cmd_prefix in ["git ", "npm ", "pip ", "python ", "node ", "cd "]:
-                    if cmd_prefix in message.lower():
-                        idx = message.lower().find(cmd_prefix)
-                        params["comando"] = message[idx:].strip()
+    # No se detecto intencion clara
+    return {"intencion": "conversar", "params": {}, "confianza": 0.0}
+
+
+# ============================================================
+# EJECUCION DIRECTA - Sin pasar por el LLM
+# ============================================================
+
+def ejecutar_intencion(intencion_data: dict) -> list:
+    """
+    Ejecuta la intencion detectada DIRECTAMENTE.
+    Retorna una lista de pasos ejecutados para mostrar al usuario.
+    """
+    pasos = []
+    intencion = intencion_data["intencion"]
+    params = intencion_data["params"]
+
+    if intencion == "clonar_y_analizar":
+        url = params.get("url", "")
+        repo_name = params.get("repo_name", "")
+        repo_path = os.path.join(REPOS_DIR, repo_name)
+
+        # Paso 1: Clonar
+        pasos.append({
+            "accion": "clonar_repositorio",
+            "detalle": f"git clone {url}",
+            "resultado": clonar_repositorio(url)
+        })
+
+        # Paso 2: Analizar (auto)
+        if os.path.exists(repo_path):
+            pasos.append({
+                "accion": "analizar_proyecto",
+                "detalle": f"Analizando {repo_path}",
+                "resultado": analizar_proyecto(repo_path)
+            })
+
+        # Paso 3: Si tiene package.json, sugerir instalar
+        if os.path.exists(os.path.join(repo_path, "package.json")):
+            pasos.append({
+                "accion": "sugerencia",
+                "detalle": "Dependencias Node.js detectadas",
+                "resultado": f"Se detecto package.json. Escribe 'instalar dependencias {repo_name}' para instalarlas."
+            })
+
+    elif intencion == "instalar":
+        repo_name = params.get("repo_name", "")
+        if repo_name:
+            repo_path = os.path.join(REPOS_DIR, repo_name)
+        else:
+            # Buscar primer repo con package.json o requirements.txt
+            for d in os.listdir(REPOS_DIR):
+                full = os.path.join(REPOS_DIR, d)
+                if os.path.isdir(full):
+                    if os.path.exists(os.path.join(full, "package.json")) or os.path.exists(os.path.join(full, "requirements.txt")):
+                        repo_name = d
+                        repo_path = full
                         break
+            else:
+                repo_path = REPOS_DIR
 
-        return params
+        pasos.append({
+            "accion": "instalar_dependencias",
+            "detalle": f"Instalando en {repo_path}",
+            "resultado": instalar_dependencias(repo_path)
+        })
 
+    elif intencion == "analizar":
+        repo_name = params.get("repo_name", "")
+        if repo_name:
+            repo_path = os.path.join(REPOS_DIR, repo_name)
+        else:
+            repo_path = REPOS_DIR
+        pasos.append({
+            "accion": "analizar_proyecto",
+            "detalle": f"Analizando {repo_path}",
+            "resultado": analizar_proyecto(repo_path)
+        })
 
-# ============================================================
-# EJECUTOR DIRECTO - Ejecuta sin pasar por el LLM
-# ============================================================
+    elif intencion == "leer":
+        repo_name = params.get("repo_name", "")
+        archivo = params.get("archivo", "")
+        if repo_name and archivo:
+            ruta = os.path.join(REPOS_DIR, repo_name, archivo)
+        elif archivo:
+            ruta = archivo
+        else:
+            ruta = ""
+        if ruta:
+            pasos.append({
+                "accion": "leer_archivo",
+                "detalle": f"Leyendo {ruta}",
+                "resultado": leer_archivo(ruta)
+            })
+        else:
+            pasos.append({
+                "accion": "error",
+                "detalle": "Falta archivo",
+                "resultado": "Especifica que archivo quieres leer, ej: 'leer README.md de signalTrade'"
+            })
 
-class DirectExecutor:
-    """
-    Ejecuta acciones directamente basándose en la intención detectada.
-    NO necesita el LLM para acciones obvias.
-    """
+    elif intencion == "listar":
+        pasos.append({
+            "accion": "listar_archivos",
+            "detalle": f"Listando {REPOS_DIR}",
+            "resultado": listar_archivos(REPOS_DIR)
+        })
 
-    @staticmethod
-    def execute(intent_data: dict) -> dict:
-        """
-        Ejecuta una acción directamente.
-        Retorna: {"success": bool, "tool": str, "result": str, "details": dict}
-        """
-        intent = intent_data["intent"]
-        params = intent_data["params"]
+    elif intencion == "comando":
+        comando = params.get("comando", "")
+        if comando:
+            pasos.append({
+                "accion": "ejecutar_comando",
+                "detalle": f"Ejecutando: {comando}",
+                "resultado": ejecutar_comando(comando)
+            })
+        else:
+            pasos.append({
+                "accion": "error",
+                "detalle": "Falta comando",
+                "resultado": "Especifica el comando, ej: 'ejecuta git status'"
+            })
 
-        if intent == "clonar":
-            url = params.get("url")
-            if url:
-                result = clonar_repositorio(url)
-                repo_name = url.rstrip("/").split("/")[-1].replace(".git", "")
-                return {
-                    "success": True,
-                    "tool": "clonar_repositorio",
-                    "result": result,
-                    "details": {"url": url, "repo_name": repo_name, "path": os.path.join(REPOS_DIR, repo_name)}
-                }
-            return {"success": False, "tool": "clonar_repositorio", "result": "No se encontró URL de GitHub", "details": {}}
-
-        elif intent == "instalar":
-            ruta = params.get("ruta", REPOS_DIR)
-            # Si params tiene repo_name, buscar esa carpeta
-            if "repo_name" in params:
-                ruta = os.path.join(REPOS_DIR, params["repo_name"])
-            gestor = params.get("gestor", "auto")
-            result = instalar_dependencias(ruta, gestor)
-            return {"success": True, "tool": "instalar_dependencias", "result": result, "details": {"ruta": ruta}}
-
-        elif intent == "leer":
-            ruta = params.get("ruta", "")
-            if ruta:
-                result = leer_archivo(ruta)
-                return {"success": True, "tool": "leer_archivo", "result": result, "details": {"ruta": ruta}}
-            return {"success": False, "tool": "leer_archivo", "result": "No se especificó archivo", "details": {}}
-
-        elif intent == "listar":
-            ruta = params.get("ruta", REPOS_DIR)
-            result = listar_archivos(ruta)
-            return {"success": True, "tool": "listar_archivos", "result": result, "details": {"ruta": ruta}}
-
-        elif intent == "analizar":
-            repo_name = params.get("repo_name")
-            ruta = os.path.join(REPOS_DIR, repo_name) if repo_name else REPOS_DIR
-            result = analizar_proyecto(ruta)
-            return {"success": True, "tool": "analizar_proyecto", "result": result, "details": {"ruta": ruta}}
-
-        elif intent == "ejecutar":
-            ruta = params.get("ruta", REPOS_DIR)
-            comando = params.get("comando")
-            result = ejecutar_proyecto(ruta, comando)
-            return {"success": True, "tool": "ejecutar_proyecto", "result": result, "details": {"ruta": ruta}}
-
-        elif intent == "comando":
-            comando = params.get("comando")
-            if comando:
-                result = ejecutar_comando(comando)
-                return {"success": True, "tool": "ejecutar_comando", "result": result, "details": {"comando": comando}}
-            return {"success": False, "tool": "ejecutar_comando", "result": "No se especificó comando", "details": {}}
-
-        elif intent == "buscar":
-            patron = params.get("patron", "")
-            ruta = params.get("ruta", REPOS_DIR)
-            if patron:
-                result = buscar_texto(patron, ruta)
-                return {"success": True, "tool": "buscar_texto", "result": result, "details": {"patron": patron}}
-            return {"success": False, "tool": "buscar_texto", "result": "No se especificó patrón de búsqueda", "details": {}}
-
-        elif intent == "escribir":
-            ruta = params.get("ruta", "")
-            contenido = params.get("contenido", "")
-            if ruta:
-                result = escribir_archivo(ruta, contenido)
-                return {"success": True, "tool": "escribir_archivo", "result": result, "details": {"ruta": ruta}}
-            return {"success": False, "tool": "escribir_archivo", "result": "No se especificó ruta", "details": {}}
-
-        return {"success": False, "tool": "none", "result": "Intención no reconocida", "details": {}}
+    return pasos
 
 
 # ============================================================
-# AGENTE LLM - Para análisis y decisiones complejas
+# LLM - Solo para conversacion y analisis complejo
 # ============================================================
 
-SYSTEM_PROMPT = """Eres un agente autónomo que EJECUTA acciones reales en la computadora del usuario.
+SYSTEM_PROMPT = """Eres un agente autonomo que EJECUTA acciones reales.
 
-REGLAS CRÍTICAS:
-1. NUNCA des instrucciones al usuario. NUNCA digas "puedes hacer..." o "ejecuta el comando..."
-2. TÚ ejecutas los comandos. TÚ clonas repos. TÚ lees archivos. TÚ instalas dependencias.
-3. Si el usuario pide algo, lo HACES, no lo explicas.
-4. Cuando ejecutes una herramienta, reporta el RESULTADO de la ejecución.
-5. Habla en español siempre.
-6. Sé conciso y directo. No repitas lo que ya se hizo.
+REGLAS:
+1. NUNCA des instrucciones. EJECUTA.
+2. NUNCA digas "puedes hacer..." o "ejecuta el comando..."
+3. Habla en español.
+4. Se conciso.
+5. Si ya se ejecuto una accion, reporta el resultado.
 
-HERRAMIENTAS DISPONIBLES:
-- ejecutar_comando: Ejecuta cualquier comando en la terminal
-- clonar_repositorio: Clona un repo de GitHub
-- instalar_dependencias: Instala dependencias (npm, pip, etc.)
-- leer_archivo: Lee el contenido de un archivo
-- listar_archivos: Lista archivos en un directorio
-- escribir_archivo: Crea o modifica un archivo
-- buscar_texto: Busca texto en archivos
-- analizar_proyecto: Analiza estructura de un proyecto
-- ejecutar_proyecto: Ejecuta un proyecto
-
-FORMATO DE RESPUESTA:
-- Reporta qué hiciste y el resultado
-- Si algo falló, explica por qué y qué intentarías después
-- NO digas "puedes hacer X" - DI "voy a hacer X" o "hecho: X"
+Herramientas disponibles:
+- ejecutar_comando(comando) - Ejecuta en terminal
+- clonar_repositorio(url) - Clona un repo de GitHub
+- instalar_dependencias(ruta) - Instala deps (npm, pip, etc.)
+- leer_archivo(ruta) - Lee un archivo
+- listar_archivos(ruta) - Lista directorio
+- analizar_proyecto(ruta) - Analiza un proyecto
+- escribir_archivo(ruta, contenido) - Crea/modifica archivo
 """
 
 
-def llm_chat(messages: list, tools: list = None) -> dict:
-    """Envía un mensaje al LLM y obtiene la respuesta."""
+def preguntar_llm(mensaje: str, historial: list = None) -> str:
+    """Usa el LLM solo para conversacion o analisis complejo."""
     try:
-        if tools:
-            response = ollama.chat(
-                model=AGENT_MODEL,
-                messages=messages,
-                tools=tools
-            )
-        else:
-            response = ollama.chat(
-                model=AGENT_MODEL,
-                messages=messages
-            )
-        return response
-    except Exception as e:
-        return {"error": str(e)}
+        import ollama
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
+        if historial:
+            for h in historial[-4:]:
+                messages.append(h)
 
-def llm_analyze(context: str, question: str) -> str:
-    """Usa el LLM solo para análisis, no para ejecución."""
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"Contexto:\n{context}\n\nPregunta: {question}"}
-    ]
-    try:
+        messages.append({"role": "user", "content": mensaje})
+
         response = ollama.chat(model=AGENT_MODEL, messages=messages)
-        return response.get("message", {}).get("content", "Sin respuesta del modelo.")
+        return response.get("message", {}).get("content", "Sin respuesta.")
     except Exception as e:
         return f"Error del modelo: {e}"
 
 
 # ============================================================
-# MOTOR PRINCIPAL - Orquesta todo
+# PROCESAMIENTO PRINCIPAL
 # ============================================================
 
-def process_message(user_message: str, chat_history: list) -> str:
+def procesar_mensaje(user_message: str) -> tuple:
     """
-    Procesa un mensaje del usuario con el enfoque híbrido:
-    1. Detectar intención
-    2. Si es clara → ejecutar directamente
-    3. Si es ambigua → usar LLM con herramientas
+    Procesa un mensaje del usuario.
+    Retorna: (respuesta_html, pasos_debug)
     """
+    pasos_debug = []
 
-    # === PASO 1: Detectar intención ===
-    intent_data = IntentDetector.detect(user_message)
+    # 1. Detectar intencion
+    intencion = detectar_intencion(user_message)
+    pasos_debug.append(f"Intencion: {intencion['intencion']} (confianza: {intencion['confianza']:.0%})")
+    pasos_debug.append(f"Params: {intencion['params']}")
 
-    log_entry = f"[{datetime.now().strftime('%H:%M:%S')}] Intención detectada: {intent_data['intent']} (confianza: {intent_data['confidence']:.0%})"
+    # 2. Si la intencion es clara, ejecutar directamente
+    if intencion["confianza"] >= 0.7 and intencion["intencion"] != "conversar":
+        pasos_debug.append(">> EJECUCION DIRECTA (sin LLM)")
 
-    # === PASO 2: Si la intención es clara, ejecutar directamente ===
-    if intent_data["confidence"] >= 0.7 and intent_data["intent"] != "conversar":
+        pasos = ejecutar_intencion(intencion)
 
-        # Ejecutar la acción directamente
-        exec_result = DirectExecutor.execute(intent_data)
+        # Construir respuesta visual
+        respuesta = ""
+        for i, paso in enumerate(pasos, 1):
+            accion = paso["accion"]
+            detalle = paso["detalle"]
+            resultado = paso["resultado"]
 
-        # Construir respuesta
-        response = f"**Acción ejecutada: {exec_result['tool']}**\n\n"
+            pasos_debug.append(f"  Paso {i}: {accion} -> {detalle}")
 
-        if exec_result["success"]:
-            response += f"Resultado:\n```\n{exec_result['result']}\n```"
+            if accion == "sugerencia":
+                respuesta += f"💡 **{detalle}**\n\n{resultado}\n\n"
+            elif "ERROR" in resultado or "Error" in resultado:
+                respuesta += f"❌ **Paso {i}: {accion}** — {detalle}\n```\n{resultado}\n```\n\n"
+            else:
+                respuesta += f"✅ **Paso {i}: {accion}** — {detalle}\n```\n{resultado}\n```\n\n"
 
-            # Si fue clonar, preguntar si quiere analizar
-            if intent_data["intent"] == "clonar" and exec_result["details"].get("repo_name"):
-                repo_name = exec_result["details"]["repo_name"]
-                repo_path = exec_result["details"].get("path", os.path.join(REPOS_DIR, repo_name))
-                # Auto-analizar después de clonar
-                analysis = analizar_proyecto(repo_path)
-                response += f"\n\n---\n**Análisis automático del proyecto:**\n```\n{analysis}\n```"
+        return respuesta, pasos_debug
 
-            # Si fue analizar, ofrecer siguiente paso
-            elif intent_data["intent"] == "analizar":
-                response += "\n\n¿Quieres que instale las dependencias o revise algún archivo específico?"
-        else:
-            response += f"Error: {exec_result['result']}"
-
-        return response, log_entry
-
-    # === PASO 3: Si la intención NO es clara, usar LLM con herramientas ===
+    # 3. Si no es clara, usar LLM con tool calling
     else:
+        pasos_debug.append(">> Usando LLM (intencion no clara)")
 
-        # Definir herramientas para Ollama native tool calling
+        try:
+            import ollama
+        except ImportError:
+            return "Error: ollama no esta instalado. Ejecuta: pip install ollama", pasos_debug
+
+        # Definir herramientas para Ollama
         ollama_tools = [
             {
                 "type": "function",
                 "function": {
                     "name": "ejecutar_comando",
-                    "description": "Ejecuta un comando en la terminal del sistema. Úsalo para cualquier operación que requiera la consola.",
+                    "description": "Ejecuta un comando en la terminal del sistema.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "comando": {
-                                "type": "string",
-                                "description": "El comando exacto a ejecutar en la terminal (ej: 'git status', 'npm install', 'dir')"
-                            }
+                            "comando": {"type": "string", "description": "Comando a ejecutar"}
                         },
                         "required": ["comando"]
                     }
@@ -733,14 +553,11 @@ def process_message(user_message: str, chat_history: list) -> str:
                 "type": "function",
                 "function": {
                     "name": "clonar_repositorio",
-                    "description": "Clona un repositorio de GitHub a la computadora local. Úsalo cuando el usuario quiera descargar un repo.",
+                    "description": "Clona un repositorio de GitHub.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "url": {
-                                "type": "string",
-                                "description": "La URL del repositorio de GitHub (ej: 'https://github.com/usuario/repo')"
-                            }
+                            "url": {"type": "string", "description": "URL del repositorio"}
                         },
                         "required": ["url"]
                     }
@@ -750,18 +567,12 @@ def process_message(user_message: str, chat_history: list) -> str:
                 "type": "function",
                 "function": {
                     "name": "instalar_dependencias",
-                    "description": "Instala las dependencias de un proyecto. Detecta automáticamente npm, pip, etc.",
+                    "description": "Instala dependencias de un proyecto.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "ruta": {
-                                "type": "string",
-                                "description": "Ruta al directorio del proyecto"
-                            },
-                            "gestor": {
-                                "type": "string",
-                                "description": "Gestor de paquetes: npm, pip, yarn, pipenv, poetry, o auto"
-                            }
+                            "ruta": {"type": "string", "description": "Ruta del proyecto"},
+                            "gestor": {"type": "string", "description": "npm, pip, auto"}
                         },
                         "required": ["ruta"]
                     }
@@ -771,14 +582,11 @@ def process_message(user_message: str, chat_history: list) -> str:
                 "type": "function",
                 "function": {
                     "name": "leer_archivo",
-                    "description": "Lee y muestra el contenido de un archivo de texto.",
+                    "description": "Lee el contenido de un archivo.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "ruta": {
-                                "type": "string",
-                                "description": "Ruta al archivo que se quiere leer"
-                            }
+                            "ruta": {"type": "string", "description": "Ruta del archivo"}
                         },
                         "required": ["ruta"]
                     }
@@ -788,14 +596,11 @@ def process_message(user_message: str, chat_history: list) -> str:
                 "type": "function",
                 "function": {
                     "name": "listar_archivos",
-                    "description": "Lista los archivos y carpetas en un directorio.",
+                    "description": "Lista archivos de un directorio.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "ruta": {
-                                "type": "string",
-                                "description": "Ruta del directorio a listar"
-                            }
+                            "ruta": {"type": "string", "description": "Ruta del directorio"}
                         }
                     }
                 }
@@ -804,14 +609,11 @@ def process_message(user_message: str, chat_history: list) -> str:
                 "type": "function",
                 "function": {
                     "name": "analizar_proyecto",
-                    "description": "Analiza la estructura completa de un proyecto y muestra un resumen detallado.",
+                    "description": "Analiza la estructura de un proyecto.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "ruta": {
-                                "type": "string",
-                                "description": "Ruta al directorio del proyecto"
-                            }
+                            "ruta": {"type": "string", "description": "Ruta del proyecto"}
                         }
                     }
                 }
@@ -820,94 +622,40 @@ def process_message(user_message: str, chat_history: list) -> str:
                 "type": "function",
                 "function": {
                     "name": "escribir_archivo",
-                    "description": "Crea o modifica un archivo con el contenido especificado.",
+                    "description": "Crea o modifica un archivo.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "ruta": {
-                                "type": "string",
-                                "description": "Ruta del archivo a crear o modificar"
-                            },
-                            "contenido": {
-                                "type": "string",
-                                "description": "Contenido a escribir en el archivo"
-                            }
+                            "ruta": {"type": "string", "description": "Ruta del archivo"},
+                            "contenido": {"type": "string", "description": "Contenido a escribir"}
                         },
                         "required": ["ruta", "contenido"]
                     }
                 }
             },
-            {
-                "type": "function",
-                "function": {
-                    "name": "buscar_texto",
-                    "description": "Busca un patrón de texto en los archivos de un directorio.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "patron": {
-                                "type": "string",
-                                "description": "Patrón de texto a buscar"
-                            },
-                            "ruta": {
-                                "type": "string",
-                                "description": "Directorio donde buscar"
-                            }
-                        },
-                        "required": ["patron"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "ejecutar_proyecto",
-                    "description": "Ejecuta un proyecto (npm run dev, python main.py, etc.).",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "ruta": {
-                                "type": "string",
-                                "description": "Ruta al proyecto"
-                            },
-                            "comando": {
-                                "type": "string",
-                                "description": "Comando específico para ejecutar (opcional, se auto-detecta si no se especifica)"
-                            }
-                        },
-                        "required": ["ruta"]
-                    }
-                }
-            },
         ]
 
-        # Mapeo de nombres a funciones
         function_map = {
             "ejecutar_comando": ejecutar_comando,
             "clonar_repositorio": clonar_repositorio,
-            "instalar_dependencias": instalar_dependencias,
+            "instalar_dependencias": lambda ruta, gestor="auto": instalar_dependencias(ruta, gestor),
             "leer_archivo": leer_archivo,
             "listar_archivos": listar_archivos,
             "analizar_proyecto": analizar_proyecto,
             "escribir_archivo": escribir_archivo,
-            "buscar_texto": buscar_texto,
-            "ejecutar_proyecto": ejecutar_proyecto,
         }
 
-        # Construir mensajes para el LLM
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_message}
+        ]
 
-        # Añadir historial reciente (últimos 6 mensajes)
-        for msg in chat_history[-6:]:
-            messages.append(msg)
-
-        messages.append({"role": "user", "content": user_message})
-
-        # Bucle de tool calling
-        final_response = ""
+        respuesta_final = ""
         tool_results = []
 
         for iteration in range(MAX_ITERATIONS):
+            pasos_debug.append(f"  LLM iteracion {iteration + 1}")
+
             try:
                 response = ollama.chat(
                     model=AGENT_MODEL,
@@ -915,16 +663,15 @@ def process_message(user_message: str, chat_history: list) -> str:
                     tools=ollama_tools
                 )
             except Exception as e:
-                final_response = f"Error del modelo: {e}"
+                pasos_debug.append(f"  ERROR LLM: {e}")
+                respuesta_final = f"Error del modelo: {e}"
                 break
 
             msg = response.get("message", {})
 
             # Si no hay tool calls, es la respuesta final
             if not msg.get("tool_calls"):
-                final_response = msg.get("content", "")
-                # Filtrar instrucciones del texto
-                final_response = filter_instructions(final_response)
+                respuesta_final = msg.get("content", "")
                 break
 
             # Procesar tool calls
@@ -932,14 +679,15 @@ def process_message(user_message: str, chat_history: list) -> str:
                 func_name = tool_call.get("function", {}).get("name")
                 func_args = tool_call.get("function", {}).get("arguments", {})
 
-                # Buscar y ejecutar la función
+                pasos_debug.append(f"  Tool call: {func_name}({func_args})")
+
                 if func_name in function_map:
                     try:
                         result = function_map[func_name](**func_args)
                     except Exception as e:
-                        result = f"Error ejecutando {func_name}: {e}"
+                        result = f"Error: {e}"
                 else:
-                    result = f"Función no encontrada: {func_name}"
+                    result = f"Funcion no encontrada: {func_name}"
 
                 tool_results.append({
                     "tool": func_name,
@@ -947,132 +695,126 @@ def process_message(user_message: str, chat_history: list) -> str:
                     "result": result
                 })
 
-                # Añadir al contexto del LLM
+                pasos_debug.append(f"  Resultado: {result[:100]}...")
+
                 messages.append({"role": "assistant", "content": f"[Ejecutando {func_name}({func_args})]"})
-                messages.append({"role": "user", "content": f"Resultado de {func_name}:\n{result}\n\nContinúa con la siguiente acción o responde al usuario."})
+                messages.append({"role": "user", "content": f"Resultado de {func_name}:\n{result}\n\nContinua."})
 
-        # Si no hubo respuesta final del LLM, construir una con los resultados
-        if not final_response and tool_results:
-            final_response = "**Acciones ejecutadas:**\n\n"
+        # Construir respuesta
+        if tool_results and not respuesta_final:
+            respuesta_final = "**Acciones ejecutadas:**\n\n"
             for tr in tool_results:
-                final_response += f"- **{tr['tool']}**({tr['args']}):\n```\n{tr['result']}\n```\n\n"
+                respuesta_final += f"- **{tr['tool']}**({tr['args']}):\n```\n{tr['result']}\n```\n\n"
 
-        return final_response, log_entry
-
-
-def filter_instructions(text: str) -> str:
-    """Filtra instrucciones del texto de respuesta del LLM."""
-    # Patrones de instrucciones que NO debe dar
-    instruction_patterns = [
-        r'puedes\s+(ejecutar|correr|instalar|clonar|usar|hacer)',
-        r'tienes\s+que\s+(ejecutar|correr|instalar|clonar)',
-        r'deber[ií]as\s+(ejecutar|correr|instalar|clonar)',
-        r'para\s+hacerlo\s+(puedes|debes|tienes)',
-        r'ejecuta\s+el\s+siguiente\s+comando',
-        r'usa\s+el\s+comando',
-        r'git\s+clone\s+https?://',  # No debe sugerir comandos git
-        r'npm\s+install',
-        r'pip\s+install',
-    ]
-
-    filtered = text
-    for pattern in instruction_patterns:
-        filtered = re.sub(pattern, '', filtered, flags=re.IGNORECASE)
-
-    # Limpiar líneas vacías múltiples
-    filtered = re.sub(r'\n{3,}', '\n\n', filtered)
-
-    return filtered.strip() if filtered.strip() else text
+        return respuesta_final, pasos_debug
 
 
 # ============================================================
 # INTERFAZ STREAMLIT
 # ============================================================
 
-def init_session():
-    """Inicializa variables de sesión."""
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    if "tool_log" not in st.session_state:
-        st.session_state.tool_log = []
-
-
 def main():
     st.set_page_config(
-        page_title="Agente Autónomo Local",
+        page_title="Agente Autonomo Local v5",
         page_icon="🤖",
         layout="wide"
     )
 
-    # CSS personalizado
     st.markdown("""
     <style>
     .stApp { max-width: 1200px; margin: 0 auto; }
-    .tool-log { background: #1a1a2e; color: #00ff88; padding: 10px; border-radius: 5px;
-                font-family: monospace; font-size: 12px; max-height: 200px; overflow-y: auto; }
-    .success-box { background: #0d2818; border-left: 4px solid #00ff88; padding: 10px; margin: 5px 0; border-radius: 3px; }
-    .error-box { background: #2d0d0d; border-left: 4px solid #ff4444; padding: 10px; margin: 5px 0; border-radius: 3px; }
+    .debug-box { background: #1a1a2e; color: #00ff88; padding: 10px; border-radius: 5px;
+                font-family: monospace; font-size: 11px; max-height: 300px; overflow-y: auto;
+                white-space: pre-wrap; word-break: break-all; }
+    .step-ok { background: #0d2818; border-left: 4px solid #00ff88; padding: 8px; margin: 5px 0; border-radius: 3px; }
+    .step-err { background: #2d0d0d; border-left: 4px solid #ff4444; padding: 8px; margin: 5px 0; border-radius: 3px; }
+    .step-info { background: #0d1a2d; border-left: 4px solid #4488ff; padding: 8px; margin: 5px 0; border-radius: 3px; }
     </style>
     """, unsafe_allow_html=True)
 
-    st.title("🤖 Agente Autónomo Local v4")
-    st.caption("Ejecución garantizada - Detecta intención y actúa directamente")
+    # Inicializar session state
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "debug_log" not in st.session_state:
+        st.session_state.debug_log = []
 
-    # Sidebar con info
+    st.title("🤖 Agente Autonomo Local v5")
+    st.caption("Ejecucion directa con debug visible — Detecta intencion y ejecuta SIN pasar por el LLM")
+
+    # === SIDEBAR ===
     with st.sidebar:
-        st.header("⚙️ Configuración")
-        st.write(f"**Modelo agente:** {AGENT_MODEL}")
-        st.write(f"**Dir. repos:** {REPOS_DIR}")
-        st.write(f"**Máx. iteraciones:** {MAX_ITERATIONS}")
+        st.header("⚙️ Config")
+        st.write(f"**Modelo:** {AGENT_MODEL}")
+        st.write(f"**Repos dir:** {REPOS_DIR}")
+        st.write(f"**SO:** {platform.system()}")
 
-        if st.button("🗑️ Limpiar historial"):
+        if st.button("🗑️ Limpiar historial", use_container_width=True):
             st.session_state.messages = []
-            st.session_state.tool_log = []
+            st.session_state.debug_log = []
             st.rerun()
 
-        st.header("📋 Log de herramientas")
-        if st.session_state.get("tool_log"):
-            log_text = "\n".join(st.session_state.tool_log[-20:])
-            st.markdown(f'<div class="tool-log">{log_text}</div>', unsafe_allow_html=True)
+        if st.button("🧪 Test: git clone", use_container_width=True):
+            resultado = clonar_repositorio("https://github.com/yecos/signalTrade")
+            st.code(resultado)
 
-        st.header("📁 Repos disponibles")
+        if st.button("🧪 Test: listar repos", use_container_width=True):
+            resultado = listar_archivos(REPOS_DIR)
+            st.code(resultado)
+
+        if st.button("🧪 Test: analizar signalTrade", use_container_width=True):
+            repo_path = os.path.join(REPOS_DIR, "signalTrade")
+            if os.path.exists(repo_path):
+                resultado = analizar_proyecto(repo_path)
+                st.code(resultado)
+            else:
+                st.error("signalTrade no encontrado. Clona primero.")
+
+        st.header("🐛 Debug Log")
+        if st.session_state.debug_log:
+            log_text = "\n".join(st.session_state.debug_log[-30:])
+            st.markdown(f'<div class="debug-box">{log_text}</div>', unsafe_allow_html=True)
+
+        st.header("📁 Repos")
         try:
             repos = [d for d in os.listdir(REPOS_DIR)
                      if os.path.isdir(os.path.join(REPOS_DIR, d)) and not d.startswith(".")]
             for repo in repos:
-                st.write(f"- {repo}")
-        except Exception:
-            st.write("Sin repos aún")
+                st.write(f"📂 {repo}")
+        except:
+            st.write("Sin repos")
 
-    init_session()
-
-    # Mostrar historial
+    # === MOSTRAR HISTORIAL ===
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # Input del usuario
+    # === INPUT ===
     if prompt := st.chat_input("Escribe tu mensaje..."):
         # Mostrar mensaje del usuario
         with st.chat_message("user"):
             st.markdown(prompt)
         st.session_state.messages.append({"role": "user", "content": prompt})
 
-        # Procesar con el motor híbrido
+        # Procesar
         with st.chat_message("assistant"):
             with st.spinner("Procesando..."):
-                response, log_entry = process_message(
-                    prompt,
-                    [{"role": m["role"], "content": m["content"]}
-                     for m in st.session_state.messages[:-1]]
-                )
+                try:
+                    respuesta, pasos_debug = procesar_mensaje(prompt)
 
-            st.markdown(response)
+                    # Mostrar debug de intencion detectada
+                    if pasos_debug:
+                        debug_text = "\n".join(pasos_debug)
+                        st.session_state.debug_log.extend(pasos_debug)
+                        with st.expander("🔍 Debug (click para ver)", expanded=False):
+                            st.markdown(f'<div class="debug-box">{debug_text}</div>', unsafe_allow_html=True)
 
-        # Guardar en historial
-        st.session_state.messages.append({"role": "assistant", "content": response})
-        if log_entry:
-            st.session_state.tool_log.append(log_entry)
+                    st.markdown(respuesta)
+                except Exception as e:
+                    respuesta = f"**ERROR:** {e}\n\nRevisa la consola de Streamlit para mas detalles."
+                    st.error(respuesta)
+                    st.session_state.debug_log.append(f"ERROR GLOBAL: {e}")
+
+        st.session_state.messages.append({"role": "assistant", "content": respuesta})
 
 
 if __name__ == "__main__":
