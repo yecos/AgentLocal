@@ -20,6 +20,7 @@ from config import (
 )
 from memory.vectorstore import VectorStore
 from memory.learning import LearningSystem
+from llm import embed_cache
 
 learning = LearningSystem()
 
@@ -216,5 +217,5 @@ class TripleMemory:
             "working_task": bool(self.working["current_task"]),
             "working_steps": len(self.working["task_steps"]),
             "corrections": len(learning.get_corrections_for("")),
-            "embed_cache_size": len(ollama.embed_cache) if hasattr(ollama, 'embed_cache') else 0,
+            "embed_cache_size": len(embed_cache),
         }
