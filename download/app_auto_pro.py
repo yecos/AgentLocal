@@ -426,12 +426,87 @@ def buscar_exe(nombre: str) -> str:
     return ""
 
 
+def abrir_url(url: str) -> str:
+    """Abre una URL en el navegador por defecto."""
+    # Limpiar la URL
+    url = url.strip()
+    if not url.startswith("http://") and not url.startswith("https://"):
+        # Detectar si es un sitio conocido
+        sitios_conocidos = {
+            "youtube": "https://www.youtube.com",
+            "google": "https://www.google.com",
+            "gmail": "https://mail.google.com",
+            "github": "https://github.com",
+            "stack overflow": "https://stackoverflow.com",
+            "stackoverflow": "https://stackoverflow.com",
+            "twitter": "https://twitter.com",
+            "x": "https://x.com",
+            "facebook": "https://www.facebook.com",
+            "instagram": "https://www.instagram.com",
+            "reddit": "https://www.reddit.com",
+            "whatsapp web": "https://web.whatsapp.com",
+            "whatsappweb": "https://web.whatsapp.com",
+            "netflix": "https://www.netflix.com",
+            "spotify": "https://open.spotify.com",
+            "twitch": "https://www.twitch.tv",
+            "amazon": "https://www.amazon.com",
+            "wikipedia": "https://es.wikipedia.org",
+            "drive": "https://drive.google.com",
+            "google drive": "https://drive.google.com",
+            "maps": "https://maps.google.com",
+            "google maps": "https://maps.google.com",
+            "translate": "https://translate.google.com",
+            "google translate": "https://translate.google.com",
+            "chatgpt": "https://chat.openai.com",
+            "copilot": "https://copilot.microsoft.com",
+            "outlook": "https://outlook.live.com",
+            "notion": "https://www.notion.so",
+            "figma": "https://www.figma.com",
+            "canva": "https://www.canva.com",
+            "trello": "https://trello.com",
+        }
+        url_lower = url.lower().strip()
+        for prefix in ["abre ", "abrir ", "open ", "ve a ", "ir a ", "navega a "]:
+            if url_lower.startswith(prefix):
+                url_lower = url_lower[len(prefix):]
+                break
+        if url_lower in sitios_conocidos:
+            url = sitios_conocidos[url_lower]
+        elif "." in url_lower:
+            url = "https://" + url_lower
+        else:
+            return f"No puedo determinar la URL para '{url}'. Intenta con una URL completa como https://www.youtube.com"
+
+    if platform.system() == "Windows":
+        resultado = ejecutar_comando(f'start "" "{url}"')
+    elif platform.system() == "Darwin":
+        resultado = ejecutar_comando(f'open "{url}"')
+    else:
+        resultado = ejecutar_comando(f'xdg-open "{url}"')
+
+    if not resultado or resultado == "(sin salida)":
+        return f"URL abierta en el navegador: {url}"
+    if "error" not in resultado.lower():
+        return f"URL abierta en el navegador: {url}"
+    return f"Error al abrir URL: {resultado}"
+
+
 def abrir_aplicacion(app: str) -> str:
     app_clean = app.lower().strip()
     for prefix in ["abre ", "abrir ", "open ", "inicia ", "lanza ", "mi "]:
         if app_clean.startswith(prefix):
             app_clean = app_clean[len(prefix):]
             break
+
+    # Si parece una URL o sitio web, usar abrir_url en su lugar
+    indicadores_url = ["http://", "https://", "www.", ".com", ".org", ".net", ".io"]
+    if any(ind in app_clean for ind in indicadores_url):
+        return abrir_url(app)
+
+    sitios_web = ["youtube", "google", "gmail", "facebook", "instagram", "twitter",
+                  "netflix", "spotify", "reddit", "whatsapp web", "chatgpt", "copilot"]
+    if app_clean in sitios_web:
+        return abrir_url(app_clean)
 
     aliases = {
         "chrome": "google chrome", "vscode": "visual studio code",
@@ -567,13 +642,27 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "abrir_aplicacion",
-            "description": "Abre una aplicacion por nombre. Busca automaticamente en Start Menu, registro y disco. No necesitas saber el .exe exacto.",
+            "description": "Abre una aplicacion de escritorio por nombre. Busca automaticamente en Start Menu, registro y disco. NO usar para abrir paginas web o sitios como YouTube, Google, etc. Para eso usar abrir_url.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "app": {"type": "string", "description": "Nombre de la aplicacion (ej: whatsapp, chrome, autocad)"}
+                    "app": {"type": "string", "description": "Nombre de la aplicacion de escritorio (ej: whatsapp, chrome, autocad, vscode)"}
                 },
                 "required": ["app"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "abrir_url",
+            "description": "Abre una pagina web o sitio en el navegador. Usar cuando el usuario pide abrir sitios web como YouTube, Google, Gmail, Netflix, etc. Tambien acepta URLs completas. Reconoce nombres de sitios populares automaticamente.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL o nombre del sitio web (ej: youtube, https://google.com, netflix)"}
+                },
+                "required": ["url"]
             }
         }
     },
@@ -742,6 +831,7 @@ TOOL_SCHEMAS = [
 TOOL_FUNCTIONS = {
     "ejecutar_comando": ejecutar_comando,
     "abrir_aplicacion": abrir_aplicacion,
+    "abrir_url": abrir_url,
     "generar_codigo": generar_codigo,
     "leer_archivo": leer_archivo,
     "escribir_archivo": escribir_archivo,
@@ -1314,7 +1404,8 @@ def _llm_generate(messages: list, tools: list = None) -> str:
 SYSTEM_PROMPT = """Eres un agente autonomo INTELIGENTE que vive en la computadora del usuario.
 
 Tu trabajo es ayudarlo con CUALQUIER cosa. Tienes herramientas para:
-- Abrir aplicaciones, ejecutar comandos, leer/escribir archivos
+- Abrir aplicaciones de escritorio, abrir paginas web/URLs en el navegador
+- Ejecutar comandos, leer/escribir archivos
 - Generar codigo completo (juegos, paginas web, scripts)
 - Clonar repos, instalar dependencias, analizar proyectos
 - Buscar en archivos, ver procesos, buscar en internet
@@ -1323,11 +1414,12 @@ Tu trabajo es ayudarlo con CUALQUIER cosa. Tienes herramientas para:
 REGLAS:
 1. PIENSA antes de actuar. Analiza que quiere el usuario.
 2. Si pide CREAR algo (juego, pagina, script) → usa generar_codigo
-3. Si pide ABRIR algo → usa abrir_aplicacion
-4. Si algo falla → intenta un enfoque diferente
-5. Si no sabes algo → busca en internet
-6. NUNCA inventes rutas o comandos — usa las herramientas para verificar
-7. Habla en espanol, de forma natural y concisa
+3. Si pide ABRIR un programa de escritorio → usa abrir_aplicacion
+4. Si pide ABRIR un sitio web o URL (YouTube, Google, etc.) → usa abrir_url
+5. Si algo falla → intenta un enfoque diferente
+6. Si no sabes algo → busca en internet
+7. NUNCA inventes rutas o comandos — usa las herramientas para verificar
+8. Habla en espanol, de forma natural y concisa
 
 CONTEXTO DEL SISTEMA:
 - SO: {so}
@@ -1343,7 +1435,8 @@ JSON_TOOLS_PROMPT = """
 
 HERRAMIENTAS DISPONIBLES:
 - ejecutar_comando(comando, confirmar_peligroso=false) - Ejecuta un comando
-- abrir_aplicacion(app) - Abre una app por nombre
+- abrir_aplicacion(app) - Abre una app de escritorio por nombre (NO para paginas web)
+- abrir_url(url) - Abre una pagina web o sitio en el navegador (YouTube, Google, etc.)
 - generar_codigo(descripcion, tipo, ruta?) - Genera codigo completo y lo guarda
 - leer_archivo(ruta) - Lee un archivo
 - escribir_archivo(ruta, contenido) - Escribe un archivo
@@ -1355,6 +1448,9 @@ HERRAMIENTAS DISPONIBLES:
 - procesos_activos(filtro?) - Lista procesos corriendo
 - matar_proceso(pid_o_nombre) - Termina un proceso
 - buscar_web(consulta) - Busca en internet
+
+IMPORTANTE: Si el usuario pide abrir un SITIO WEB (YouTube, Google, Netflix, etc.), usa abrir_url, NO abrir_aplicacion.
+abrir_aplicacion es solo para programas de escritorio (Chrome, Word, WhatsApp, etc.).
 
 Responde SOLO con JSON:
 {{"pensamiento": "que piensas", "accion": "nombre_herramienta", "params": {{...}}, "respuesta_final": ""}}
