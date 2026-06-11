@@ -112,7 +112,7 @@ def check_gpu_during_inference():
     print("   Ejecutando inferencia corta...")
     try:
         payload = json.dumps({
-            "model": "qwen3:4b",
+            "model": "llama3.1:8b",
             "messages": [{"role": "user", "content": "Di hola"}],
             "stream": False
         }).encode("utf-8")
