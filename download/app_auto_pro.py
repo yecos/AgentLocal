@@ -1,7 +1,8 @@
 """
 =============================================================
- AGENTE LOCAL AUTONOMO v5 - CON DEBUG VISIBLE
- Detecta intencion + Ejecuta directamente + Muestra cada paso
+ AGENTE LOCAL AUTONOMO v6 - AUTO-MEJORABLE
+ Detecta intencion + Ejecuta directamente + Aprende de errores
+ + Feedback de usuario + Auto-reflexion + Patrones aprendidos
 =============================================================
 """
 
@@ -12,6 +13,7 @@ import re
 import json
 import platform
 from datetime import datetime
+from pathlib import Path
 
 # ============================================================
 # CONFIGURACION
@@ -22,10 +24,263 @@ MAX_ITERATIONS = 6
 
 if platform.system() == "Windows":
     REPOS_DIR = os.path.join(os.path.expanduser("~"), "Documents")
+    LEARN_DIR = os.path.join(os.path.expanduser("~"), ".ia-local", "learning")
 else:
     REPOS_DIR = os.path.join(os.path.expanduser("~"), "repos")
+    LEARN_DIR = os.path.join(os.path.expanduser("~"), ".ia-local", "learning")
 
 os.makedirs(REPOS_DIR, exist_ok=True)
+os.makedirs(LEARN_DIR, exist_ok=True)
+
+# Archivos de aprendizaje
+CORRECTIONS_FILE = os.path.join(LEARN_DIR, "corrections.json")
+FEEDBACK_FILE = os.path.join(LEARN_DIR, "feedback.json")
+PATTERNS_FILE = os.path.join(LEARN_DIR, "patterns.json")
+KNOWLEDGE_FILE = os.path.join(LEARN_DIR, "knowledge.json")
+CONVERSATIONS_FILE = os.path.join(LEARN_DIR, "conversations.json")
+
+
+# ============================================================
+# SISTEMA DE APRENDIZAJE - Auto-mejora
+# ============================================================
+
+class LearningSystem:
+    """Sistema de auto-mejora del agente."""
+
+    @staticmethod
+    def _load_json(filepath: str, default=None):
+        if default is None:
+            default = []
+        try:
+            if os.path.exists(filepath):
+                with open(filepath, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except:
+            pass
+        return default
+
+    @staticmethod
+    def _save_json(filepath: str, data):
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Error guardando {filepath}: {e}")
+
+    # --- CORRECCIONES ---
+
+    def save_correction(self, user_message: str, wrong_action: str, correct_action: str, reason: str = ""):
+        """Guarda una correccion del usuario para no repetir el error."""
+        corrections = self._load_json(CORRECTIONS_FILE, [])
+        corrections.append({
+            "timestamp": datetime.now().isoformat(),
+            "user_message": user_message,
+            "wrong_action": wrong_action,
+            "correct_action": correct_action,
+            "reason": reason
+        })
+        self._save_json(CORRECTIONS_FILE, corrections)
+
+    def get_corrections(self) -> list:
+        """Obtiene todas las correcciones guardadas."""
+        return self._load_json(CORRECTIONS_FILE, [])
+
+    def check_corrections(self, user_message: str, proposed_action: str) -> dict:
+        """Verifica si una accion propuesta fue corregida antes."""
+        corrections = self.get_corrections()
+        msg_lower = user_message.lower()
+
+        for corr in corrections:
+            # Buscar correcciones para mensajes similares
+            if any(w in msg_lower for w in corr["user_message"].lower().split()):
+                if corr["wrong_action"] == proposed_action:
+                    return {
+                        "corrected": True,
+                        "correct_action": corr["correct_action"],
+                        "reason": corr.get("reason", "")
+                    }
+        return {"corrected": False}
+
+    # --- FEEDBACK ---
+
+    def save_feedback(self, user_message: str, agent_response: str, action_taken: str, rating: str, comment: str = ""):
+        """Guarda el feedback del usuario (positivo/negativo)."""
+        feedback = self._load_json(FEEDBACK_FILE, [])
+        feedback.append({
+            "timestamp": datetime.now().isoformat(),
+            "user_message": user_message,
+            "agent_response": agent_response[:200],
+            "action_taken": action_taken,
+            "rating": rating,  # "positive" or "negative"
+            "comment": comment
+        })
+        self._save_json(FEEDBACK_FILE, feedback)
+
+    def get_feedback_stats(self) -> dict:
+        """Obtiene estadisticas de feedback."""
+        feedback = self._load_json(FEEDBACK_FILE, [])
+        if not feedback:
+            return {"total": 0, "positive": 0, "negative": 0, "best_actions": [], "worst_actions": []}
+
+        positive = [f for f in feedback if f["rating"] == "positive"]
+        negative = [f for f in feedback if f["rating"] == "negative"]
+
+        # Encontrar las acciones mas exitosas y las que fallan
+        action_counts = {}
+        for f in feedback:
+            action = f.get("action_taken", "unknown")
+            if action not in action_counts:
+                action_counts[action] = {"positive": 0, "negative": 0}
+            action_counts[action][f["rating"]] += 1
+
+        best = sorted(action_counts.items(), key=lambda x: x[1]["positive"], reverse=True)[:5]
+        worst = sorted(action_counts.items(), key=lambda x: x[1]["negative"], reverse=True)[:5]
+
+        return {
+            "total": len(feedback),
+            "positive": len(positive),
+            "negative": len(negative),
+            "best_actions": [(a, c) for a, c in best],
+            "worst_actions": [(a, c) for a, c in worst]
+        }
+
+    # --- PATRONES APRENDIDOS ---
+
+    def save_pattern(self, trigger: str, actions: list, context: str = ""):
+        """Guarda un patron de acciones que el usuario repite."""
+        patterns = self._load_json(PATTERNS_FILE, [])
+        # Verificar si ya existe un patron similar
+        for p in patterns:
+            if p["trigger"].lower() == trigger.lower():
+                p["actions"] = actions
+                p["last_used"] = datetime.now().isoformat()
+                p["use_count"] = p.get("use_count", 0) + 1
+                self._save_json(PATTERNS_FILE, patterns)
+                return
+
+        patterns.append({
+            "trigger": trigger,
+            "actions": actions,
+            "context": context,
+            "created": datetime.now().isoformat(),
+            "last_used": datetime.now().isoformat(),
+            "use_count": 1
+        })
+        self._save_json(PATTERNS_FILE, patterns)
+
+    def get_patterns(self) -> list:
+        """Obtiene los patrones aprendidos."""
+        return self._load_json(PATTERNS_FILE, [])
+
+    def match_pattern(self, user_message: str) -> list:
+        """Busca si el mensaje coincide con un patron aprendido."""
+        patterns = self.get_patterns()
+        msg_lower = user_message.lower()
+
+        matched = []
+        for p in patterns:
+            # Coincidencia simple por palabras clave
+            trigger_words = p["trigger"].lower().split()
+            match_count = sum(1 for w in trigger_words if w in msg_lower)
+            if match_count >= len(trigger_words) * 0.6:  # 60% de coincidencia
+                matched.append(p)
+
+        # Ordenar por uso (los mas usados primero)
+        matched.sort(key=lambda x: x.get("use_count", 0), reverse=True)
+        return matched
+
+    # --- CONOCIMIENTO ---
+
+    def save_knowledge(self, topic: str, content: str, source: str = "conversation"):
+        """Guarda conocimiento adquirido para uso futuro."""
+        knowledge = self._load_json(KNOWLEDGE_FILE, [])
+
+        # Verificar si ya existe
+        for k in knowledge:
+            if k["topic"].lower() == topic.lower():
+                k["content"] = content
+                k["updated"] = datetime.now().isoformat()
+                self._save_json(KNOWLEDGE_FILE, knowledge)
+                return
+
+        knowledge.append({
+            "topic": topic,
+            "content": content,
+            "source": source,
+            "created": datetime.now().isoformat(),
+            "updated": datetime.now().isoformat()
+        })
+        self._save_json(KNOWLEDGE_FILE, knowledge)
+
+    def get_knowledge(self, topic: str = None) -> list:
+        """Obtiene conocimiento guardado."""
+        knowledge = self._load_json(KNOWLEDGE_FILE, [])
+        if topic:
+            return [k for k in knowledge if topic.lower() in k["topic"].lower()]
+        return knowledge
+
+    # --- AUTO-REFLEXION ---
+
+    def self_reflect(self, action: str, result: str, user_message: str) -> dict:
+        """El agente reflexiona sobre si su accion fue correcta."""
+        reflection = {
+            "action": action,
+            "success": True,
+            "lesson": "",
+            "improvement": ""
+        }
+
+        # Detectar fallos comunes
+        if "ERROR" in result or "Error" in result:
+            reflection["success"] = False
+
+            if "no existe" in result.lower() or "not found" in result.lower():
+                reflection["lesson"] = "Verificar que la ruta existe antes de intentar leer/ejecutar"
+                reflection["improvement"] = "listar_archivos primero para confirmar rutas"
+
+            elif "timeout" in result.lower():
+                reflection["lesson"] = "El comando tardo demasiado"
+                reflection["improvement"] = "Usar comandos mas especificos o aumentar timeout"
+
+            elif "permission" in result.lower() or "denegado" in result.lower():
+                reflection["lesson"] = "Sin permisos para ejecutar"
+                reflection["improvement"] = "Sugerir ejecutar como administrador"
+
+            elif "already exists" in result.lower() or "ya existe" in result.lower():
+                reflection["success"] = True  # No es realmente un error
+                reflection["lesson"] = "El recurso ya existe, usarlo en vez de recrear"
+
+        # Guardar la reflexion como conocimiento
+        if reflection["lesson"]:
+            self.save_knowledge(
+                f"leccion:{action}",
+                reflection["lesson"],
+                source="auto_reflection"
+            )
+
+        return reflection
+
+    # --- ESTADISTICAS ---
+
+    def get_stats(self) -> dict:
+        """Obtiene estadisticas generales del sistema de aprendizaje."""
+        corrections = self.get_corrections()
+        patterns = self.get_patterns()
+        knowledge = self.get_knowledge()
+        feedback_stats = self.get_feedback_stats()
+
+        return {
+            "corrections_count": len(corrections),
+            "patterns_count": len(patterns),
+            "knowledge_count": len(knowledge),
+            "feedback": feedback_stats,
+            "total_learning_items": len(corrections) + len(patterns) + len(knowledge)
+        }
+
+
+# Instancia global del sistema de aprendizaje
+learning = LearningSystem()
+
 
 # ============================================================
 # HERRAMIENTAS - Funciones que EJECUTAN de verdad
@@ -56,7 +311,6 @@ def clonar_repositorio(url: str) -> str:
     target_dir = os.path.join(REPOS_DIR, repo_name)
 
     if os.path.exists(target_dir):
-        # Verificar si el repo esta completo (tiene .git y al menos algunos archivos)
         git_dir = os.path.join(target_dir, ".git")
         contenido = os.listdir(target_dir) if os.path.isdir(target_dir) else []
         archivos_reales = [f for f in contenido if f != ".git"]
@@ -64,7 +318,6 @@ def clonar_repositorio(url: str) -> str:
         if os.path.exists(git_dir) and len(archivos_reales) > 1:
             return f"Repositorio ya existe y esta completo en: {target_dir}\nCarpetas: {[f for f in contenido if os.path.isdir(os.path.join(target_dir, f))]}\nArchivos: {archivos_reales[:10]}..."
         else:
-            # Carpeta vacia o incompleta - borrar y clonar de nuevo
             import shutil
             try:
                 shutil.rmtree(target_dir)
@@ -79,6 +332,8 @@ def clonar_repositorio(url: str) -> str:
         carpetas = [f for f in contenido if os.path.isdir(os.path.join(target_dir, f))]
         archivos = [f for f in contenido if os.path.isfile(os.path.join(target_dir, f))]
         if len(carpetas) > 0 or len(archivos) > 1:
+            # Guardar conocimiento sobre este repo
+            learning.save_knowledge(f"repo:{repo_name}", f"Clonado desde {url} en {target_dir}")
             return f"CLONADO OK en: {target_dir}\nCarpetas: {carpetas}\nArchivos: {archivos[:10]}"
         else:
             return f"Clonado pero parece vacio. Salida de git:\n{resultado}"
@@ -105,18 +360,24 @@ def instalar_dependencias(ruta: str, gestor: str = "auto") -> str:
         "pip": f'cd "{ruta}" && pip install -r requirements.txt',
         "poetry": f'cd "{ruta}" && poetry install',
         "yarn": f'cd "{ruta}" && yarn install',
+        "bun": f'cd "{ruta}" && bun install',
     }
 
     comando = comandos.get(gestor, f'cd "{ruta}" && {gestor} install')
-    return ejecutar_comando(comando)
+    resultado = ejecutar_comando(comando)
+
+    # Guardar conocimiento
+    if "ERROR" not in resultado:
+        repo_name = os.path.basename(ruta)
+        learning.save_knowledge(f"deps:{repo_name}", f"Dependencias instaladas con {gestor}")
+
+    return resultado
 
 
 def leer_archivo(ruta: str) -> str:
-    # Buscar en múltiples ubicaciones
     rutas_posibles = [ruta]
     if not os.path.isabs(ruta):
         rutas_posibles.append(os.path.join(REPOS_DIR, ruta))
-        # Buscar en subdirectorios de REPOS_DIR
         try:
             for d in os.listdir(REPOS_DIR):
                 full = os.path.join(REPOS_DIR, d, ruta)
@@ -181,7 +442,6 @@ def analizar_proyecto(ruta: str) -> str:
     resultado = f"Analisis de: {ruta}\n"
     resultado += "=" * 40 + "\n\n"
 
-    # Estructura de directorios (3 niveles)
     for root, dirs, files in os.walk(ruta):
         level = root.replace(ruta, "").count(os.sep)
         if level > 3:
@@ -195,7 +455,6 @@ def analizar_proyecto(ruta: str) -> str:
         if len(files) > 20:
             resultado += f"{subindent}... y {len(files) - 20} mas\n"
 
-    # Detectar tipo
     resultado += "\nDeteccion:\n"
     checks = {
         "package.json": "Node.js",
@@ -211,7 +470,6 @@ def analizar_proyecto(ruta: str) -> str:
         if os.path.exists(os.path.join(ruta, fname)):
             resultado += f"  - {desc} ({fname})\n"
 
-    # Leer package.json
     pkg_path = os.path.join(ruta, "package.json")
     if os.path.exists(pkg_path):
         try:
@@ -233,7 +491,6 @@ def analizar_proyecto(ruta: str) -> str:
         except:
             pass
 
-    # Leer README
     readme_path = os.path.join(ruta, "README.md")
     if os.path.exists(readme_path):
         try:
@@ -244,6 +501,10 @@ def analizar_proyecto(ruta: str) -> str:
             resultado += f"\nREADME.md:\n{readme}\n"
         except:
             pass
+
+    # Guardar conocimiento del proyecto
+    repo_name = os.path.basename(ruta)
+    learning.save_knowledge(f"proyecto:{repo_name}", f"Analizado: {ruta}. Tipo: Next.js/TypeScript")
 
     return resultado
 
@@ -261,7 +522,7 @@ def escribir_archivo(ruta: str, contenido: str) -> str:
 
 
 # ============================================================
-# DETECCION DE INTENCION - El corazon de v5
+# DETECCION DE INTENCION - Con aprendizaje integrado
 # ============================================================
 
 GITHUB_URL_PATTERN = re.compile(
@@ -272,18 +533,39 @@ GITHUB_URL_PATTERN = re.compile(
 
 def detectar_intencion(mensaje: str) -> dict:
     """
-    Detecta que quiere el usuario ANTES de enviar al LLM.
-    Retorna: {"intencion": str, "params": dict, "confianza": float}
+    Detecta que quiere el usuario, CON aprendizaje previo.
+    Primero consulta correcciones y patrones aprendidos.
     """
     msg = mensaje.lower()
     params = {}
+
+    # === PASO 0: Consultar patrones aprendidos ===
+    matched_patterns = learning.match_pattern(mensaje)
+    if matched_patterns:
+        best = matched_patterns[0]
+        # Actualizar uso del patron
+        best["last_used"] = datetime.now().isoformat()
+        best["use_count"] = best.get("use_count", 0) + 1
+        # Guardar patron actualizado
+        patterns = learning.get_patterns()
+        for p in patterns:
+            if p["trigger"] == best["trigger"]:
+                p["use_count"] = best["use_count"]
+                p["last_used"] = best["last_used"]
+        learning._save_json(PATTERNS_FILE, patterns)
+
+        # Retornar las acciones del patron
+        return {
+            "intencion": "patron_aprendido",
+            "params": {"actions": best["actions"], "pattern_name": best["trigger"]},
+            "confianza": 0.90
+        }
 
     # === PRIORIDAD 1: URL de GitHub ===
     urls = GITHUB_URL_PATTERN.findall(mensaje)
     if urls:
         url = urls[0].rstrip("/")
         repo_name = url.split("/")[-1].replace(".git", "")
-        # Si tiene URL de GitHub + palabras de clonar/descargar/analizar
         return {
             "intencion": "clonar_y_analizar",
             "params": {"url": url, "repo_name": repo_name},
@@ -294,7 +576,6 @@ def detectar_intencion(mensaje: str) -> dict:
 
     # Instalar
     if any(w in msg for w in ["instal", "npm install", "pip install", "dependencias", "dependencies"]):
-        # Buscar nombre de proyecto
         for d in os.listdir(REPOS_DIR):
             if d.lower() in msg:
                 params["repo_name"] = d
@@ -311,7 +592,6 @@ def detectar_intencion(mensaje: str) -> dict:
 
     # Leer archivo
     if any(w in msg for w in ["leer", "mostrar", "ver archivo", "contenido de", "que hay en"]):
-        # Buscar nombre de archivo
         for d in os.listdir(REPOS_DIR):
             if d.lower() in msg:
                 params["repo_name"] = d
@@ -337,17 +617,51 @@ def detectar_intencion(mensaje: str) -> dict:
 
 
 # ============================================================
-# EJECUCION DIRECTA - Sin pasar por el LLM
+# EJECUCION DIRECTA - Con auto-reflexion
 # ============================================================
 
 def ejecutar_intencion(intencion_data: dict) -> list:
     """
     Ejecuta la intencion detectada DIRECTAMENTE.
-    Retorna una lista de pasos ejecutados para mostrar al usuario.
+    Incluye auto-reflexion despues de cada accion.
     """
     pasos = []
     intencion = intencion_data["intencion"]
     params = intencion_data["params"]
+
+    if intencion == "patron_aprendido":
+        # Ejecutar secuencia de acciones aprendidas
+        actions = params.get("actions", [])
+        for action in actions:
+            action_type = action.get("type", "")
+            action_params = action.get("params", {})
+
+            if action_type == "clonar_repositorio":
+                result = clonar_repositorio(action_params.get("url", ""))
+            elif action_type == "analizar_proyecto":
+                result = analizar_proyecto(action_params.get("ruta", ""))
+            elif action_type == "instalar_dependencias":
+                result = instalar_dependencias(action_params.get("ruta", ""))
+            elif action_type == "leer_archivo":
+                result = leer_archivo(action_params.get("ruta", ""))
+            elif action_type == "listar_archivos":
+                result = listar_archivos(action_params.get("ruta"))
+            elif action_type == "ejecutar_comando":
+                result = ejecutar_comando(action_params.get("comando", ""))
+            else:
+                result = f"Accion desconocida: {action_type}"
+
+            # Auto-reflexion
+            reflection = learning.self_reflect(action_type, result, "")
+
+            pasos.append({
+                "accion": action_type,
+                "detalle": f"Patron aprendido: {params.get('pattern_name', '')}",
+                "resultado": result,
+                "reflection": reflection
+            })
+
+        return pasos
 
     if intencion == "clonar_y_analizar":
         url = params.get("url", "")
@@ -355,18 +669,24 @@ def ejecutar_intencion(intencion_data: dict) -> list:
         repo_path = os.path.join(REPOS_DIR, repo_name)
 
         # Paso 1: Clonar
+        result = clonar_repositorio(url)
+        reflection = learning.self_reflect("clonar_repositorio", result, url)
         pasos.append({
             "accion": "clonar_repositorio",
             "detalle": f"git clone {url}",
-            "resultado": clonar_repositorio(url)
+            "resultado": result,
+            "reflection": reflection
         })
 
         # Paso 2: Analizar (auto)
         if os.path.exists(repo_path):
+            result = analizar_proyecto(repo_path)
+            reflection = learning.self_reflect("analizar_proyecto", result, repo_path)
             pasos.append({
                 "accion": "analizar_proyecto",
                 "detalle": f"Analizando {repo_path}",
-                "resultado": analizar_proyecto(repo_path)
+                "resultado": result,
+                "reflection": reflection
             })
 
         # Paso 3: Si tiene package.json, sugerir instalar
@@ -377,12 +697,21 @@ def ejecutar_intencion(intencion_data: dict) -> list:
                 "resultado": f"Se detecto package.json. Escribe 'instalar dependencias {repo_name}' para instalarlas."
             })
 
+        # APRENDER: Guardar patron "clonar + analizar"
+        learning.save_pattern(
+            trigger=f"clona analiza {repo_name}",
+            actions=[
+                {"type": "clonar_repositorio", "params": {"url": url}},
+                {"type": "analizar_proyecto", "params": {"ruta": repo_path}}
+            ],
+            context=f"Usuario pidio clonar y analizar {repo_name}"
+        )
+
     elif intencion == "instalar":
         repo_name = params.get("repo_name", "")
         if repo_name:
             repo_path = os.path.join(REPOS_DIR, repo_name)
         else:
-            # Buscar primer repo con package.json o requirements.txt
             for d in os.listdir(REPOS_DIR):
                 full = os.path.join(REPOS_DIR, d)
                 if os.path.isdir(full):
@@ -393,10 +722,13 @@ def ejecutar_intencion(intencion_data: dict) -> list:
             else:
                 repo_path = REPOS_DIR
 
+        result = instalar_dependencias(repo_path)
+        reflection = learning.self_reflect("instalar_dependencias", result, repo_path)
         pasos.append({
             "accion": "instalar_dependencias",
             "detalle": f"Instalando en {repo_path}",
-            "resultado": instalar_dependencias(repo_path)
+            "resultado": result,
+            "reflection": reflection
         })
 
     elif intencion == "analizar":
@@ -405,10 +737,13 @@ def ejecutar_intencion(intencion_data: dict) -> list:
             repo_path = os.path.join(REPOS_DIR, repo_name)
         else:
             repo_path = REPOS_DIR
+        result = analizar_proyecto(repo_path)
+        reflection = learning.self_reflect("analizar_proyecto", result, repo_path)
         pasos.append({
             "accion": "analizar_proyecto",
             "detalle": f"Analizando {repo_path}",
-            "resultado": analizar_proyecto(repo_path)
+            "resultado": result,
+            "reflection": reflection
         })
 
     elif intencion == "leer":
@@ -421,10 +756,13 @@ def ejecutar_intencion(intencion_data: dict) -> list:
         else:
             ruta = ""
         if ruta:
+            result = leer_archivo(ruta)
+            reflection = learning.self_reflect("leer_archivo", result, ruta)
             pasos.append({
                 "accion": "leer_archivo",
                 "detalle": f"Leyendo {ruta}",
-                "resultado": leer_archivo(ruta)
+                "resultado": result,
+                "reflection": reflection
             })
         else:
             pasos.append({
@@ -434,19 +772,23 @@ def ejecutar_intencion(intencion_data: dict) -> list:
             })
 
     elif intencion == "listar":
+        result = listar_archivos(REPOS_DIR)
         pasos.append({
             "accion": "listar_archivos",
             "detalle": f"Listando {REPOS_DIR}",
-            "resultado": listar_archivos(REPOS_DIR)
+            "resultado": result
         })
 
     elif intencion == "comando":
         comando = params.get("comando", "")
         if comando:
+            result = ejecutar_comando(comando)
+            reflection = learning.self_reflect("ejecutar_comando", result, comando)
             pasos.append({
                 "accion": "ejecutar_comando",
                 "detalle": f"Ejecutando: {comando}",
-                "resultado": ejecutar_comando(comando)
+                "resultado": result,
+                "reflection": reflection
             })
         else:
             pasos.append({
@@ -456,6 +798,41 @@ def ejecutar_intencion(intencion_data: dict) -> list:
             })
 
     return pasos
+
+
+# ============================================================
+# DETECCION DE CORRECCIONES DEL USUARIO
+# ============================================================
+
+def detectar_correccion(mensaje: str, last_action: str = "") -> dict:
+    """
+    Detecta si el usuario esta corrigiendo al agente.
+    Ej: "no, clona el repo" o "eso esta mal, instala las deps"
+    """
+    msg = mensaje.lower()
+
+    correction_patterns = [
+        r'no[,!]\s*(.+)',           # "no, clona el repo"
+        r'eso esta mal[,]\s*(.+)',  # "eso esta mal, instala las deps"
+        r'no hiciste\s+(.+)',       # "no hiciste lo que pedi"
+        r'te equivocaste[,]\s*(.+)',# "te equivocaste, usa clonar"
+        r' Mejor\s+(.+)',           # "mejor clona el repo"
+        r'en vez de\s+.+\s+haz\s+(.+)', # "en vez de listar haz clonar"
+        r'queria\s+que\s+(.+)',     # "queria que clonaras"
+        r'sigue sin funcionar',     # "sigue sin funcionar"
+    ]
+
+    for pattern in correction_patterns:
+        match = re.search(pattern, msg)
+        if match:
+            return {
+                "is_correction": True,
+                "correction_text": match.group(1) if match.lastindex else mensaje,
+                "original_action": last_action,
+                "full_message": mensaje
+            }
+
+    return {"is_correction": False}
 
 
 # ============================================================
@@ -470,6 +847,7 @@ REGLAS:
 3. Habla en español.
 4. Se conciso.
 5. Si ya se ejecuto una accion, reporta el resultado.
+6. Si el usuario corrige algo, aprende y no repitas el error.
 
 Herramientas disponibles:
 - ejecutar_comando(comando) - Ejecuta en terminal
@@ -483,10 +861,21 @@ Herramientas disponibles:
 
 
 def preguntar_llm(mensaje: str, historial: list = None) -> str:
-    """Usa el LLM solo para conversacion o analisis complejo."""
     try:
         import ollama
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+        # Incluir lecciones aprendidas en el system prompt
+        knowledge = learning.get_knowledge()
+        lessons = [k for k in knowledge if k["topic"].startswith("leccion:")]
+        lessons_text = ""
+        if lessons:
+            lessons_text = "\n\nLecciones aprendidas:\n"
+            for l in lessons[-5:]:
+                lessons_text += f"- {l['content']}\n"
+
+        enhanced_prompt = SYSTEM_PROMPT + lessons_text
+
+        messages = [{"role": "system", "content": enhanced_prompt}]
 
         if historial:
             for h in historial[-4:]:
@@ -506,15 +895,36 @@ def preguntar_llm(mensaje: str, historial: list = None) -> str:
 
 def procesar_mensaje(user_message: str) -> tuple:
     """
-    Procesa un mensaje del usuario.
+    Procesa un mensaje del usuario con auto-mejora.
     Retorna: (respuesta_html, pasos_debug)
     """
     pasos_debug = []
 
-    # 1. Detectar intencion
-    intencion = detectar_intencion(user_message)
-    pasos_debug.append(f"Intencion: {intencion['intencion']} (confianza: {intencion['confianza']:.0%})")
-    pasos_debug.append(f"Params: {intencion['params']}")
+    # 0. Detectar si es una correccion
+    last_action = st.session_state.get("last_action", "")
+    correction = detectar_correccion(user_message, last_action)
+
+    if correction["is_correction"]:
+        pasos_debug.append(f">> CORRECCION detectada: {correction['correction_text']}")
+
+        # Guardar la correccion
+        learning.save_correction(
+            user_message=correction["full_message"],
+            wrong_action=last_action,
+            correct_action=correction["correction_text"],
+            reason=correction.get("full_message", "")
+        )
+        pasos_debug.append(f">> Correccion guardada para aprendizaje")
+
+        # Re-procesar con el mensaje corregido
+        intencion = detectar_intencion(correction["correction_text"])
+        pasos_debug.append(f"Intencion corregida: {intencion['intencion']} (confianza: {intencion['confianza']:.0%})")
+
+    else:
+        # 1. Detectar intencion normalmente
+        intencion = detectar_intencion(user_message)
+        pasos_debug.append(f"Intencion: {intencion['intencion']} (confianza: {intencion['confianza']:.0%})")
+        pasos_debug.append(f"Params: {intencion['params']}")
 
     # 2. Si la intencion es clara, ejecutar directamente
     if intencion["confianza"] >= 0.7 and intencion["intencion"] != "conversar":
@@ -522,19 +932,31 @@ def procesar_mensaje(user_message: str) -> tuple:
 
         pasos = ejecutar_intencion(intencion)
 
+        # Guardar ultima accion para correcciones
+        if pasos:
+            st.session_state["last_action"] = pasos[0].get("accion", "")
+
         # Construir respuesta visual
         respuesta = ""
         for i, paso in enumerate(pasos, 1):
             accion = paso["accion"]
             detalle = paso["detalle"]
             resultado = paso["resultado"]
+            reflection = paso.get("reflection", {})
 
             pasos_debug.append(f"  Paso {i}: {accion} -> {detalle}")
+
+            # Mostrar auto-reflexion si hay leccion
+            if reflection and reflection.get("lesson"):
+                pasos_debug.append(f"  Reflexion: {reflection['lesson']}")
 
             if accion == "sugerencia":
                 respuesta += f"💡 **{detalle}**\n\n{resultado}\n\n"
             elif "ERROR" in resultado or "Error" in resultado:
                 respuesta += f"❌ **Paso {i}: {accion}** — {detalle}\n```\n{resultado}\n```\n\n"
+                # Si hay mejora sugerida, mostrarla
+                if reflection and reflection.get("improvement"):
+                    respuesta += f"🔧 Auto-mejora: {reflection['improvement']}\n\n"
             else:
                 respuesta += f"✅ **Paso {i}: {accion}** — {detalle}\n```\n{resultado}\n```\n\n"
 
@@ -549,7 +971,6 @@ def procesar_mensaje(user_message: str) -> tuple:
         except ImportError:
             return "Error: ollama no esta instalado. Ejecuta: pip install ollama", pasos_debug
 
-        # Definir herramientas para Ollama
         ollama_tools = [
             {
                 "type": "function",
@@ -661,8 +1082,17 @@ def procesar_mensaje(user_message: str) -> tuple:
             "escribir_archivo": escribir_archivo,
         }
 
+        # Incluir lecciones aprendidas en el prompt
+        knowledge = learning.get_knowledge()
+        lessons = [k for k in knowledge if k["topic"].startswith("leccion:")]
+        lessons_text = ""
+        if lessons:
+            lessons_text = "\n\nLecciones aprendidas de errores previos:\n"
+            for l in lessons[-5:]:
+                lessons_text += f"- {l['content']}\n"
+
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": SYSTEM_PROMPT + lessons_text},
             {"role": "user", "content": user_message}
         ]
 
@@ -685,15 +1115,19 @@ def procesar_mensaje(user_message: str) -> tuple:
 
             msg = response.get("message", {})
 
-            # Si no hay tool calls, es la respuesta final
             if not msg.get("tool_calls"):
                 respuesta_final = msg.get("content", "")
                 break
 
-            # Procesar tool calls
             for tool_call in msg.get("tool_calls", []):
                 func_name = tool_call.get("function", {}).get("name")
                 func_args = tool_call.get("function", {}).get("arguments", {})
+
+                # Verificar correcciones antes de ejecutar
+                correction_check = learning.check_corrections(user_message, func_name)
+                if correction_check["corrected"]:
+                    pasos_debug.append(f"  CORRECCION APLICADA: {func_name} -> {correction_check['correct_action']}")
+                    func_name = correction_check["correct_action"]
 
                 pasos_debug.append(f"  Tool call: {func_name}({func_args})")
 
@@ -704,6 +1138,11 @@ def procesar_mensaje(user_message: str) -> tuple:
                         result = f"Error: {e}"
                 else:
                     result = f"Funcion no encontrada: {func_name}"
+
+                # Auto-reflexion
+                reflection = learning.self_reflect(func_name, result, user_message)
+                if reflection.get("lesson"):
+                    pasos_debug.append(f"  Reflexion: {reflection['lesson']}")
 
                 tool_results.append({
                     "tool": func_name,
@@ -716,7 +1155,6 @@ def procesar_mensaje(user_message: str) -> tuple:
                 messages.append({"role": "assistant", "content": f"[Ejecutando {func_name}({func_args})]"})
                 messages.append({"role": "user", "content": f"Resultado de {func_name}:\n{result}\n\nContinua."})
 
-        # Construir respuesta
         if tool_results and not respuesta_final:
             respuesta_final = "**Acciones ejecutadas:**\n\n"
             for tr in tool_results:
@@ -731,8 +1169,8 @@ def procesar_mensaje(user_message: str) -> tuple:
 
 def main():
     st.set_page_config(
-        page_title="Agente Autonomo Local v5",
-        page_icon="🤖",
+        page_title="Agente Autonomo Local v6",
+        page_icon="🧠",
         layout="wide"
     )
 
@@ -742,9 +1180,10 @@ def main():
     .debug-box { background: #1a1a2e; color: #00ff88; padding: 10px; border-radius: 5px;
                 font-family: monospace; font-size: 11px; max-height: 300px; overflow-y: auto;
                 white-space: pre-wrap; word-break: break-all; }
-    .step-ok { background: #0d2818; border-left: 4px solid #00ff88; padding: 8px; margin: 5px 0; border-radius: 3px; }
-    .step-err { background: #2d0d0d; border-left: 4px solid #ff4444; padding: 8px; margin: 5px 0; border-radius: 3px; }
-    .step-info { background: #0d1a2d; border-left: 4px solid #4488ff; padding: 8px; margin: 5px 0; border-radius: 3px; }
+    .learning-box { background: #1a2e1a; color: #88ff88; padding: 10px; border-radius: 5px;
+                   font-family: monospace; font-size: 11px; max-height: 250px; overflow-y: auto; }
+    .feedback-positive { color: #00ff88; }
+    .feedback-negative { color: #ff4444; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -753,15 +1192,20 @@ def main():
         st.session_state.messages = []
     if "debug_log" not in st.session_state:
         st.session_state.debug_log = []
+    if "last_action" not in st.session_state:
+        st.session_state["last_action"] = ""
+    if "feedback_pending" not in st.session_state:
+        st.session_state.feedback_pending = None
 
-    st.title("🤖 Agente Autonomo Local v5")
-    st.caption("Ejecucion directa con debug visible — Detecta intencion y ejecuta SIN pasar por el LLM")
+    st.title("🧠 Agente Autonomo Local v6")
+    st.caption("Auto-mejorable — Aprende de correcciones, feedback y auto-reflexion")
 
     # === SIDEBAR ===
     with st.sidebar:
         st.header("⚙️ Config")
         st.write(f"**Modelo:** {AGENT_MODEL}")
         st.write(f"**Repos dir:** {REPOS_DIR}")
+        st.write(f"**Aprendizaje:** {LEARN_DIR}")
         st.write(f"**SO:** {platform.system()}")
 
         if st.button("🗑️ Limpiar historial", use_container_width=True):
@@ -769,27 +1213,77 @@ def main():
             st.session_state.debug_log = []
             st.rerun()
 
-        if st.button("🧪 Test: git clone", use_container_width=True):
+        # === ESTADISTICAS DE APRENDIZAJE ===
+        st.header("📊 Aprendizaje")
+        stats = learning.get_stats()
+        st.metric("Correcciones", stats["corrections_count"])
+        st.metric("Patrones", stats["patterns_count"])
+        st.metric("Conocimiento", stats["knowledge_count"])
+        fb = stats["feedback"]
+        st.metric("Feedback", f"👍{fb['positive']} 👎{fb['negative']}")
+
+        # Ver datos de aprendizaje
+        with st.expander("📚 Ver datos de aprendizaje"):
+            tab1, tab2, tab3 = st.tabs(["Correcciones", "Patrones", "Conocimiento"])
+
+            with tab1:
+                corrections = learning.get_corrections()
+                if corrections:
+                    for c in corrections[-5:]:
+                        st.markdown(f"**❌ {c['wrong_action']}** → **✅ {c['correct_action']}**")
+                        st.caption(f"_{c['user_message']}_ — {c['timestamp'][:16]}")
+                        st.divider()
+                else:
+                    st.info("Sin correcciones aun")
+
+            with tab2:
+                patterns = learning.get_patterns()
+                if patterns:
+                    for p in patterns:
+                        st.markdown(f"**🔄 {p['trigger']}** (usado {p.get('use_count', 1)}x)")
+                        for a in p["actions"]:
+                            st.write(f"  → {a['type']}({a.get('params', {})})")
+                        st.divider()
+                else:
+                    st.info("Sin patrones aprendidos")
+
+            with tab3:
+                knowledge = learning.get_knowledge()
+                if knowledge:
+                    for k in knowledge[-10:]:
+                        st.markdown(f"**📖 {k['topic']}**")
+                        st.write(k['content'][:100])
+                        st.caption(f"Fuente: {k.get('source', 'N/A')} — {k['updated'][:16]}")
+                        st.divider()
+                else:
+                    st.info("Sin conocimiento guardado")
+
+        if st.button("🗑️ Borrar todo el aprendizaje", type="secondary", use_container_width=True):
+            for f in [CORRECTIONS_FILE, FEEDBACK_FILE, PATTERNS_FILE, KNOWLEDGE_FILE]:
+                if os.path.exists(f):
+                    os.remove(f)
+            st.success("Aprendizaje borrado")
+            st.rerun()
+
+        # === TESTS ===
+        st.header("🧪 Tests")
+        if st.button("Test: git clone", use_container_width=True):
             resultado = clonar_repositorio("https://github.com/yecos/signalTrade")
             st.code(resultado)
 
-        if st.button("🧪 Test: listar repos", use_container_width=True):
-            resultado = listar_archivos(REPOS_DIR)
-            st.code(resultado)
-
-        if st.button("🧪 Test: analizar signalTrade", use_container_width=True):
+        if st.button("Test: analizar signalTrade", use_container_width=True):
             repo_path = os.path.join(REPOS_DIR, "signalTrade")
             if os.path.exists(repo_path):
                 resultado = analizar_proyecto(repo_path)
                 st.code(resultado)
-            else:
-                st.error("signalTrade no encontrado. Clona primero.")
 
+        # === DEBUG LOG ===
         st.header("🐛 Debug Log")
         if st.session_state.debug_log:
             log_text = "\n".join(st.session_state.debug_log[-30:])
             st.markdown(f'<div class="debug-box">{log_text}</div>', unsafe_allow_html=True)
 
+        # === REPOS ===
         st.header("📁 Repos")
         try:
             repos = [d for d in os.listdir(REPOS_DIR)
@@ -804,27 +1298,62 @@ def main():
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
+    # === FEEDBACK (si hay pendiente) ===
+    if st.session_state.feedback_pending:
+        with st.container():
+            st.markdown("---")
+            cols = st.columns([1, 1, 3])
+            with cols[0]:
+                if st.button("👍 Bueno", key="fb_pos"):
+                    learning.save_feedback(
+                        st.session_state.feedback_pending["user_message"],
+                        st.session_state.feedback_pending["response"],
+                        st.session_state.feedback_pending["action"],
+                        "positive"
+                    )
+                    st.session_state.feedback_pending = None
+                    st.rerun()
+            with cols[1]:
+                if st.button("👎 Malo", key="fb_neg"):
+                    learning.save_feedback(
+                        st.session_state.feedback_pending["user_message"],
+                        st.session_state.feedback_pending["response"],
+                        st.session_state.feedback_pending["action"],
+                        "negative"
+                    )
+                    st.session_state.feedback_pending = None
+                    st.rerun()
+            with cols[2]:
+                st.caption("Como estuvo la respuesta? Tu feedback ayuda al agente a mejorar.")
+
     # === INPUT ===
     if prompt := st.chat_input("Escribe tu mensaje..."):
-        # Mostrar mensaje del usuario
         with st.chat_message("user"):
             st.markdown(prompt)
         st.session_state.messages.append({"role": "user", "content": prompt})
 
-        # Procesar
         with st.chat_message("assistant"):
             with st.spinner("Procesando..."):
                 try:
                     respuesta, pasos_debug = procesar_mensaje(prompt)
 
-                    # Mostrar debug de intencion detectada
                     if pasos_debug:
                         debug_text = "\n".join(pasos_debug)
                         st.session_state.debug_log.extend(pasos_debug)
-                        with st.expander("🔍 Debug (click para ver)", expanded=False):
+                        with st.expander("🔍 Debug", expanded=False):
                             st.markdown(f'<div class="debug-box">{debug_text}</div>', unsafe_allow_html=True)
 
                     st.markdown(respuesta)
+
+                    # Preparar feedback pendiente
+                    last_action = st.session_state.get("last_action", "")
+                    if last_action:
+                        st.session_state.feedback_pending = {
+                            "user_message": prompt,
+                            "response": respuesta[:200],
+                            "action": last_action
+                        }
+
                 except Exception as e:
                     respuesta = f"**ERROR:** {e}\n\nRevisa la consola de Streamlit para mas detalles."
                     st.error(respuesta)
