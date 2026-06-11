@@ -54,6 +54,12 @@ class LearningSystem:
         })
         self._save(KNOWLEDGE_FILE, knowledge)
 
+    def add_knowledge(self, content, topic=None, source="experience"):
+        """Agrega conocimiento generico. Si no hay topic, usa los primeros 50 chars."""
+        if not topic:
+            topic = content[:50]
+        self.save_knowledge(topic, content, source=source)
+
     def get_knowledge(self, topic=None):
         knowledge = self._load(KNOWLEDGE_FILE, [])
         if topic:

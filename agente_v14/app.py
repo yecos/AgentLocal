@@ -3,7 +3,7 @@
 AGENTE LOCAL AUTONOMO v14 - Entry Point Streamlit
 =============================================================
 Arquitectura modular: importa los modulos que necesita.
-Streaming de respuestas + confirmacion de comandos.
+Streaming de respuestas + confirmacion de comandos + metacognicion.
 Para ejecutar: streamlit run app.py
 =============================================================
 """
@@ -25,6 +25,7 @@ def init_session():
         st.session_state.agent = ReactAgent(memory=memory)
         st.session_state.memory = memory
         st.session_state.pending_dangerous_cmd = None
+        st.session_state.last_meta_status = None
         ollama.detect_models()
 
 init_session()
@@ -86,6 +87,15 @@ def main():
         margin: 2px; font-family: monospace;
     }
 
+    .meta-badge {
+        display: inline-block; background: #1a3a2a; color: #44ff88;
+        padding: 2px 8px; border-radius: 10px; font-size: 11px;
+        margin: 2px; font-family: monospace;
+    }
+    .meta-badge.warning {
+        background: #3a2a1a; color: #ffaa00;
+    }
+
     [data-testid="stChatMessage"] { border-radius: 12px; padding: 12px 16px; margin: 4px 0; }
 
     .stButton > button { border-radius: 8px; transition: all 0.2s; }
@@ -119,6 +129,16 @@ def main():
             if "tools_used" in msg and msg["tools_used"]:
                 tools_html = " ".join([f'<span class="tool-badge">{t}</span>' for t in msg["tools_used"]])
                 st.markdown(f"<div>{tools_html}</div>", unsafe_allow_html=True)
+            # Mostrar estado metacognitivo si lo hay
+            if "meta_status" in msg and msg["meta_status"]:
+                meta = msg["meta_status"]
+                conf = meta.get("confidence", 0)
+                assessment = meta.get("assessment", "")
+                conf_class = "" if conf >= 0.5 else "warning"
+                meta_html = f'<span class="meta-badge {conf_class}">confianza: {conf:.0%}</span>'
+                if assessment and assessment != "pending":
+                    meta_html += f' <span class="meta-badge {conf_class}">{assessment}</span>'
+                st.markdown(f"<div>{meta_html}</div>", unsafe_allow_html=True)
 
     # Input
     if prompt := st.chat_input("Que necesitas?"):
@@ -130,7 +150,7 @@ def main():
 
 
 def _handle_user_input(prompt):
-    """Maneja el input del usuario con streaming."""
+    """Maneja el input del usuario con streaming y metacognicion."""
     st.session_state.messages.append({"role": "user", "content": prompt})
 
     with st.chat_message("user"):
@@ -143,6 +163,7 @@ def _handle_user_input(prompt):
         tools_used = []
         full_response = ""
         thinking_log = []
+        meta_status = None
 
         try:
             for event in st.session_state.agent.run_stream(prompt):
@@ -169,9 +190,26 @@ def _handle_user_input(prompt):
                         }
                         with thinking_placeholder:
                             st.warning(f"⚠️ Comando peligroso detectado: {tool_name}")
+                elif event["type"] == "meta":
+                    # Evento de metacognicion
+                    meta_data = event["data"]
+                    conf = meta_data.get("confidence", 0)
+                    with thinking_placeholder:
+                        if conf < 0.4:
+                            st.warning(
+                                f"🧠 Metacognicion: Confianza baja ({conf:.0%}) - "
+                                f"Revisando estrategia... ({meta_data.get('plan_changes', 0)} cambios de plan)"
+                            )
+                        else:
+                            st.info(
+                                f"🧠 Metacognicion: Confianza {conf:.0%} | "
+                                f"Errores: {meta_data.get('errors', 0)} | "
+                                f"Exitos: {meta_data.get('successes', 0)}"
+                            )
                 elif event["type"] == "done":
                     full_response = event["data"]
                     thinking_log = event.get("thinking_log", [])
+                    meta_status = event.get("meta_status")
                     response_placeholder.markdown(full_response)
 
             # Mostrar thinking log
@@ -195,6 +233,28 @@ def _handle_user_input(prompt):
                         unsafe_allow_html=True
                     )
 
+            # Mostrar resumen metacognitivo
+            if meta_status:
+                with st.expander("Auto-evaluacion", expanded=False):
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        conf_val = meta_status.get("confidence", 0)
+                        st.metric("Confianza", f"{conf_val:.0%}")
+                    with col2:
+                        st.metric("Errores", meta_status.get("errors", 0))
+                        st.metric("Exitos", meta_status.get("successes", 0))
+                    with col3:
+                        st.metric("Cambios de plan", meta_status.get("plan_changes", 0))
+                        assessment = meta_status.get("assessment", "N/A")
+                        assessment_emoji = {
+                            "excelente": "🟢",
+                            "bueno": "🟢",
+                            "aceptable": "🟡",
+                            "problematico": "🔴",
+                            "limite_alcanzado": "🔴",
+                        }.get(assessment, "⚪")
+                        st.metric("Evaluacion", f"{assessment_emoji} {assessment}")
+
         except Exception as e:
             # Fallback a modo no-streaming si falla
             full_response, thinking_log = st.session_state.agent.run(prompt)
@@ -211,7 +271,9 @@ def _handle_user_input(prompt):
             "role": "assistant",
             "content": full_response,
             "tools_used": tools_used,
+            "meta_status": meta_status,
         })
+        st.session_state.last_meta_status = meta_status
 
 
 def _handle_dangerous_confirmation():
@@ -270,7 +332,7 @@ def _render_sidebar():
             st.session_state.memory.save_session()
             st.success("Sesion guardada!")
 
-        # Stats
+        # Stats de memoria
         stats = st.session_state.memory.get_stats()
         st.subheader("Estadisticas")
         col1, col2 = st.columns(2)
@@ -281,12 +343,30 @@ def _render_sidebar():
             st.metric("Correcciones", stats.get("corrections", 0))
             st.metric("Cache Embed", stats.get("embed_cache_size", 0))
 
+        # Tipo de vector store
+        vs_type = stats.get("long_term_type", "?")
+        st.metric("Vector Store", vs_type)
+
         # Modelo activo
         st.subheader("Modelo")
         st.text(f"Principal: {ollama.model or '?'}")
         st.text(f"Chat: {ollama.chat_model or '?'}")
         st.text(f"Code: {ollama.code_model or '?'}")
         st.text(f"Embed: {ollama.embed_model or '?'}")
+
+        # Estado metacognitivo de la ultima consulta
+        meta = st.session_state.get("last_meta_status")
+        if meta:
+            st.subheader("Metacognicion")
+            conf_val = meta.get("confidence", 0)
+            assessment = meta.get("assessment", "N/A")
+
+            # Barra de confianza
+            conf_color = "green" if conf_val >= 0.7 else "orange" if conf_val >= 0.4 else "red"
+            st.progress(conf_val, text=f"Confianza: {conf_val:.0%}")
+            st.text(f"Evaluacion: {assessment}")
+            st.text(f"Errores: {meta.get('errors', 0)} | Exitos: {meta.get('successes', 0)}")
+            st.text(f"Cambios de plan: {meta.get('plan_changes', 0)}")
 
         # Configuracion
         st.subheader("Configuracion")

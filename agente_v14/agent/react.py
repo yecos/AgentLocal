@@ -3,9 +3,9 @@
 AGENTE v14 - Motor ReAct
 =============================================================
 Piensa -> Actua -> Observa -> Piensa de nuevo -> Repite.
-v14.1: Streaming, tool calling multiple, metacognicion basica.
+v14.2: Streaming, tool calling multiple, metacognicion integrada.
        Usa TripleMemory como unica fuente de historial.
-       Inyeccion de dependencias (memory, llm).
+       Inyeccion de dependencias (memory, llm, metacognition).
 =============================================================
 """
 
@@ -22,6 +22,7 @@ from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS
 from memory.triple_memory import TripleMemory, learning
 from llm import ollama
 from agent.schemas import SYSTEM_PROMPT, JSON_TOOLS_PROMPT
+from agent.metacognition import Metacognition
 
 
 class ReactAgent:
@@ -31,6 +32,7 @@ class ReactAgent:
         self.memory = memory or TripleMemory()
         self.thinking_log = []
         self.supports_tool_calling = None
+        self.metacognition = Metacognition()  # Motor de metacognicion
 
     def _log(self, message, category="info"):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -44,6 +46,7 @@ class ReactAgent:
         Bucle ReAct principal. Retorna (respuesta, thinking_log).
         """
         self.thinking_log = []
+        self.metacognition.reset()  # Resetear metacognicion para nueva consulta
         self._log(f"Mensaje del usuario: {user_message}", "input")
 
         # Construir mensajes con memoria conversacional
@@ -61,6 +64,12 @@ class ReactAgent:
         for iteration in range(MAX_REACT_ITERATIONS):
             self._log(f"--- Iteracion {iteration + 1}/{MAX_REACT_ITERATIONS} ---", "react")
 
+            # CHECK METACOGNITIVO: Inyectar alertas si el agente esta atascado
+            meta_prompt = self.metacognition.get_metacognitive_prompt(iteration)
+            if meta_prompt:
+                self._log("Alerta metacognitiva inyectada", "evaluation")
+                self._inject_metacognitive_prompt(messages, meta_prompt)
+
             if self.supports_tool_calling:
                 action_result = self._react_with_tools(messages, iteration)
             else:
@@ -68,18 +77,66 @@ class ReactAgent:
 
             if action_result[0] == "respond":
                 final_response = action_result[1]
+
+                # Post-evaluacion metacognitiva
+                reflection = self.metacognition.evaluate_result(
+                    user_message, final_response, iteration + 1
+                )
+                self._log(
+                    f"Evaluacion: {reflection['assessment']} "
+                    f"(confianza={reflection['confidence_final']}, "
+                    f"errores={reflection['errors']}, "
+                    f"iteraciones={reflection['iterations_used']})",
+                    "evaluation"
+                )
+
+                # Inyectar reflexion final si la hubo problemas
+                final_reflection = self.metacognition.get_final_reflection_prompt()
+                if final_reflection:
+                    self._log("Reflexion final incorporada", "evaluation")
+
+                # Aprender de las lecciones
+                for lesson in reflection.get("lessons", []):
+                    learning.add_knowledge(lesson, source="metacognition")
+
                 self._log("Respuesta final generada", "success")
                 self._save_interaction(user_message, final_response)
                 return final_response, self.thinking_log
 
             elif action_result[0] == "tool_calls":
                 tool_calls = action_result[1]
+
+                # Registrar en metacognicion ANTES de ejecutar
+                for tc in tool_calls:
+                    self.metacognition.record_iteration(
+                        iteration=iteration,
+                        action_type="tool_call",
+                        tool_name=tc["name"]
+                    )
+
                 # Ejecutar TODAS las tool calls de esta iteracion
                 results = self._execute_tool_calls(tool_calls, messages)
+
+                # Registrar resultados en metacognicion
+                for tc, res in zip(tool_calls, results):
+                    had_error = "ERROR" in res
+                    self.metacognition.record_iteration(
+                        iteration=iteration,
+                        action_type="tool_result",
+                        tool_name=tc["name"],
+                        result_summary=res[:200],
+                        had_error=had_error
+                    )
+
                 self._feed_tool_results(tool_calls, results, messages)
 
             elif action_result[0] == "error":
                 self._log(f"Error: {action_result[1]}", "error")
+                self.metacognition.record_iteration(
+                    iteration=iteration,
+                    action_type="error",
+                    had_error=True
+                )
                 if iteration >= MAX_REACT_ITERATIONS - 1:
                     return "Tuve problemas para procesar tu solicitud. Puedes reformularla?", self.thinking_log
 
@@ -92,9 +149,10 @@ class ReactAgent:
     def run_stream(self, user_message):
         """
         Bucle ReAct con streaming. Yields eventos para la UI.
-        Eventos: {"type": "text"|"thinking"|"tool_start"|"tool_result"|"done", "data": ...}
+        Eventos: {"type": "text"|"thinking"|"tool_start"|"tool_result"|"meta"|"done", "data": ...}
         """
         self.thinking_log = []
+        self.metacognition.reset()
         self._log(f"Mensaje del usuario: {user_message}", "input")
 
         messages = self._build_messages(user_message)
@@ -109,6 +167,22 @@ class ReactAgent:
         for iteration in range(MAX_REACT_ITERATIONS):
             self._log(f"--- Iteracion {iteration + 1}/{MAX_REACT_ITERATIONS} ---", "react")
 
+            # CHECK METACOGNITIVO
+            meta_prompt = self.metacognition.get_metacognitive_prompt(iteration)
+            if meta_prompt:
+                self._log("Alerta metacognitiva inyectada", "evaluation")
+                self._inject_metacognitive_prompt(messages, meta_prompt)
+                # Emitir evento de metacognicion para la UI
+                yield {
+                    "type": "meta",
+                    "data": {
+                        "confidence": self.metacognition.confidence,
+                        "errors": self.metacognition.error_count,
+                        "successes": self.metacognition.success_count,
+                        "plan_changes": self.metacognition.plan_changes,
+                    }
+                }
+
             if self.supports_tool_calling:
                 result_type, result_data = self._react_with_tools_stream(messages, iteration)
             else:
@@ -117,16 +191,52 @@ class ReactAgent:
             if result_type == "respond":
                 final_response = result_data
                 self._log("Respuesta final generada", "success")
+
+                # Post-evaluacion metacognitiva
+                reflection = self.metacognition.evaluate_result(
+                    user_message, final_response, iteration + 1
+                )
+                self._log(
+                    f"Evaluacion: {reflection['assessment']} (confianza={reflection['confidence_final']})",
+                    "evaluation"
+                )
+
+                # Aprender lecciones
+                for lesson in reflection.get("lessons", []):
+                    learning.add_knowledge(lesson, source="metacognition")
+
                 self._save_interaction(user_message, final_response)
-                yield {"type": "done", "data": final_response, "thinking_log": self.thinking_log}
+                yield {
+                    "type": "done",
+                    "data": final_response,
+                    "thinking_log": self.thinking_log,
+                    "meta_status": self.metacognition.get_status(),
+                }
                 return
 
             elif result_type == "tool_calls":
                 tool_calls = result_data
+
+                # Registrar en metacognicion
+                for tc in tool_calls:
+                    self.metacognition.record_iteration(
+                        iteration=iteration,
+                        action_type="tool_call",
+                        tool_name=tc["name"]
+                    )
+
                 for tc in tool_calls:
                     yield {"type": "tool_start", "data": tc}
                 results = self._execute_tool_calls(tool_calls, messages)
                 for tc, res in zip(tool_calls, results):
+                    had_error = "ERROR" in res
+                    self.metacognition.record_iteration(
+                        iteration=iteration,
+                        action_type="tool_result",
+                        tool_name=tc["name"],
+                        result_summary=res[:200],
+                        had_error=had_error
+                    )
                     yield {"type": "tool_result", "data": {"tool": tc, "result": res}}
                 self._feed_tool_results(tool_calls, results, messages)
 
@@ -148,6 +258,11 @@ class ReactAgent:
                             tool_calls = msg.get("tool_calls", [])
                             if tool_calls:
                                 for tc in tool_calls:
+                                    self.metacognition.record_iteration(
+                                        iteration=iteration,
+                                        action_type="tool_call",
+                                        tool_name=tc.get("function", {}).get("name", "")
+                                    )
                                     yield {"type": "tool_start", "data": tc}
                                 results = self._execute_tool_calls(tool_calls, messages)
                                 for tc, res in zip(tool_calls, results):
@@ -158,18 +273,45 @@ class ReactAgent:
                             continue
 
                 if full_text and not isinstance(chunk, dict):
+                    # Post-evaluacion
+                    reflection = self.metacognition.evaluate_result(
+                        user_message, full_text, iteration + 1
+                    )
+                    for lesson in reflection.get("lessons", []):
+                        learning.add_knowledge(lesson, source="metacognition")
+
                     self._log("Respuesta final generada (streaming)", "success")
                     self._save_interaction(user_message, full_text)
-                    yield {"type": "done", "data": full_text, "thinking_log": self.thinking_log}
+                    yield {
+                        "type": "done",
+                        "data": full_text,
+                        "thinking_log": self.thinking_log,
+                        "meta_status": self.metacognition.get_status(),
+                    }
                     return
 
             elif result_type == "error":
                 self._log(f"Error: {result_data}", "error")
+                self.metacognition.record_iteration(
+                    iteration=iteration,
+                    action_type="error",
+                    had_error=True
+                )
                 if iteration >= MAX_REACT_ITERATIONS - 1:
-                    yield {"type": "done", "data": "Tuve problemas para procesar tu solicitud. Puedes reformularla?", "thinking_log": self.thinking_log}
+                    yield {
+                        "type": "done",
+                        "data": "Tuve problemas para procesar tu solicitud. Puedes reformularla?",
+                        "thinking_log": self.thinking_log,
+                        "meta_status": self.metacognition.get_status(),
+                    }
                     return
 
-        yield {"type": "done", "data": "Alcance el limite de iteraciones. Puede que necesites ser mas especifico.", "thinking_log": self.thinking_log}
+        yield {
+            "type": "done",
+            "data": "Alcance el limite de iteraciones. Puede que necesites ser mas especifico.",
+            "thinking_log": self.thinking_log,
+            "meta_status": self.metacognition.get_status(),
+        }
 
     # ----------------------------------------------------------
     # REACT CON TOOL CALLING (sin streaming)
@@ -355,6 +497,37 @@ class ReactAgent:
             except Exception as e:
                 return f"ERROR ejecutando {tool_name}: {e}"
         return f"Herramienta no encontrada: {tool_name}"
+
+    # ----------------------------------------------------------
+    # METACOGNICION: INYECCION DE PROMPT
+    # ----------------------------------------------------------
+    def _inject_metacognitive_prompt(self, messages, meta_prompt):
+        """
+        Inyecta el prompt metacognitivo en la conversacion.
+        Se agrega como un mensaje de usuario especial para que el LLM
+        lo considere en su siguiente razonamiento.
+        """
+        # Buscar el ultimo mensaje de usuario y agregar la alerta despues
+        # (antes de que el LLM responda en la siguiente iteracion)
+        # Lo agregamos como un mensaje del sistema intermedio
+        # para no romper el formato de tool calling
+        injected = False
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i]["role"] == "user":
+                # Agregar despues del ultimo mensaje de usuario
+                messages.insert(i + 1, {
+                    "role": "user",
+                    "content": meta_prompt
+                })
+                injected = True
+                break
+
+        if not injected:
+            # Si no hay mensaje de usuario, agregar al final
+            messages.append({
+                "role": "user",
+                "content": meta_prompt
+            })
 
     # ----------------------------------------------------------
     # CONSTRUCCION DE MENSAJES
