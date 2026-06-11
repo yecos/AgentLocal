@@ -53,11 +53,18 @@ from pathlib import Path
 # CONFIGURACION
 # ============================================================
 
-# MODELO: qwen3 tiene tool calling nativo y es mas inteligente
-# Si no tienes qwen3, usa qwen2.5:14b como fallback
-AGENT_MODEL = "qwen3:4b"       # Cambiar a tu modelo disponible
-FALLBACK_MODEL = "qwen2.5:14b"  # Si el principal no esta
-CHAT_MODEL = "llama3.1:8b"
+# MODELOS: Se detectan automaticamente al iniciar.
+# Si tienes qwen3 → tool calling nativo (mejor)
+# Si tienes qwen2.5 → JSON fallback (funciona igual)
+# NO necesitas cambiar nada aqui, se auto-detecta.
+PREFERRED_MODELS = ["qwen3:4b", "qwen3-coder", "qwen3:30b-a3b", "qwen2.5:14b", "llama3.1:8b"]
+AGENT_MODEL = None  # Se detecta automaticamente al iniciar
+FALLBACK_MODEL = None  # Tambien se detecta
+CHAT_MODEL = None
+
+# Se resolveran en _detect_best_model() al primer uso
+_detected_model = None
+_detected_models_list = []
 
 MAX_REACT_ITERATIONS = 8        # Max vueltas del bucle ReAct
 MAX_CONVERSATION_MEMORY = 20    # Mensajes de contexto que recuerda
@@ -849,55 +856,154 @@ learning = LearningSystem()
 # LLM - Conexion a Ollama con 4 metodos
 # ============================================================
 
+def _get_available_models() -> list:
+    """Obtiene la lista de modelos disponibles en Ollama."""
+    global _detected_models_list
+    if _detected_models_list:
+        return _detected_models_list
+    try:
+        import urllib.request
+        req = urllib.request.Request("http://localhost:11434/api/tags")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            _detected_models_list = [m["name"] for m in data.get("models", [])]
+            return _detected_models_list
+    except:
+        return []
+
+
+def _detect_best_model() -> str:
+    """Detecta el mejor modelo disponible. Se ejecuta UNA vez al inicio."""
+    global AGENT_MODEL, FALLBACK_MODEL, CHAT_MODEL, _detected_model
+
+    if _detected_model:
+        return _detected_model
+
+    available = _get_available_models()
+
+    if not available:
+        # No hay Ollama o no hay modelos
+        AGENT_MODEL = "qwen2.5:14b"
+        FALLBACK_MODEL = "llama3.1:8b"
+        CHAT_MODEL = "llama3.1:8b"
+        _detected_model = AGENT_MODEL
+        return AGENT_MODEL
+
+    # Buscar el mejor modelo en orden de preferencia
+    for preferred in PREFERRED_MODELS:
+        for avail in available:
+            if preferred in avail or avail.startswith(preferred.split(":")[0]):
+                AGENT_MODEL = avail
+                _detected_model = avail
+                # El fallback es el segundo mejor
+                for fb in PREFERRED_MODELS:
+                    if fb != preferred:
+                        for avail2 in available:
+                            if fb in avail2 or avail2.startswith(fb.split(":")[0]):
+                                FALLBACK_MODEL = avail2
+                                CHAT_MODEL = avail2
+                                return AGENT_MODEL
+                FALLBACK_MODEL = available[0] if len(available) > 1 else AGENT_MODEL
+                CHAT_MODEL = FALLBACK_MODEL
+                return AGENT_MODEL
+
+    # Si ningun modelo preferido esta, usar el primero disponible
+    AGENT_MODEL = available[0]
+    FALLBACK_MODEL = available[1] if len(available) > 1 else available[0]
+    CHAT_MODEL = FALLBACK_MODEL
+    _detected_model = AGENT_MODEL
+    return AGENT_MODEL
+
+
 def _llm_generate(messages: list, tools: list = None) -> str:
-    """Consulta al LLM local. Funcion modular, usada por todo el agente."""
+    """Consulta al LLM local. Prueba TODOS los modelos y TODOS los metodos."""
+    # Asegurar que tenemos modelo detectado
+    _detect_best_model()
+
+    # Modelos a probar en orden
+    models_to_try = [AGENT_MODEL]
+    if FALLBACK_MODEL and FALLBACK_MODEL != AGENT_MODEL:
+        models_to_try.append(FALLBACK_MODEL)
+
+    # Hosts a probar
+    hosts = ['http://localhost:11434', 'http://127.0.0.1:11434']
+
     try:
         import ollama
 
         # Intentar con function calling nativo si hay tools
         if tools:
-            for host in ['http://localhost:11434', 'http://127.0.0.1:11434']:
+            for model in models_to_try:
+                for host in hosts:
+                    try:
+                        client = ollama.Client(host=host)
+                        response = client.chat(model=model, messages=messages, tools=tools)
+                        return response  # Retorna el objeto completo
+                    except Exception:
+                        continue
+
+        # Sin tools (o si fallaron los tools)
+        for model in models_to_try:
+            for host in hosts:
                 try:
                     client = ollama.Client(host=host)
-                    response = client.chat(model=AGENT_MODEL, messages=messages, tools=tools)
-                    return response  # Retorna el objeto completo (con tool_calls)
+                    response = client.chat(model=model, messages=messages)
+                    content = response.get("message", {}).get("content", "")
+                    if content:
+                        return content
                 except Exception:
-                    continue
+                        continue
 
-        # Sin tools, o fallback sin function calling
-        for host in ['http://localhost:11434', 'http://127.0.0.1:11434']:
+        # ollama.chat() sin Client
+        for model in models_to_try:
             try:
-                client = ollama.Client(host=host)
-                response = client.chat(model=AGENT_MODEL, messages=messages)
-                return response.get("message", {}).get("content", "")
+                response = ollama.chat(model=model, messages=messages)
+                content = response.get("message", {}).get("content", "")
+                if content:
+                    return content
             except Exception:
                 continue
 
-        try:
-            response = ollama.chat(model=AGENT_MODEL, messages=messages)
-            return response.get("message", {}).get("content", "")
-        except Exception:
-            pass
-
         # HTTP directo como ultimo recurso
-        try:
-            import urllib.request
-            data = json.dumps({
-                "model": AGENT_MODEL, "messages": messages, "stream": False
-            }).encode("utf-8")
-            req = urllib.request.Request(
-                "http://localhost:11434/api/chat",
-                data=data, headers={"Content-Type": "application/json"}
-            )
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                result = json.loads(resp.read().decode("utf-8"))
-                return result.get("message", {}).get("content", "")
-        except Exception:
-            pass
+        for model in models_to_try:
+            try:
+                import urllib.request
+                data = json.dumps({
+                    "model": model, "messages": messages, "stream": False
+                }).encode("utf-8")
+                req = urllib.request.Request(
+                    "http://localhost:11434/api/chat",
+                    data=data, headers={"Content-Type": "application/json"}
+                )
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    result = json.loads(resp.read().decode("utf-8"))
+                    content = result.get("message", {}).get("content", "")
+                    if content:
+                        return content
+            except Exception:
+                continue
 
         return ""
 
     except ImportError:
+        # Sin ollama, solo HTTP directo
+        for model in models_to_try:
+            try:
+                import urllib.request
+                data = json.dumps({
+                    "model": model, "messages": messages, "stream": False
+                }).encode("utf-8")
+                req = urllib.request.Request(
+                    "http://localhost:11434/api/chat",
+                    data=data, headers={"Content-Type": "application/json"}
+                )
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    result = json.loads(resp.read().decode("utf-8"))
+                    content = result.get("message", {}).get("content", "")
+                    if content:
+                        return content
+            except Exception:
+                continue
         return ""
 
 
@@ -1207,17 +1313,23 @@ class ReactAgent:
 
     def _detect_tool_calling_support(self) -> bool:
         """Detecta si el modelo soporta function calling nativo."""
+        _detect_best_model()  # Asegurar modelo detectado
         try:
             import ollama
-            client = ollama.Client(host='http://localhost:11434')
-            # Test simple con tools
-            response = client.chat(
-                model=AGENT_MODEL,
-                messages=[{"role": "user", "content": "test"}],
-                tools=[TOOL_SCHEMAS[0]]  # Solo 1 tool para test
-            )
-            # Si no crashea, soporta tool calling
-            return True
+            for host in ['http://localhost:11434', 'http://127.0.0.1:11434']:
+                try:
+                    client = ollama.Client(host=host)
+                    # Test simple con tools - usar modelo detectado
+                    response = client.chat(
+                        model=AGENT_MODEL,
+                        messages=[{"role": "user", "content": "test"}],
+                        tools=[TOOL_SCHEMAS[0]]
+                    )
+                    # Si no crashea, soporta tool calling
+                    return True
+                except Exception:
+                    continue
+            return False
         except Exception:
             return False
 
@@ -1309,10 +1421,13 @@ def main():
     # === SIDEBAR ===
     with st.sidebar:
         st.header("Config")
-        st.write(f"**Modelo agente:** {AGENT_MODEL}")
-        st.write(f"**Modelo fallback:** {FALLBACK_MODEL}")
+        # Mostrar modelo detectado
+        _detect_best_model()
+        st.write(f"**Modelo agente:** {AGENT_MODEL or 'No detectado'}")
+        st.write(f"**Modelo fallback:** {FALLBACK_MODEL or 'No detectado'}")
         st.write(f"**Directorio:** {REPOS_DIR}")
-        st.write(f"**Tool calling:** {'Nativo' if agent.supports_tool_calling else 'JSON fallback' if agent.supports_tool_calling is False else 'Sin detectar'}")
+        tc_status = 'Nativo' if agent.supports_tool_calling else ('JSON fallback' if agent.supports_tool_calling is False else 'Sin detectar')
+        st.write(f"**Tool calling:** {tc_status}")
 
         st.header("Ollama Status")
         if st.button("Test conexion Ollama", use_container_width=True):
@@ -1337,9 +1452,11 @@ def main():
                 data = json.loads(resp.read().decode("utf-8"))
                 models = [m["name"] for m in data.get("models", [])]
                 st.success(f"Ollama OK - {len(models)} modelos")
-                # Verificar si el modelo configurado esta disponible
-                if AGENT_MODEL not in models and not any(AGENT_MODEL in m for m in models):
-                    st.warning(f"Modelo '{AGENT_MODEL}' no encontrado. Disponibles: {', '.join(models[:5])}")
+                _detect_best_model()
+                if AGENT_MODEL:
+                    st.info(f"Usando: {AGENT_MODEL}")
+                else:
+                    st.warning(f"Ningun modelo preferido. Disponibles: {', '.join(models[:5])}")
         except:
             st.error("Ollama NO conecta")
 
