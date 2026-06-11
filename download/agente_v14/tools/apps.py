@@ -22,6 +22,32 @@ from tools.sistema import ejecutar_comando
 _exe_cache = {}
 _exe_cache_time = {}
 
+# Nombres alternativos de ejecutables (lo que el usuario dice -> como se llama el .exe)
+_EXE_ALIASES = {
+    "autocad": "acad",
+    "revit": "revit",
+    "photoshop": "photoshop",
+    "illustrator": "illustrator",
+    "visual studio code": "code",
+    "vscode": "code",
+    "visual studio": "devenv",
+    "google chrome": "chrome",
+    "chrome": "chrome",
+    "firefox": "firefox",
+    "microsoft word": "winword",
+    "word": "winword",
+    "microsoft excel": "excel",
+    "excel": "excel",
+    "microsoft powerpoint": "powerpnt",
+    "powerpoint": "powerpnt",
+    "notepad": "notepad",
+    "blender": "blender",
+    "sketchup": "sketchup",
+    "figma": "figma",
+    "telegram": "telegram",
+    "whatsapp": "whatsapp",
+}
+
 
 def buscar_en_start_menu(nombre: str) -> str:
     """Busca un acceso directo en el Start Menu de Windows."""
@@ -62,6 +88,7 @@ def buscar_en_start_menu(nombre: str) -> str:
 def buscar_exe(nombre: str) -> str:
     """Busca el ejecutable de una aplicacion con cache TTL de 5 minutos."""
     nombre_lower = strip_prefixes(nombre).lower()
+    exe_name = _EXE_ALIASES.get(nombre_lower, nombre_lower)
 
     # Cache con TTL
     cache_key = nombre_lower
@@ -70,6 +97,7 @@ def buscar_exe(nombre: str) -> str:
         if time.time() - cached_time < 300:
             return _exe_cache[cache_key]
 
+    # 0. Buscar en Start Menu primero (rapido)
     shortcut = buscar_en_start_menu(nombre)
     if shortcut:
         _exe_cache[cache_key] = shortcut
@@ -81,7 +109,7 @@ def buscar_exe(nombre: str) -> str:
         return ""
 
     if IS_WINDOWS:
-        # Buscar en registro
+        # 1. Buscar en registro (InstallLocation) - busca por nombre del producto
         try:
             reg_cmd = (
                 f'powershell -Command "'
@@ -96,18 +124,57 @@ def buscar_exe(nombre: str) -> str:
             if reg_result and reg_result != "(sin salida)" and "ERROR" not in reg_result:
                 install_path = reg_result.strip().split('\n')[0].strip()
                 if install_path and os.path.exists(install_path):
+                    # Buscar exe con nombre real (alias) dentro del directorio de instalacion
                     for root, dirs, files in os.walk(install_path):
                         level = root.replace(install_path, "").count(os.sep)
-                        if level > 2:
+                        if level > 3:
                             dirs.clear()
                             continue
                         for f in files:
-                            if f.lower().endswith(".exe") and nombre_lower in f.lower():
-                                return os.path.join(root, f)
+                            f_lower = f.lower()
+                            if f_lower.endswith(".exe") and (
+                                exe_name in f_lower or nombre_lower in f_lower
+                            ):
+                                result = os.path.join(root, f)
+                                _exe_cache[cache_key] = result
+                                _exe_cache_time[cache_key] = time.time()
+                                return result
         except Exception:
             pass
 
-        # Buscar en Program Files
+        # 2. Buscar exe directo en subcarpetas de Autodesk, Adobe, etc.
+        known_vendors = []
+        if "autocad" in nombre_lower or "revit" in nombre_lower:
+            known_vendors = ["Autodesk"]
+        elif "photoshop" in nombre_lower or "illustrator" in nombre_lower:
+            known_vendors = ["Adobe"]
+        elif "chrome" in nombre_lower:
+            known_vendors = ["Google"]
+
+        for vendor in known_vendors:
+            search_dirs = [
+                os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), vendor),
+                os.path.join(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"), vendor),
+            ]
+            for base_dir in search_dirs:
+                if not os.path.exists(base_dir):
+                    continue
+                for root, dirs, files in os.walk(base_dir):
+                    level = root.replace(base_dir, "").count(os.sep)
+                    if level > 4:
+                        dirs.clear()
+                        continue
+                    for f in files:
+                        f_lower = f.lower()
+                        if f_lower.endswith(".exe") and (
+                            exe_name in f_lower or nombre_lower in f_lower
+                        ):
+                            result = os.path.join(root, f)
+                            _exe_cache[cache_key] = result
+                            _exe_cache_time[cache_key] = time.time()
+                            return result
+
+        # 3. Buscar en Program Files con where (lento, ultimo recurso)
         search_dirs = [
             os.environ.get("ProgramFiles", "C:\\Program Files"),
             os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"),
@@ -115,13 +182,17 @@ def buscar_exe(nombre: str) -> str:
         for base_dir in search_dirs:
             if not os.path.exists(base_dir):
                 continue
-            where_cmd = f'where /r "{base_dir}" *{nombre_lower}*.exe'
+            # Buscar por el nombre real del exe (alias)
+            where_cmd = f'where /r "{base_dir}" *{exe_name}*.exe'
             where_result = ejecutar_comando(where_cmd)
             if where_result and where_result != "(sin salida)" and "ERROR" not in where_result:
                 exes = [line.strip() for line in where_result.split('\n')
                         if line.strip() and line.strip().endswith(".exe")]
                 if exes:
-                    return exes[0]
+                    result = exes[0]
+                    _exe_cache[cache_key] = result
+                    _exe_cache_time[cache_key] = time.time()
+                    return result
 
     return ""
 
@@ -184,7 +255,7 @@ def abrir_aplicacion(app: str) -> str:
         return f"Aplicacion {app} abierta"
 
     if "no se puede" in resultado.lower() or "no encuentra" in resultado.lower():
-        return f"No encontre '{app}' en tu computadora."
+        return f"No encontre '{app}' en tu computadora.\nSugerencia: Ejecuta 'dir /s /b \"C:\\Program Files\\Autodesk\\acad.exe\"' para buscar la ruta exacta."
     return resultado
 
 
