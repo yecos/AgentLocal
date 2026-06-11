@@ -176,10 +176,21 @@ class TripleMemory:
         return "\n\n".join(context_parts) if context_parts else ""
 
     def _get_conversation_summary(self):
+        """Genera un resumen de la conversacion. Usa LLM si la conversacion es muy larga."""
         if self._summary_cache and self._summary_last_update:
             msgs_since = len(self.short_term) - self._summary_last_update
             if msgs_since < 5:
                 return self._summary_cache
+
+        # Si hay mas de 20 mensajes, intentar resumen con LLM (mas inteligente)
+        if len(self.short_term) > 20:
+            llm_summary = self._generate_llm_summary()
+            if llm_summary:
+                self._summary_cache = llm_summary
+                self._summary_last_update = len(self.short_term)
+                return llm_summary
+
+        # Fallback: resumen simple por temas
         user_msgs = [m["content"][:80] for m in self.short_term if m["role"] == "user"]
         if not user_msgs:
             return ""
@@ -187,6 +198,36 @@ class TripleMemory:
         self._summary_cache = summary
         self._summary_last_update = len(self.short_term)
         return summary
+
+    def _generate_llm_summary(self):
+        """Usa el LLM para generar un resumen inteligente de la conversacion."""
+        try:
+            from llm import ollama
+
+            # Tomar los ultimos 20 mensajes para resumir
+            recent = self.short_term[-20:]
+            conversation_text = "\n".join([
+                f"{'Usuario' if m['role'] == 'user' else 'Asistente'}: {m['content'][:200]}"
+                for m in recent
+            ])
+
+            prompt = (
+                "Resume esta conversacion en 2-3 frases, mencionando los temas principales "
+                "y cualquier tarea pendiente o resultado importante. Se conciso:\n\n"
+                f"{conversation_text}"
+            )
+
+            messages = [
+                {"role": "system", "content": "Eres un asistente que resume conversaciones. Responde en espanol, maximo 3 frases."},
+                {"role": "user", "content": prompt}
+            ]
+
+            summary = ollama.generate_chat(messages)
+            if summary and len(summary) > 20:
+                return f"RESUMEN: {summary[:300]}"
+        except Exception:
+            pass
+        return ""
 
     def save_session(self):
         try:
