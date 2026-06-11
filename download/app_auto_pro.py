@@ -1,6 +1,6 @@
 """
 =============================================================
-AGENTE LOCAL AUTONOMO v8 - AGENTE QUE PIENSA DE VERDAD
+AGENTE LOCAL AUTONOMO v8.1 - AGENTE QUE PIENSA DE VERDAD
 Piensa → Planifica → Ejecuta → Evalua → Ajusta
 Consulta IA cloud si necesita ayuda
 =============================================================
@@ -12,9 +12,12 @@ ARQUITECTURA:
                 └── Si falla, ajusta y reintenta ←────────────────────────────┘
                 └── Si se atasca, consulta IA cloud ←─────────────────────────┘
 
-DIFERENCIA vs v7:
-  v7: "Todo va al LLM, incluso los saludos → elige escribir_archivo para 'hola'"
-  v8: "Detecta conversacion ANTES del LLM → responde natural → solo usa herramientas cuando hace falta"
+CAMBIOS v8.1 vs v8:
+  - buscar_exe(): Busca .exe en Program Files, AppData y registro de Windows
+  - abrir_aplicacion(): 40+ apps en mapa + busqueda inteligente de .exe
+  - es_conversacion(): Lista de apps conocidas que NUNCA se tratan como charla
+  - _fallback_plan(): Detecta nombres de app en mensajes cortos
+  - THINKING_PROMPT: Ejemplos de "whatsapp" y "autocad 2025" como ACCION
 =============================================================
 """
 
@@ -252,24 +255,155 @@ def escribir_archivo(ruta: str, contenido: str) -> str:
         return f"ERROR: {e}"
 
 
+def buscar_exe(nombre: str) -> str:
+    """Busca un archivo .exe en el sistema cuando no esta en el mapa de apps."""
+    nombre_lower = nombre.lower().strip()
+
+    # Directorios comunes donde estan las aplicaciones en Windows
+    search_dirs = [
+        os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files")),
+        os.path.join(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")),
+        os.path.join(os.environ.get("LocalAppData", ""), "Programs"),
+        os.path.join(os.path.expanduser("~"), "AppData", "Local", "Programs"),
+        os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Autodesk"),
+        os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Adobe"),
+    ]
+
+    # Buscar en el registro de desinstalacion para encontrar el path exacto
+    try:
+        reg_cmd = (
+            f'powershell -Command "'
+            f'Get-ItemProperty \'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*\', '
+            f'\'HKLM:\\SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*\', '
+            f'\'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*\' '
+            f'| Where-Object {{$_.DisplayName -like \'*{nombre}*\'}} '
+            f'| Select-Object -ExpandProperty InstallLocation '
+            f'| Select-Object -First 1"'
+        )
+        reg_result = ejecutar_comando(reg_cmd)
+        if reg_result and reg_result != "(sin salida)" and "ERROR" not in reg_result:
+            install_path = reg_result.strip().split('\n')[0].strip()
+            if install_path and os.path.exists(install_path):
+                # Buscar .exe dentro del path de instalacion
+                for root, dirs, files in os.walk(install_path):
+                    level = root.replace(install_path, "").count(os.sep)
+                    if level > 2:
+                        dirs.clear()
+                        continue
+                    for f in files:
+                        if f.lower().endswith(".exe") and nombre_lower in f.lower():
+                            return os.path.join(root, f)
+    except:
+        pass
+
+    # Busqueda directa en directorios comunes
+    for base_dir in search_dirs:
+        if not os.path.exists(base_dir):
+            continue
+        try:
+            for item in os.listdir(base_dir):
+                item_lower = item.lower()
+                if nombre_lower in item_lower or item_lower in nombre_lower:
+                    full_path = os.path.join(base_dir, item)
+                    if os.path.isdir(full_path):
+                        # Buscar .exe adentro (solo 2 niveles de profundidad)
+                        for root, dirs, files in os.walk(full_path):
+                            level = root.replace(full_path, "").count(os.sep)
+                            if level > 2:
+                                dirs.clear()
+                                continue
+                            for f in files:
+                                if f.lower().endswith(".exe") and nombre_lower in f.lower():
+                                    return os.path.join(root, f)
+            # Busqueda mas profunda con where /r
+            where_cmd = f'where /r "{base_dir}" *{nombre_lower}*.exe'
+            where_result = ejecutar_comando(where_cmd)
+            if where_result and where_result != "(sin salida)" and "ERROR" not in where_result:
+                exes = [line.strip() for line in where_result.split('\n') if line.strip() and line.strip().endswith(".exe")]
+                if exes:
+                    return exes[0]
+        except:
+            continue
+
+    return ""
+
+
 def abrir_aplicacion(app: str) -> str:
     app_map = {
+        # Navegadores
         "chrome": "start chrome", "google chrome": "start chrome",
         "firefox": "start firefox", "edge": "start msedge",
+        # Explorador
         "explorador": "start explorer", "file explorer": "start explorer",
+        # Editores / IDE
         "vscode": "start code", "visual studio code": "start code",
         "notepad": "start notepad", "bloc de notas": "start notepad",
+        # Office
+        "word": "start winword", "excel": "start excel", "powerpoint": "start powerpnt",
+        # Utilidades
         "calculadora": "start calc", "calculator": "start calc",
-        "paint": "start mspaint", "word": "start winword",
-        "excel": "start excel", "powerpoint": "start powerpnt",
-        "spotify": "start spotify", "discord": "start discord",
-        "terminal": "start cmd", "powershell": "start powershell",
+        "paint": "start mspaint",
+        "terminal": "start cmd", "cmd": "start cmd",
+        "powershell": "start powershell",
         "configuracion": "start ms-settings:",
+        # Multimedia / Social
+        "spotify": "start spotify",
+        "discord": "start discord",
+        "whatsapp": "start whatsapp",
+        "telegram": "start telegram",
+        "zoom": "start zoom",
+        "teams": "start msteams", "microsoft teams": "start msteams",
+        "skype": "start skype",
+        "vlc": "start vlc",
+        # Diseño / Arquitectura
+        "autocad": "start acad",
+        "revit": "start revit",
+        "photoshop": "start photoshop",
+        "illustrator": "start illustrator",
+        "figma": "start figma",
+        "blender": "start blender",
+        "sketchup": "start sketchup",
+        "3ds max": "start 3dsmax",
+        "rhino": "start rhino",
+        # Desarrollo
+        "github desktop": "start github",
+        "postman": "start postman",
+        "docker": "start docker desktop",
+        "fiddler": "start fiddler",
     }
-    comando = app_map.get(app.lower().strip(), f"start {app}")
-    resultado = ejecutar_comando(comando)
+
+    app_lower = app.lower().strip()
+    comando = app_map.get(app_lower, None)
+
+    # Si esta en el mapa, usar el comando directo
+    if comando:
+        resultado = ejecutar_comando(comando)
+        if not resultado or resultado == "(sin salida)":
+            return f"Aplicacion {app} abierta"
+        # Si el comando falla, intentar busqueda inteligente
+        if "no se puede" in resultado.lower() or "no encuentra" in resultado.lower() or "error" in resultado.lower():
+            exe_path = buscar_exe(app)
+            if exe_path:
+                resultado2 = ejecutar_comando(f'start "" "{exe_path}"')
+                if not resultado2 or resultado2 == "(sin salida)":
+                    return f"Aplicacion {app} abierta (encontrada en: {exe_path})"
+                return resultado2
+        return resultado
+
+    # Si NO esta en el mapa, buscar el .exe inteligentemente
+    exe_path = buscar_exe(app)
+    if exe_path:
+        resultado = ejecutar_comando(f'start "" "{exe_path}"')
+        if not resultado or resultado == "(sin salida)":
+            return f"Aplicacion {app} abierta (encontrada en: {exe_path})"
+        return resultado
+
+    # Ultimo intento: start nombre (Windows intenta resolverlo)
+    resultado = ejecutar_comando(f"start {app}")
     if not resultado or resultado == "(sin salida)":
         return f"Aplicacion {app} abierta"
+    if "no se puede" in resultado.lower() or "no encuentra" in resultado.lower():
+        return f"No encontre la aplicacion '{app}'. Probaste con el nombre exacto?"
     return resultado
 
 
@@ -287,7 +421,7 @@ TOOL_FUNCTIONS = {
 
 # Descripcion de herramientas para el LLM
 TOOL_DESCRIPTIONS = """
-- conversar(mensaje) - Para SALUDOS, preguntas generales, charla. Usa esta cuando NO necesitas ejecutar nada.
+- conversar(mensaje) - Para SALUDOS, preguntas generales, charla. Usa esta cuando NO necesitas ejecutar nada. NUNCA para abrir apps.
 - ejecutar_comando(comando) - Ejecuta CUALQUIER comando en la terminal. Use para todo lo que no tenga herramienta especifica.
 - clonar_repositorio(url) - Clona un repo de GitHub.
 - instalar_dependencias(ruta, gestor="auto") - Instala deps. Detecta npm/pip/poetry automaticamente.
@@ -295,7 +429,7 @@ TOOL_DESCRIPTIONS = """
 - listar_archivos(ruta) - Lista archivos y carpetas de un directorio.
 - analizar_proyecto(ruta) - Analiza la estructura completa de un proyecto.
 - escribir_archivo(ruta, contenido) - Crea o modifica un archivo.
-- abrir_aplicacion(app) - Abre una aplicacion (chrome, vscode, notepad, etc.)
+- abrir_aplicacion(app) - Abre una aplicacion por nombre (autocad, whatsapp, chrome, revit, vscode, etc.). Busca el .exe automaticamente si no esta en el mapa.
 """
 
 
@@ -403,11 +537,23 @@ def es_conversacion(mensaje: str) -> bool:
     if msg in confirmaciones:
         return True
 
-    # Mensajes muy cortos sin verbos de accion
+    # Nombres de aplicaciones conocidas - NUNCA tratar como conversacion
+    apps_conocidas = [
+        "whatsapp", "telegram", "zoom", "teams", "skype", "discord", "spotify",
+        "chrome", "firefox", "edge", "vscode", "notepad", "word", "excel", "powerpoint",
+        "autocad", "revit", "photoshop", "illustrator", "figma", "blender", "sketchup",
+        "3ds max", "rhino", "vlc", "paint", "calculadora", "explorador",
+        "github", "postman", "docker", "terminal", "cmd", "powershell",
+        "outlook", "mail", "calendar", "onenote",
+    ]
+    if any(a in msg for a in apps_conocidas):
+        return False  # Es una app, NO es conversacion
+
+    # Mensajes muy cortos sin verbos de accion y sin nombres de app
     verbos_accion = ["clona", "abre", "instal", "ejecuta", "analiz", "leer", "listar",
                      "busca", "crea", "borra", "elimina", "modifica", "escribe", "corre",
                      "compila", "despliega", "descarga", "sube", "mueve"]
-    if len(msg.split()) <= 3 and not any(v in msg for v in verbos_accion):
+    if len(msg.split()) <= 3 and not any(v in msg for v in verbos_accion) and not any(a in msg for a in apps_conocidas):
         return True
 
     return False
@@ -517,6 +663,28 @@ Respuesta:
     ],
     "riesgos": ["Puede no tener README", "Puede necesitar dependencias instaladas"],
     "siguiente_paso_sugerido": "Preguntar al usuario que aspecto especifico necesita ayuda"
+}}
+
+Usuario: "abre mi whatsapp"
+Respuesta:
+{{
+    "analisis": "El usuario quiere abrir WhatsApp. Es una accion clara.",
+    "plan": [
+        {{"paso": 1, "accion": "abrir_aplicacion", "params": {{"app": "whatsapp"}}, "razon": "Abrir la aplicacion WhatsApp"}}
+    ],
+    "riesgos": ["WhatsApp puede no estar instalado como app desktop"],
+    "siguiente_paso_sugerido": ""
+}}
+
+Usuario: "autocad 2025"
+Respuesta:
+{{
+    "analisis": "El usuario quiere abrir AutoCAD 2025. Es una accion, no una conversacion.",
+    "plan": [
+        {{"paso": 1, "accion": "abrir_aplicacion", "params": {{"app": "autocad"}}, "razon": "Abrir AutoCAD, la funcion buscara el .exe automaticamente"}}
+    ],
+    "riesgos": ["AutoCAD puede no estar instalado"],
+    "siguiente_paso_sugerido": ""
 }}
 
 Usuario: "no funciona, sigue sin hacer nada"
@@ -1045,14 +1213,30 @@ class AgentBrain:
                     "siguiente_paso_sugerido": ""
                 }
 
-        # Si es solo "hola?" o algo corto sin intencion de accion
-        if len(msg.split()) <= 2 and not any(w in msg for w in ["clona", "abre", "instal", "ejecuta", "analiz", "leer", "listar"]):
+        # Si es solo "hola?" o algo corto sin intencion de accion Y sin nombre de app
+        app_names = ["whatsapp", "telegram", "zoom", "teams", "skype", "discord", "spotify",
+                     "chrome", "firefox", "edge", "vscode", "notepad", "word", "excel", "powerpoint",
+                     "autocad", "revit", "photoshop", "illustrator", "figma", "blender", "sketchup",
+                     "3ds max", "rhino", "vlc", "paint", "outlook", "onenote", "postman"]
+        if len(msg.split()) <= 3 and not any(w in msg for w in ["clona", "abre", "instal", "ejecuta", "analiz", "leer", "listar"]) and not any(a in msg for a in app_names):
             return {
                 "analisis": "El usuario esta conversando o preguntando algo simple",
                 "plan": [{"paso": 1, "accion": "conversar", "params": {"mensaje": user_message}, "razon": "Responder al usuario"}],
                 "riesgos": [],
                 "siguiente_paso_sugerido": ""
             }
+
+        # Si el mensaje corto contiene un nombre de app, abrir la app
+        if any(a in msg for a in app_names):
+            # Extraer el nombre de la app del mensaje
+            app_found = next((a for a in app_names if a in msg), "")
+            if app_found:
+                return {
+                    "analisis": f"Abrir aplicacion: {app_found}",
+                    "plan": [{"paso": 1, "accion": "abrir_aplicacion", "params": {"app": app_found}, "razon": f"El usuario menciona la app {app_found}"}],
+                    "riesgos": [f"{app_found} puede no estar instalado"],
+                    "siguiente_paso_sugerido": ""
+                }
 
         # === SEGUNDO: Deteccion rapida de intenciones de accion ===
         github_urls = re.findall(r'https?://github\.com/[\w\-]+/[\w\-\.]+', user_message, re.IGNORECASE)
@@ -1216,7 +1400,7 @@ def procesar_mensaje(user_message: str) -> tuple:
 
 def main():
     st.set_page_config(
-        page_title="Agente Autonomo v8",
+        page_title="Agente Autonomo v8.1",
         page_icon="🧠",
         layout="wide"
     )
@@ -1354,7 +1538,7 @@ def main():
         st.session_state.thinking_history = []
 
     # Titulo con estilo
-    st.markdown('<div class="main-title">Agente Autonomo v8</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-title">Agente Autonomo v8.1</div>', unsafe_allow_html=True)
     st.markdown('<div class="main-subtitle">Piensa → Planifica → Ejecuta → Evalua → Aprende — Consulta IA cloud si se atasca</div>', unsafe_allow_html=True)
 
     # === SIDEBAR ===
