@@ -225,8 +225,8 @@ class TripleMemory:
             summary = ollama.generate_chat(messages)
             if summary and len(summary) > 20:
                 return f"RESUMEN: {summary[:300]}"
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error generando resumen LLM: {e}")
         return ""
 
     def save_session(self):
@@ -238,8 +238,8 @@ class TripleMemory:
             }
             with open(self._session_file, "w", encoding="utf-8") as f:
                 json.dump(session_data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Error guardando sesion: {e}")
 
     def load_session(self):
         try:
@@ -255,8 +255,8 @@ class TripleMemory:
                         self.working = session_data.get("working", self.working)
                         return True
                 self.working = session_data.get("working", self.working)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Error cargando sesion: {e}")
         return False
 
     def clear_session(self):
@@ -293,8 +293,8 @@ class TripleMemory:
                 stats["last_session_age_hours"] = round(
                     (datetime.now().timestamp() - mtime) / 3600, 1
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error obteniendo stats de sesion: {e}")
         return stats
 
     def cleanup(self, max_entries=500):

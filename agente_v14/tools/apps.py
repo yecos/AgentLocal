@@ -8,20 +8,89 @@ abrir_aplicacion, abrir_url, buscar_youtube
 
 import os
 import re
+import json
 import time
 import platform
 import logging
 
 from config import (
-    REPOS_DIR, SITIOS_CONOCIDOS, APP_ALIASES, IS_WINDOWS, logger
+    REPOS_DIR, LEARN_DIR, SITIOS_CONOCIDOS, APP_ALIASES, IS_WINDOWS, logger
 )
 from utils.helpers import strip_prefixes, open_in_browser
 from utils.security import sanitize_input
 from tools.sistema import ejecutar_comando
 
-# Cache para buscar_exe (evita escaneo de disco repetido)
-_exe_cache = {}
-_exe_cache_time = {}
+# ============================================================
+# CACHE PERSISTENTE DE EXE CON TTL
+# ============================================================
+# Sobrevive reinicios del agente, invalida automaticamente
+# si la ruta ya no existe en disco.
+# ============================================================
+
+_EXE_CACHE_FILE = os.path.join(LEARN_DIR, "exe_cache.json")
+_EXE_CACHE_TTL = 86400  # 24 horas en segundos
+
+_exe_cache = {}     # {app_name: {"path": str, "found_at": float}}
+_exe_cache_loaded = False
+
+
+def _load_exe_cache():
+    """Carga el cache de exe desde archivo JSON (persistente)."""
+    global _exe_cache, _exe_cache_loaded
+    if _exe_cache_loaded:
+        return
+    try:
+        if os.path.exists(_EXE_CACHE_FILE):
+            with open(_EXE_CACHE_FILE, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            now = time.time()
+            # Filtrar entradas expiradas o con ruta rota
+            for key, val in raw.items():
+                if isinstance(val, dict) and "path" in val and "found_at" in val:
+                    if now - val["found_at"] < _EXE_CACHE_TTL:
+                        # Verificar que la ruta siga existiendo
+                        if os.path.exists(val["path"]):
+                            _exe_cache[key] = val
+            logger.info(f"Cache de exe cargado: {len(_exe_cache)} entradas validas")
+    except Exception as e:
+        logger.debug(f"Error cargando cache de exe: {e}")
+    _exe_cache_loaded = True
+
+
+def _save_exe_cache():
+    """Guarda el cache de exe a archivo JSON (persistente)."""
+    try:
+        with open(_EXE_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(_exe_cache, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.debug(f"Error guardando cache de exe: {e}")
+
+
+def _exe_cache_get(app_name):
+    """Obtiene una ruta del cache si existe y no expiro."""
+    _load_exe_cache()
+    entry = _exe_cache.get(app_name)
+    if not entry:
+        return None
+    now = time.time()
+    if now - entry["found_at"] > _EXE_CACHE_TTL:
+        return None  # Expirado
+    if not os.path.exists(entry["path"]):
+        # Ruta rota, eliminar del cache
+        _exe_cache.pop(app_name, None)
+        _save_exe_cache()
+        return None
+    return entry["path"]
+
+
+def _exe_cache_put(app_name, path):
+    """Guarda una ruta en el cache persistente."""
+    _load_exe_cache()
+    _exe_cache[app_name] = {
+        "path": path,
+        "found_at": time.time()
+    }
+    _save_exe_cache()
 
 # Nombres alternativos de ejecutables (lo que el usuario dice -> como se llama el .exe)
 _EXE_ALIASES = {
@@ -87,22 +156,20 @@ def buscar_en_start_menu(nombre: str) -> str:
 
 
 def buscar_exe(nombre: str) -> str:
-    """Busca el ejecutable de una aplicacion con cache TTL de 5 minutos."""
+    """Busca el ejecutable de una aplicacion con cache persistente TTL de 24h."""
     nombre_lower = strip_prefixes(nombre).lower()
     exe_name = _EXE_ALIASES.get(nombre_lower, nombre_lower)
 
-    # Cache con TTL
+    # Cache persistente con TTL
     cache_key = nombre_lower
-    if cache_key in _exe_cache:
-        cached_time = _exe_cache_time.get(cache_key, 0)
-        if time.time() - cached_time < 300:
-            return _exe_cache[cache_key]
+    cached = _exe_cache_get(cache_key)
+    if cached:
+        return cached
 
     # 0. Buscar en Start Menu primero (rapido)
     shortcut = buscar_en_start_menu(nombre)
     if shortcut:
-        _exe_cache[cache_key] = shortcut
-        _exe_cache_time[cache_key] = time.time()
+        _exe_cache_put(cache_key, shortcut)
         return shortcut
 
     if not re.match(r'^[a-zA-Z0-9\s\.\-_]+$', nombre_lower):
@@ -137,8 +204,7 @@ def buscar_exe(nombre: str) -> str:
                                 exe_name in f_lower or nombre_lower in f_lower
                             ):
                                 result = os.path.join(root, f)
-                                _exe_cache[cache_key] = result
-                                _exe_cache_time[cache_key] = time.time()
+                                _exe_cache_put(cache_key, result)
                                 return result
         except Exception:
             pass
@@ -171,8 +237,7 @@ def buscar_exe(nombre: str) -> str:
                             exe_name in f_lower or nombre_lower in f_lower
                         ):
                             result = os.path.join(root, f)
-                            _exe_cache[cache_key] = result
-                            _exe_cache_time[cache_key] = time.time()
+                            _exe_cache_put(cache_key, result)
                             return result
 
         # 3. Buscar en Program Files con where (lento, ultimo recurso)
@@ -191,8 +256,7 @@ def buscar_exe(nombre: str) -> str:
                         if line.strip() and line.strip().endswith(".exe")]
                 if exes:
                     result = exes[0]
-                    _exe_cache[cache_key] = result
-                    _exe_cache_time[cache_key] = time.time()
+                    _exe_cache_put(cache_key, result)
                     return result
 
     return ""

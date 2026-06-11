@@ -28,8 +28,8 @@ class LearningSystem:
             if os.path.exists(filepath):
                 with open(filepath, "r", encoding="utf-8") as f:
                     return json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error cargando {filepath}: {e}")
         return default
 
     @staticmethod
@@ -37,8 +37,8 @@ class LearningSystem:
         try:
             with open(filepath, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Error guardando {filepath}: {e}")
 
     def save_knowledge(self, topic, content, source="experience"):
         knowledge = self._load(KNOWLEDGE_FILE, [])

@@ -24,6 +24,7 @@ from memory.triple_memory import TripleMemory, learning
 from llm import ollama
 from agent.schemas import SYSTEM_PROMPT, JSON_TOOLS_PROMPT
 from agent.metacognition import Metacognition
+from utils.metrics import get_metrics
 
 
 class ReactAgent:
@@ -309,6 +310,8 @@ class ReactAgent:
         Genera respuesta del LLM con streaming REAL.
         Yields: {"type": "token"|"tool_calls"|"done", "data": ...}
         """
+        import time as _time
+        _llm_start = _time.monotonic()
         full_content = ""
         full_tool_calls = []
 
@@ -344,15 +347,19 @@ class ReactAgent:
 
             # Si llegamos aqui sin tool_calls, es respuesta final
             if full_content:
+                _llm_elapsed = (_time.monotonic() - _llm_start) * 1000.0
+                get_metrics().record_llm_call(_llm_elapsed)
                 yield {"type": "done", "data": True}
                 return
 
         except Exception as e:
             self._log(f"Error en streaming: {e}", "error")
+            get_metrics().record_error("llm_stream")
 
         # Fallback: modo no-streaming
         try:
             response = ollama.generate(messages, tools=TOOL_SCHEMAS)
+            # generate() already records llm_call via @timed, so no duplicate
             if isinstance(response, str):
                 yield {"type": "token", "data": response}
                 yield {"type": "done", "data": True}
@@ -388,6 +395,7 @@ class ReactAgent:
     # ----------------------------------------------------------
     def _react_with_tools(self, messages, iteration):
         """ReAct usando function calling nativo. Soporta multiple tool calls."""
+        # generate() already records llm_call via @timed decorator
         try:
             response = ollama.generate(messages, tools=TOOL_SCHEMAS)
 
@@ -422,6 +430,7 @@ class ReactAgent:
     # ----------------------------------------------------------
     def _react_with_json(self, messages, iteration):
         """ReAct usando JSON parsing (fallback)."""
+        # generate_chat() already records llm_call via @timed decorator
         if not any("HERRAMIENTAS DISPONIBLES" in str(m.get("content", "")) for m in messages):
             system_msg_idx = next((i for i, m in enumerate(messages) if m["role"] == "system"), -1)
             if system_msg_idx >= 0:
@@ -551,10 +560,13 @@ class ReactAgent:
 
     def _execute_single_tool(self, tc, messages, max_retries=1):
         """Ejecuta un solo tool call con retry automatico."""
+        import time as _time
         tool_name = tc["name"]
         tool_params = tc["params"]
 
         self._log(f"Ejecutando: {tool_name}({tool_params})", "execution")
+
+        _tool_start = _time.monotonic()
         tool_result = self._execute_tool(tool_name, tool_params)
 
         # Retry si fallo y el tool es reintentable
@@ -563,6 +575,12 @@ class ReactAgent:
             if any(err in tool_result for err in retryable_errors):
                 self._log(f"Reintentando {tool_name} (error transitorio)...", "execution")
                 tool_result = self._execute_tool(tool_name, tool_params)
+
+        _tool_elapsed_ms = (_time.monotonic() - _tool_start) * 1000.0
+        get_metrics().record_tool_call(tool_name, _tool_elapsed_ms)
+
+        if "ERROR" in tool_result:
+            get_metrics().record_error("tool:" + tool_name)
 
         self._log(f"Resultado: {tool_result[:150]}...", "observation")
 

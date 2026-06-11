@@ -1,19 +1,87 @@
 """
 Registro centralizado de herramientas.
 El agente importa TOOL_FUNCTIONS y TOOL_SCHEMAS desde aqui.
-"""
-import json
-import os
 
+v14.5: Usa registry.py con decorator @tool para registro automatico.
+Las herramientas de sub-modulos se registran manualmente con register_tool()
+hasta que se migren al decorator. Las herramientas inline usan @tool.
+"""
+import os
+import json
+
+# Importar el registry
+from .registry import tool, register_tool, TOOL_FUNCTIONS, TOOL_SCHEMAS
+
+# Importar herramientas de sub-modulos
 from .sistema import ejecutar_comando, procesos_activos, matar_proceso
 from .archivos import leer_archivo, escribir_archivo, listar_archivos, buscar_en_archivos
 from .apps import abrir_aplicacion, abrir_url, buscar_youtube
 from .proyecto import analizar_proyecto, clonar_repositorio, instalar_dependencias
 from .codigo import generar_codigo
 from .web import buscar_web
-from .schemas import TOOL_SCHEMAS
+
+# Importar schemas predefinidos (para herramientas de sub-modulos)
+from .schemas import TOOL_SCHEMAS as _SCHEMAS_FROM_FILE
 
 
+# ============================================================
+# REGISTRAR HERRAMIENTAS DE SUB-MODULOS
+# (Se usa register_tool manual hasta migrar esos archivos a @tool)
+# ============================================================
+
+def _register_submodule_tools():
+    """Registra las herramientas importadas de sub-modulos con sus schemas."""
+    # Mapeo nombre -> (funcion, schema)
+    # Los schemas se toman del archivo schemas.py preexistente
+    schema_by_name = {}
+    for s in _SCHEMAS_FROM_FILE:
+        func_info = s.get("function", {})
+        name = func_info.get("name")
+        if name:
+            schema_by_name[name] = s
+
+    submod_tools = {
+        "ejecutar_comando": ejecutar_comando,
+        "abrir_aplicacion": abrir_aplicacion,
+        "abrir_url": abrir_url,
+        "buscar_youtube": buscar_youtube,
+        "generar_codigo": generar_codigo,
+        "leer_archivo": leer_archivo,
+        "escribir_archivo": escribir_archivo,
+        "listar_archivos": listar_archivos,
+        "analizar_proyecto": analizar_proyecto,
+        "clonar_repositorio": clonar_repositorio,
+        "instalar_dependencias": instalar_dependencias,
+        "buscar_en_archivos": buscar_en_archivos,
+        "procesos_activos": procesos_activos,
+        "matar_proceso": matar_proceso,
+        "buscar_web": buscar_web,
+    }
+
+    for name, func in submod_tools.items():
+        schema = schema_by_name.get(name)
+        register_tool(name, func, schema=schema)
+
+
+# ============================================================
+# HERRAMIENTAS INLINE CON DECORATOR @tool
+# ============================================================
+
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "analizar_imagen",
+        "description": "Analiza una imagen usando vision AI. Describe lo que ve, lee texto de la imagen, o responde preguntas sobre ella. Necesita un modelo de vision instalado (llava, llama3.2-vision, etc).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ruta": {"type": "string", "description": "Ruta de la imagen a analizar"},
+                "pregunta": {"type": "string", "description": "Pregunta sobre la imagen (por defecto: describela)"}
+            },
+            "required": ["ruta"]
+        }
+    }
+})
 def analizar_imagen(ruta: str, pregunta: str = "Describe esta imagen") -> str:
     """Analiza una imagen usando el modelo de vision del LLM."""
     from llm import ollama
@@ -21,10 +89,28 @@ def analizar_imagen(ruta: str, pregunta: str = "Describe esta imagen") -> str:
     return result
 
 
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "configurar_perfil",
+        "description": "Configura el perfil del usuario para personalizar las respuestas del agente. Se guarda persistentemente entre sesiones. Ejemplo: nombre, rol profesional, intereses, idioma preferido, estilo de respuesta.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "nombre": {"type": "string", "description": "Nombre del usuario"},
+                "rol": {"type": "string", "description": "Rol profesional (ej: desarrollador, arquitecto, estudiante)"},
+                "intereses": {"type": "string", "description": "Intereses principales separados por coma"},
+                "idioma": {"type": "string", "description": "Idioma preferido (ej: espanol, ingles)"},
+                "estilo": {"type": "string", "description": "Estilo de respuesta: conciso, detallado, tecnico, simple"}
+            },
+            "required": []
+        }
+    }
+})
 def configurar_perfil(nombre: str = "", rol: str = "", intereses: str = "",
                       idioma: str = "", estilo: str = "") -> str:
     """Configura el perfil del usuario para personalizar las respuestas del agente.
-    
+
     Args:
         nombre: Nombre del usuario
         rol: Rol profesional (ej: desarrollador, arquitecto, estudiante)
@@ -33,7 +119,7 @@ def configurar_perfil(nombre: str = "", rol: str = "", intereses: str = "",
         estilo: Estilo de respuesta (conciso, detallado, tecnico, simple)
     """
     from config import USER_PROFILE_FILE, logger
-    
+
     # Cargar perfil existente
     profile = {}
     try:
@@ -42,7 +128,7 @@ def configurar_perfil(nombre: str = "", rol: str = "", intereses: str = "",
                 profile = json.load(f)
     except Exception:
         pass
-    
+
     # Actualizar solo los campos proporcionados
     if nombre:
         profile["name"] = nombre
@@ -54,7 +140,7 @@ def configurar_perfil(nombre: str = "", rol: str = "", intereses: str = "",
         profile["language"] = idioma
     if estilo:
         profile["style"] = estilo
-    
+
     # Guardar perfil
     try:
         with open(USER_PROFILE_FILE, "w", encoding="utf-8") as f:
@@ -62,30 +148,45 @@ def configurar_perfil(nombre: str = "", rol: str = "", intereses: str = "",
         logger.info(f"Perfil de usuario actualizado: {list(profile.keys())}")
     except Exception as e:
         return f"ERROR guardando perfil: {e}"
-    
+
     # Formatear resumen
     parts = []
-    field_map = {"name": "Nombre", "role": "Rol", "interests": "Intereses", 
+    field_map = {"name": "Nombre", "role": "Rol", "interests": "Intereses",
                  "language": "Idioma", "style": "Estilo"}
     for key, label in field_map.items():
         if key in profile:
             parts.append(f"  {label}: {profile[key]}")
-    
+
     return f"Perfil configurado:\n" + "\n".join(parts)
 
 
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "crear_nota",
+        "description": "Crea una nota rapida y la guarda persistentemente. Usar cuando el usuario pide anotar, recordar algo, o tomar nota de informacion importante.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "titulo": {"type": "string", "description": "Titulo corto de la nota"},
+                "contenido": {"type": "string", "description": "Contenido de la nota"}
+            },
+            "required": ["titulo", "contenido"]
+        }
+    }
+})
 def crear_nota(titulo: str, contenido: str) -> str:
     """Crea una nota rapida y la guarda en la memoria del agente.
-    
+
     Args:
         titulo: Titulo de la nota
         contenido: Contenido de la nota
     """
     from config import LEARN_DIR, logger
     from utils.security import sanitize_input
-    
+
     titulo = sanitize_input(titulo)
-    
+
     notes_file = os.path.join(LEARN_DIR, "notes.json")
     notes = []
     try:
@@ -94,7 +195,7 @@ def crear_nota(titulo: str, contenido: str) -> str:
                 notes = json.load(f)
     except Exception:
         pass
-    
+
     from datetime import datetime
     note = {
         "id": len(notes) + 1,
@@ -103,21 +204,33 @@ def crear_nota(titulo: str, contenido: str) -> str:
         "created": datetime.now().isoformat(),
     }
     notes.append(note)
-    
+
     try:
         with open(notes_file, "w", encoding="utf-8") as f:
             json.dump(notes, f, ensure_ascii=False, indent=2)
         logger.info(f"Nota creada: {titulo}")
     except Exception as e:
         return f"ERROR guardando nota: {e}"
-    
+
     return f"Nota creada: '{titulo}' (ID: {note['id']})"
 
 
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "ver_notas",
+        "description": "Lista las notas guardadas del usuario. Usar cuando el usuario pide ver sus notas o recordar lo que anoto.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    }
+})
 def ver_notas() -> str:
     """Lista todas las notas guardadas."""
     from config import LEARN_DIR
-    
+
     notes_file = os.path.join(LEARN_DIR, "notes.json")
     try:
         if not os.path.exists(notes_file):
@@ -134,24 +247,9 @@ def ver_notas() -> str:
         return f"ERROR leyendo notas: {e}"
 
 
-TOOL_FUNCTIONS = {
-    "ejecutar_comando": ejecutar_comando,
-    "abrir_aplicacion": abrir_aplicacion,
-    "abrir_url": abrir_url,
-    "buscar_youtube": buscar_youtube,
-    "generar_codigo": generar_codigo,
-    "leer_archivo": leer_archivo,
-    "escribir_archivo": escribir_archivo,
-    "listar_archivos": listar_archivos,
-    "analizar_proyecto": analizar_proyecto,
-    "clonar_repositorio": clonar_repositorio,
-    "instalar_dependencias": instalar_dependencias,
-    "buscar_en_archivos": buscar_en_archivos,
-    "procesos_activos": procesos_activos,
-    "matar_proceso": matar_proceso,
-    "buscar_web": buscar_web,
-    "analizar_imagen": analizar_imagen,
-    "configurar_perfil": configurar_perfil,
-    "crear_nota": crear_nota,
-    "ver_notas": ver_notas,
-}
+# ============================================================
+# REGISTRAR SUB-MODULOS AL FINAL
+# (Debe ejecutarse despues de que registry.py tenga sus dicts limpios
+#  y despues de definir las herramientas inline con @tool)
+# ============================================================
+_register_submodule_tools()

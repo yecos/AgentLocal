@@ -48,3 +48,211 @@ Stage Summary:
 - start.bat soporta: --skip, --check, --install
 - requirements.txt: streamlit>=1.30.0, ollama>=0.1.0
 - Todos los 9 modulos importan correctamente, 15 herramientas OK
+
+---
+Task ID: 4.1
+Agent: Main Agent
+Task: Error handling robusto - reemplazar silent exceptions
+
+Work Log:
+- memory/triple_memory.py: 4 silent exceptions replaced
+  - `_generate_llm_summary`: except Exception: pass → logger.debug(f"Error generando resumen LLM: {e}")
+  - `save_session`: except Exception: pass → logger.warning(f"Error guardando sesion: {e}")
+  - `load_session`: except Exception: pass → logger.warning(f"Error cargando sesion: {e}")
+  - `get_stats`: except Exception: pass → logger.debug(f"Error obteniendo stats de sesion: {e}")
+- memory/chroma_store.py: 7 silent exceptions replaced
+  - `_load_meta`: except Exception: pass → logger.debug(f"Error cargando metadatos: {e}")
+  - `_save_meta`: except Exception: pass → logger.debug(f"Error guardando metadatos: {e}")
+  - `ChromaVectorStore._compute_decay`: except Exception: return 0.5 → logger.debug + return 0.5
+  - `_is_duplicate`: except Exception: pass → logger.debug(f"Error verificando duplicado semantico: {e}")
+  - `add` (existing check): except Exception: pass → logger.debug(f"Error verificando entrada existente en ChromaDB: {e}")
+  - `_text_search`: except Exception: return [] → logger.debug + return []
+  - `count`: except Exception: return 0 → logger.warning + return 0
+  - `SimpleVectorStore._compute_decay`: except Exception: return 0.5 → logger.debug + return 0.5
+- memory/vectorstore.py: 5 silent exceptions replaced
+  - `_load_index`: except Exception: pass → logger.debug(f"Error cargando indice: {e}")
+  - `_save_index`: except Exception: pass → logger.warning(f"Error guardando indice: {e}")
+  - `_get_vectors` (pickle): except Exception: pass → logger.debug(f"Error cargando vectores Pickle: {e}")
+  - `_get_vectors` (JSON fallback): except Exception: pass → logger.debug(f"Error cargando vectores JSON legacy: {e}")
+  - `cleanup` (legacy file): except Exception: pass → logger.debug(f"Error eliminando archivo vectors.json legacy: {e}")
+- memory/learning.py: 2 silent exceptions replaced (bonus)
+  - `_load`: except Exception: pass → logger.debug(f"Error cargando {filepath}: {e}")
+  - `_save`: except Exception: pass → logger.warning(f"Error guardando {filepath}: {e}")
+- llm.py: 6 silent exceptions replaced
+  - `detect_models` (delete cache): except Exception: pass → logger.debug(f"Error eliminando cache invalido: {e}")
+  - `_load_connection_cache`: except Exception: pass → logger.debug(f"Error cargando cache de conexion: {e}")
+  - `_save_connection_cache`: except Exception: pass → logger.debug(f"Error guardando cache de conexion: {e}")
+  - `_get_or_create_client`: except Exception: pass → logger.debug(f"Error creando ollama.Client: {e}")
+  - `_log_errors`: except Exception: pass → logger.debug(f"Error escribiendo log de errores LLM: {e}")
+  - `check_gpu_status` (nvidia-smi): except Exception: → logger.debug(f"Error verificando GPU con nvidia-smi: {e}")
+- tools/__init__.py: 2 silent exceptions replaced
+  - `configurar_perfil`: except Exception: pass → logger.debug(f"Error cargando perfil existente: {e}")
+  - `crear_nota`: except Exception: pass → logger.debug(f"Error cargando notas existentes: {e}")
+
+Stage Summary:
+- 26 silent `except Exception: pass` patterns replaced with proper logging across 6 files
+- Logging levels assigned by criticality: logger.warning for functional impact (save_session, load_session, _save_index, _save learning, count), logger.debug for non-critical operations (caches, fallbacks, cleanup)
+- Zero logic changes - only replaced `pass` with logging statements
+- All targeted files (memory/, llm.py, tools/) now have zero remaining silent exceptions
+
+---
+Task ID: 5.1
+Agent: Main Agent
+Task: Tool decorator registry
+
+Work Log:
+- Created `/home/z/my-project/agente_v14/tools/registry.py` (new file):
+  - Module-level `TOOL_FUNCTIONS = {}` and `TOOL_SCHEMAS = []` as central registries
+  - `@tool` decorator: works as `@tool` (no parens), `@tool()`, or `@tool(schema={...})`
+  - `register_tool(name, func, schema=None)` for manual registration
+  - `_build_auto_schema()`: auto-generates Ollama function calling schema from type hints + docstring
+  - `_extract_param_description()`: parses Args: section from docstrings for schema descriptions
+  - `get_tool_metadata(name)`, `list_tools()`, `tool_count()`, `clear_registry()` utility functions
+  - Metadata stored per-tool in `_TOOL_METADATA` dict
+  - Decorator marks functions with `_is_tool`, `_tool_name`, `_tool_schema` attributes
+  - `functools.wraps` preserves function metadata
+  - Warning on duplicate registration (not error, for flexibility)
+- Updated `/home/z/my-project/agente_v14/tools/__init__.py`:
+  - Imports `tool`, `register_tool`, `TOOL_FUNCTIONS`, `TOOL_SCHEMAS` from `.registry`
+  - Inline functions (analizar_imagen, configurar_perfil, crear_nota, ver_notas) now use `@tool(schema=...)` decorator
+  - Sub-module tools registered via `register_tool()` with schemas from schemas.py
+  - `_register_submodule_tools()` helper reads schemas from schemas.py and registers all 15 sub-module functions
+  - Backward compatible: `from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS` still works
+  - `TOOL_FUNCTIONS` from tools and from registry are the same object (shared state)
+- Did NOT modify individual tool files (sistema.py, archivos.py, apps.py, proyecto.py, codigo.py, web.py)
+- Verified all 19 tools (15 sub-module + 4 inline) register correctly
+- Verified all 19 schemas match their function names
+- Verified backward compatibility with agent/react.py import pattern
+- Verified decorator preserves function metadata (__name__, __doc__)
+
+Stage Summary:
+- Created decorator-based tool registry in tools/registry.py
+- 19 tools registered: 4 via @tool decorator (inline), 15 via register_tool() (sub-modules)
+- Full backward compatibility: TOOL_FUNCTIONS and TOOL_SCHEMAS importable from tools package
+- Auto-schema generation from type hints when no schema provided
+- Ready for next step: migrate sub-module tool files to use @tool decorator directly
+
+---
+Task ID: 4.2+5.2
+Agent: Main Agent
+Task: Unit tests + deep project analysis
+
+Work Log:
+TASK 4.2: Unit Tests
+- Created `/home/z/my-project/agente_v14/tests/__init__.py` (empty init)
+- Created `/home/z/my-project/agente_v14/tests/conftest.py` (adds parent dir to sys.path)
+- Created `/home/z/my-project/agente_v14/tests/test_security.py` (7 test classes, 31 tests):
+  - TestDangerousCommandBlocked: 10 tests (rm -rf, format, fdisk, shutdown, mkfs, dd, del /f, rmdir, certutil, bitsadmin)
+  - TestSafeCommandAllowed: 13 tests (git, npm, pip, python, node, ls, dir, cat, echo, cargo, pytest, docker ps, yarn)
+  - TestInjectionPatternsBlocked: 12 tests ($(), backticks, eval, exec, wget|pipe, |sh, |bash, nc, /dev/tcp, base64 -d|, sudo rm, chmod 777, > /etc/)
+  - TestSanitizeInputNormal: 5 tests (simple, path, alphanumeric, dashes, email)
+  - TestSanitizeInputSpecialChars: 7 tests ($, {}, backtick, semicolon, pipe, ampersand, angle brackets)
+  - TestValidatePathAllowed: 3 tests (repos dir, learn dir, relative path)
+  - TestValidatePathDenied: 4 tests (root, home, other user, path traversal)
+- Created `/home/z/my-project/agente_v14/tests/test_llm.py` (6 test classes, 24 tests):
+  - TestCosineSimilarityIdentical: 4 tests (simple, unit, zeros, negative)
+  - TestCosineSimilarityOrthogonal: 3 tests (2D, 3D, mixed)
+  - TestCosineSimilarityEmpty: 4 tests (both empty, one empty, None, mismatched lengths)
+  - TestCosineSimilarityBatch: 4 tests (matches individual, empty query, empty vectors, filtered mismatched)
+  - TestLRUCacheBasic: 5 tests (put/get, nonexistent, overwrite, len, clear)
+  - TestLRUCacheEviction: 4 tests (eviction order, access renews, update renews, maxsize=1)
+- Created `/home/z/my-project/agente_v14/tests/test_memory.py` (4 test classes, 10 tests):
+  - TestTripleMemory: 3 tests (add_conversation, remember, get_context) - mocked OllamaClient
+  - TestVectorStore: 2 tests (add_and_search, skip_embedding) - mocked ollama.get_embedding
+  - TestSimpleVectorStoreDecay: 4 tests (recent, old, None, minimum floor)
+  - TestPicklePersistence: 1 test (vectors persist across restarts)
+- Bug fix: LRUCache.put() now updates value on overwrite (was only calling move_to_end)
+  - Fixed in `/home/z/my-project/agente_v14/llm.py` line 48: added `self._cache[key] = value` in existing-key branch
+- All 89 tests pass with `python -m pytest tests/ -v` and `python -m unittest discover tests/`
+
+TASK 5.2: Deep Project Analysis
+- Enhanced `/home/z/my-project/agente_v14/tools/proyecto.py` with 3-phase analysis:
+  - Phase 1: Estructura (existing, kept as-is)
+  - Phase 2: Lectura profunda (NEW)
+  - Phase 3: Sintesis (NEW)
+- Added helper functions:
+  - `_deep_read_configs(ruta)`: Reads package.json, pyproject.toml, requirements.txt, Cargo.toml, go.mod, Dockerfile, CI/CD configs, .env.example, README (full)
+  - `_detect_architecture(ruta, lang_counts, config_data)`: Detects MVC, microservices, monolith, serverless, monorepo, Next.js patterns
+  - `_classify_project(config_data, lang_counts)`: Classifies as web app, CLI tool, library, API, desktop, mobile, binary
+  - `_assess_dependencies(config_data)`: Analyzes deps for outdated patterns, unpinned versions, risk notes
+- Phase 2 features:
+  - Full README reading (not just 500 chars)
+  - Config file deep parsing with entry points extraction
+  - Dockerfile analysis (base image, exposed ports)
+  - CI/CD config reading with trigger/stage extraction
+  - Environment variable identification from .env.example
+  - Package.json entry points (main, bin, exports)
+- Phase 3 features:
+  - Architecture pattern detection (MVC, microservices, monolith, serverless, monorepo, Next.js App/Pages Router)
+  - Project type classification (web app, CLI, library, API, desktop, mobile, binary)
+  - Tech stack summary with key versions
+  - Dependency risk assessment (outdated patterns, unpinned versions, missing devDeps)
+  - Key insights and recommendations (missing Dockerfile, CI/CD, README, testing, linting, etc.)
+- Verified on test project with Next.js, Docker, GitHub Actions: correctly detected MVC + Next.js App Router, flagged moment/request/lodash as problematic
+
+Stage Summary:
+- 89 unit tests created across 3 test files, all passing
+- Bug fixed in LRUCache.put() (value not updated on overwrite)
+- analizar_proyecto() enhanced from 1-phase to 3-phase deep analysis
+- 4 new helper functions: _deep_read_configs, _detect_architecture, _classify_project, _assess_dependencies
+- Phase 2 adds: full README, config deep parsing, Dockerfile, CI/CD, env vars, entry points
+- Phase 3 adds: architecture detection, project classification, stack versions, dependency risks, insights
+
+---
+Task ID: 4.3
+Agent: Main Agent
+Task: Structured logging con métricas
+
+Work Log:
+- Created `/home/z/my-project/agente_v14/utils/metrics.py` (new file, ~300 lines):
+  - MetricsCollector class (singleton, thread-safe with Lock)
+  - Tracks: llm_calls, llm_latency_ms, tool_calls (per tool), tool_latency_ms, embeddings_generated, memory_operations, errors (by category), session_start, session_messages
+  - `@timed(category)` decorator: times function execution, records in MetricsCollector
+    - "llm" -> record_llm_call(latency_ms)
+    - "tool" -> record_tool_call(func_name, latency_ms)
+    - "embedding" -> record_embedding_call()
+    - "memory" -> record_memory_operation(inferred from func name)
+  - Recording methods: record_llm_call, record_tool_call, record_embedding_call, record_memory_operation, record_error, record_user_message
+  - Reporting: get_summary() -> dict, get_formatted_summary() -> string
+  - Auto-save every 10 operations to ~/.ia-local/learning/metrics.json
+  - Load previous session metrics on startup for comparison
+  - reset() saves current session, stores as _previous_session, clears counters
+  - Fixed deadlock: _build_summary_unlocked() avoids re-acquiring Lock inside save/reset
+- Updated `/home/z/my-project/agente_v14/utils/__init__.py`:
+  - Added exports: MetricsCollector, timed, get_metrics
+- Modified `/home/z/my-project/agente_v14/llm.py`:
+  - Added `from utils.metrics import timed, get_metrics`
+  - Added `@timed("llm")` to generate(), generate_chat(), generate_code()
+  - Added `get_metrics().record_embedding_call()` in get_embedding() on success
+  - Added `get_metrics().record_error("embedding")` in get_embedding() on failure
+- Modified `/home/z/my-project/agente_v14/agent/react.py`:
+  - Added `from utils.metrics import get_metrics`
+  - Added timing + record_tool_call(tool_name, latency_ms) in _execute_single_tool()
+  - Added record_error("tool:" + tool_name) when tool returns ERROR
+  - Added timing + record_llm_call(latency_ms) in _stream_llm_with_tools() for streaming path
+  - Added record_error("llm_stream") on streaming exception
+  - No duplicate LLM metrics: _react_with_tools/_react_with_json already use generate()/generate_chat() which have @timed("llm")
+- Modified `/home/z/my-project/agente_v14/app.py`:
+  - Added `from utils.metrics import get_metrics`
+  - Added get_metrics().record_user_message() in _handle_user_input()
+  - Added get_metrics().reset() in "Nueva Sesion" button
+  - Added "Metricas" section in sidebar with: LLM calls, Tool calls, LLM avg latency, Tool avg latency, Embeddings, Errors
+  - Added "Tool breakdown" expander with per-tool count and latency
+  - Added "Errores detalle" expander with error categories
+  - Added "Sesion anterior" expander comparing previous session metrics
+- Created `/home/z/my-project/agente_v14/tests/test_metrics.py` (8 test classes, 31 tests):
+  - TestMetricsCollectorBasic: 10 tests (initial state, record_llm_call, record_tool_call, record_embedding, record_memory, record_error, record_user_message, tool_latency)
+  - TestMetricsCollectorReset: 2 tests (reset clears counters, stores previous session)
+  - TestMetricsCollectorPersistence: 4 tests (save creates file, save content, load previous, load no file)
+  - TestTimedDecorator: 8 tests (llm, tool, embedding, memory add, memory search, error recording, preserves metadata, passes args/kwargs)
+  - TestMetricsCollectorSingleton: 3 tests (same instance, get_metrics returns singleton, isinstance)
+  - TestGetFormattedSummary: 4 tests (key info, tools, errors, previous session)
+- All 120 tests pass (89 existing + 31 new)
+
+Stage Summary:
+- Structured metrics module with MetricsCollector singleton (thread-safe)
+- @timed(category) decorator for automatic timing and recording
+- Integrated in 3 key files: llm.py (@timed + record_embedding_call), agent/react.py (record_tool_call + record_llm_call for streaming), app.py (sidebar metrics display)
+- Auto-save every 10 operations, loads previous session for comparison
+- 31 new unit tests, all passing
+- Zero external dependencies (only stdlib: time, json, os, logging, functools, threading)

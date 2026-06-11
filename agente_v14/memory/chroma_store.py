@@ -18,6 +18,7 @@ import logging
 from datetime import datetime
 
 from config import LEARN_DIR, MAX_VECTORS_IN_MEMORY, logger
+from memory.vectorstore import VectorStore
 
 # Intentar importar ChromaDB
 try:
@@ -59,8 +60,8 @@ class ChromaVectorStore:
             if os.path.exists(meta_file):
                 with open(meta_file, "r", encoding="utf-8") as f:
                     return json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error cargando metadatos: {e}")
         return {}
 
     def _save_meta(self):
@@ -69,8 +70,8 @@ class ChromaVectorStore:
         try:
             with open(meta_file, "w", encoding="utf-8") as f:
                 json.dump(self._index_meta, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error guardando metadatos: {e}")
 
     def _compute_decay(self, created_at, now=None):
         """
@@ -89,7 +90,8 @@ class ChromaVectorStore:
             import math
             decay = math.exp(-0.693 * days_old / self.DECAY_HALF_LIFE_DAYS)
             return max(decay, 0.1)  # Minimo 10% de relevancia
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Error computando decaimiento: {e}")
             return 0.5
 
     def _is_duplicate(self, text, threshold=0.95):
@@ -112,8 +114,8 @@ class ChromaVectorStore:
                 distance = results["distances"][0][0]
                 similarity = 1 - distance
                 return similarity >= threshold
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error verificando duplicado semantico: {e}")
         return False
 
     def add(self, text, metadata=None, entry_id=None, skip_embedding=False):
@@ -131,8 +133,8 @@ class ChromaVectorStore:
             existing = self._collection.get(ids=[entry_id])
             if existing and existing["ids"]:
                 return entry_id
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error verificando entrada existente en ChromaDB: {e}")
 
         # Verificar duplicado semantico (solo si tenemos embedding)
         if not skip_embedding and self._is_duplicate(text):
@@ -256,14 +258,16 @@ class ChromaVectorStore:
 
             results.sort(key=lambda x: x["score"], reverse=True)
             return results[:limit]
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Error en busqueda por texto ChromaDB: {e}")
             return []
 
     def count(self):
         """Retorna el numero de documentos en el store."""
         try:
             return self._collection.count()
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Error contando documentos ChromaDB: {e}")
             return 0
 
     def cleanup(self, max_entries=1000):
@@ -295,71 +299,18 @@ class ChromaVectorStore:
             logger.warning(f"Error en cleanup: {e}")
 
 
-class SimpleVectorStore:
+class SimpleVectorStore(VectorStore):
     """
     Vector store casero (fallback cuando ChromaDB no esta instalado).
-    Persiste en JSON + archivo de vectores.
-    Incluye decaimiento temporal y deduplicacion basica.
+    Hereda de VectorStore y agrega decaimiento temporal + deduplicacion por texto.
+    Solo sobreescribe los metodos que difieren del base.
+    Elimina ~150 lineas de codigo duplicado vs la version anterior.
     """
 
     DECAY_HALF_LIFE_DAYS = 30
 
-    def __init__(self, store_dir=None):
-        self.store_dir = store_dir or os.path.join(LEARN_DIR, "vectors")
-        os.makedirs(self.store_dir, exist_ok=True)
-        self.index_file = os.path.join(self.store_dir, "index.json")
-        self.vectors_file = os.path.join(self.store_dir, "vectors.json")
-        self.index = self._load_index()
-        self._vectors_cache = None
-        self._dirty = False
-
-    def _load_index(self):
-        try:
-            if os.path.exists(self.index_file):
-                with open(self.index_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
-        except Exception:
-            pass
-        return []
-
-    def _save_index(self):
-        try:
-            with open(self.index_file, "w", encoding="utf-8") as f:
-                json.dump(self.index, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-
-    def _get_vectors(self):
-        if self._vectors_cache is not None:
-            return self._vectors_cache
-        try:
-            if os.path.exists(self.vectors_file):
-                with open(self.vectors_file, "r", encoding="utf-8") as f:
-                    self._vectors_cache = json.load(f)
-                    return self._vectors_cache
-        except Exception:
-            pass
-        self._vectors_cache = {}
-        return self._vectors_cache
-
-    def _load_vectors_for(self, entry_ids):
-        all_vectors = self._get_vectors()
-        return {eid: all_vectors[eid] for eid in entry_ids if eid in all_vectors}
-
-    def _save_vectors(self, vectors):
-        try:
-            with open(self.vectors_file, "w", encoding="utf-8") as f:
-                json.dump(vectors, f)
-            self._vectors_cache = vectors
-        except Exception:
-            pass
-
-    def _flush(self):
-        if self._dirty:
-            self._save_index()
-            self._dirty = False
-
     def _compute_decay(self, created_at):
+        """Computa el factor de decaimiento temporal (0.1 - 1.0)."""
         if not created_at:
             return 0.5
         try:
@@ -368,16 +319,12 @@ class SimpleVectorStore:
             import math
             decay = math.exp(-0.693 * days_old / self.DECAY_HALF_LIFE_DAYS)
             return max(decay, 0.1)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Error computando decaimiento: {e}")
             return 0.5
 
     def add(self, text, metadata=None, entry_id=None, skip_embedding=False):
-        """Agrega un texto al vector store con su embedding.
-        
-        Args:
-            skip_embedding: Si True, NO calcula embedding (mas rapido).
-                           La entrada solo aparecera en busquedas por texto.
-        """
+        """Agrega un texto con deduplicacion basica por texto similar."""
         if not entry_id:
             entry_id = hashlib.md5(text.encode()).hexdigest()[:12]
 
@@ -386,57 +333,17 @@ class SimpleVectorStore:
             if entry["id"] == entry_id:
                 return entry_id
 
-        # Deduplicacion basica por texto similar
+        # Deduplicacion basica por texto similar (100 chars lowercase)
         text_lower = text[:100].lower()
         for entry in self.index:
             if entry["text"][:100].lower() == text_lower:
                 return entry["id"]
 
-        now = datetime.now().isoformat()
-
-        # Si skip_embedding, guardar sin vector (mas rapido)
-        if skip_embedding:
-            self.index.append({
-                "id": entry_id,
-                "text": text[:500],
-                "metadata": metadata or {},
-                "has_vector": False,
-                "created": now
-            })
-            self._dirty = True
-            self._flush()
-            return entry_id
-
-        embedding = ollama.get_embedding(text)
-
-        if not embedding:
-            self.index.append({
-                "id": entry_id,
-                "text": text[:500],
-                "metadata": metadata or {},
-                "has_vector": False,
-                "created": now
-            })
-            self._dirty = True
-            self._flush()
-            return entry_id
-
-        vectors = self._get_vectors()
-        vectors[entry_id] = embedding
-        self._save_vectors(vectors)
-
-        self.index.append({
-            "id": entry_id,
-            "text": text[:500],
-            "metadata": metadata or {},
-            "has_vector": True,
-            "created": now
-        })
-        self._dirty = True
-        self._flush()
-        return entry_id
+        # Delegar al padre para el resto (guardar con/sin embedding)
+        return super().add(text, metadata=metadata, entry_id=entry_id, skip_embedding=skip_embedding)
 
     def search(self, query, limit=5, min_similarity=0.3):
+        """Busca con decaimiento temporal. Sobreescribe para agregar decay al scoring."""
         if not self.index:
             return []
 
@@ -451,14 +358,14 @@ class SimpleVectorStore:
         candidate_ids = [c["id"] for c in candidates if c.get("has_vector")]
         vectors = self._load_vectors_for(candidate_ids)
 
+        # Scoring vectorizado con decaimiento temporal
+        similarities = ollama.cosine_similarity_batch(query_embedding, vectors)
+
         scored = []
         for entry in candidates:
-            if not entry.get("has_vector") or entry["id"] not in vectors:
+            if not entry.get("has_vector") or entry["id"] not in similarities:
                 continue
-            vec = vectors[entry["id"]]
-            raw_sim = ollama.cosine_similarity(query_embedding, vec)
-
-            # Aplicar decaimiento temporal
+            raw_sim = similarities[entry["id"]]
             decay = self._compute_decay(entry.get("created", ""))
             final_score = raw_sim * decay
 
@@ -473,20 +380,8 @@ class SimpleVectorStore:
         scored.sort(key=lambda x: x["score"], reverse=True)
         return scored[:limit]
 
-    def _pre_filter(self, query, max_candidates=50):
-        query_words = [w.lower() for w in query.split() if len(w) > 3]
-        if not query_words:
-            return self.index[:max_candidates]
-        candidates = []
-        for entry in self.index:
-            text_lower = entry["text"].lower()
-            matches = sum(1 for w in query_words if w in text_lower)
-            if matches > 0:
-                candidates.append((matches, entry))
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        return [c[1] for c in candidates[:max_candidates]]
-
     def _text_search(self, query, limit=5):
+        """Busqueda por texto con decaimiento temporal."""
         query_lower = query.lower()
         query_words = [w for w in query_lower.split() if len(w) > 3]
         results = []
@@ -499,25 +394,6 @@ class SimpleVectorStore:
                 results.append({**entry, "score": round(score, 3)})
         results.sort(key=lambda x: x["score"], reverse=True)
         return results[:limit]
-
-    def count(self):
-        return len(self.index)
-
-    def cleanup(self, max_entries=1000):
-        if len(self.index) <= max_entries:
-            return
-        self.index.sort(key=lambda x: x.get("created", ""), reverse=True)
-        removed = self.index[max_entries:]
-        self.index = self.index[:max_entries]
-        vectors = self._get_vectors()
-        valid_ids = {e["id"] for e in self.index}
-        orphan_ids = [vid for vid in vectors if vid not in valid_ids]
-        for oid in orphan_ids:
-            del vectors[oid]
-        if orphan_ids:
-            self._save_vectors(vectors)
-        self._dirty = True
-        self._flush()
 
 
 # ============================================================
@@ -533,5 +409,5 @@ def create_vector_store(store_dir=None):
         except Exception as e:
             logger.warning(f"Error inicializando ChromaDB, fallback a casero: {e}")
 
-    logger.info("Usando VectorStore casero como fallback")
+    logger.info("Usando SimpleVectorStore (VectorStore + decay + dedup) como fallback")
     return SimpleVectorStore(store_dir=store_dir)

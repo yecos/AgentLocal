@@ -12,6 +12,7 @@ import streamlit as st
 from agent import ReactAgent
 from memory.triple_memory import TripleMemory
 from llm import ollama
+from utils.metrics import get_metrics
 
 # ============================================================
 # INICIALIZACION
@@ -184,6 +185,7 @@ def main():
 
 def _handle_user_input(prompt):
     """Maneja el input del usuario con streaming y metacognicion."""
+    get_metrics().record_user_message()
     st.session_state.messages.append({"role": "user", "content": prompt})
 
     with st.chat_message("user"):
@@ -356,6 +358,7 @@ def _render_sidebar():
         st.header("Estado del Agente")
 
         if st.button("Nueva Sesion"):
+            get_metrics().reset()
             st.session_state.memory.clear_session()
             st.session_state.messages = []
             st.session_state.agent = ReactAgent(memory=st.session_state.memory)
@@ -433,6 +436,46 @@ def _render_sidebar():
             st.text(f"Evaluacion: {assessment}")
             st.text(f"Errores: {meta.get('errors', 0)} | Exitos: {meta.get('successes', 0)}")
             st.text(f"Cambios de plan: {meta.get('plan_changes', 0)}")
+
+        # Metricas de rendimiento
+        st.subheader("Metricas")
+        metrics = get_metrics()
+        summary = metrics.get_summary()
+
+        col_m1, col_m2 = st.columns(2)
+        with col_m1:
+            st.metric("LLM calls", summary["llm_calls"])
+            st.metric("Tool calls", summary["tool_calls_total"])
+        with col_m2:
+            st.metric("LLM avg", f"{summary['llm_latency_ms']:.0f} ms")
+            st.metric("Tool avg", f"{summary['tool_latency_overall_ms']:.0f} ms")
+
+        col_m3, col_m4 = st.columns(2)
+        with col_m3:
+            st.metric("Embeddings", summary["embeddings_generated"])
+        with col_m4:
+            st.metric("Errores", summary["errors_total"])
+
+        # Tool breakdown
+        if summary["tool_calls"]:
+            with st.expander("Tool breakdown", expanded=False):
+                for tname, tcount in sorted(summary["tool_calls"].items(), key=lambda x: -x[1]):
+                    tlat = summary["tool_latency_ms"].get(tname, 0)
+                    st.text(f"  {tname}: {tcount}x ({tlat:.0f} ms avg)")
+
+        # Error breakdown
+        if summary["errors"]:
+            with st.expander("Errores detalle", expanded=False):
+                for ecat, ecount in sorted(summary["errors"].items(), key=lambda x: -x[1]):
+                    st.text(f"  {ecat}: {ecount}")
+
+        # Sesion anterior
+        prev = metrics._previous_session
+        if prev:
+            with st.expander("Sesion anterior", expanded=False):
+                st.text(f"LLM: {prev.get('llm_calls', 0)} calls | {prev.get('llm_latency_ms', 0):.0f} ms")
+                st.text(f"Tools: {prev.get('tool_calls_total', 0)} calls | {prev.get('tool_latency_overall_ms', 0):.0f} ms")
+                st.text(f"Errores: {prev.get('errors_total', 0)}")
 
         # Configuracion
         st.subheader("Configuracion")

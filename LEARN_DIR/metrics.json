@@ -1,0 +1,18 @@
+{
+  "llm_calls": 1,
+  "llm_latency_ms": 100.0,
+  "tool_calls": {},
+  "tool_calls_total": 0,
+  "tool_latency_ms": {},
+  "tool_latency_overall_ms": 0.0,
+  "embeddings_generated": 0,
+  "memory_operations": {
+    "add": 0,
+    "search": 0
+  },
+  "errors": {},
+  "errors_total": 0,
+  "session_start": "2026-06-11T21:45:46.616765",
+  "session_messages": 0,
+  "saved_at": "2026-06-11T21:45:46.616817"
+}

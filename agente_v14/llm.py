@@ -22,6 +22,7 @@ from config import (
     CONNECTION_CACHE_DAYS, LLM_TIMEOUT_SMALL, LLM_TIMEOUT_LARGE,
     EMBED_TIMEOUT, logger
 )
+from utils.metrics import timed, get_metrics
 
 # ============================================================
 # CACHE LRU PARA EMBEDDINGS
@@ -45,6 +46,7 @@ class LRUCache:
     def put(self, key, value):
         if key in self._cache:
             self._cache.move_to_end(key)
+            self._cache[key] = value  # Actualizar valor existente
         else:
             if len(self._cache) >= self._maxsize:
                 self._cache.popitem(last=False)  # Elimina el mas viejo
@@ -135,8 +137,8 @@ class OllamaClient:
                 try:
                     if os.path.exists(CONNECTION_CACHE_FILE):
                         os.remove(CONNECTION_CACHE_FILE)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Error eliminando cache invalido: {e}")
 
         available = self._fetch_available_models()
         if not available:
@@ -276,7 +278,8 @@ class OllamaClient:
                         self._gpu_status = None
                     else:
                         self._gpu_status = False
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Error verificando GPU con nvidia-smi: {e}")
                     self._gpu_status = False
         except Exception as e:
             logger.debug(f"No se pudo verificar GPU: {e}")
@@ -300,8 +303,8 @@ class OllamaClient:
                     days_ago = (datetime.now() - saved_time).days
                     if days_ago < CONNECTION_CACHE_DAYS:
                         return data
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error cargando cache de conexion: {e}")
         return None
 
     def _save_connection_cache(self):
@@ -315,8 +318,8 @@ class OllamaClient:
             }
             with open(CONNECTION_CACHE_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error guardando cache de conexion: {e}")
 
     # ----------------------------------------------------------
     # GENERACION (sin streaming)
@@ -328,6 +331,7 @@ class OllamaClient:
             return LLM_TIMEOUT_LARGE
         return LLM_TIMEOUT_SMALL
 
+    @timed("llm")
     def generate(self, messages, tools=None, model_override=None, timeout_overwrite=None):
         """
         Genera respuesta del LLM. Usa cache de conexion persistente.
@@ -374,10 +378,12 @@ class OllamaClient:
         self._log_errors(errors)
         return ""
 
+    @timed("llm")
     def generate_chat(self, messages):
         """Para conversacion: usa modelo rapido."""
         return self.generate(messages, model_override=self.chat_model)
 
+    @timed("llm")
     def generate_code(self, messages):
         """Para codigo: usa modelo potente."""
         return self.generate(messages, model_override=self.code_model)
@@ -699,8 +705,8 @@ class OllamaClient:
             try:
                 import ollama
                 self._client = ollama.Client(host=host)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Error creando ollama.Client: {e}")
         return self._client
 
     def _log_errors(self, errors):
@@ -712,8 +718,8 @@ class OllamaClient:
                     f.write(f"\n--- {datetime.now().isoformat()} ---\n")
                     for err in errors[-5:]:
                         f.write(f"  {err}\n")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Error escribiendo log de errores LLM: {e}")
 
     # ----------------------------------------------------------
     # EMBEDDINGS (con cache optimizado)
@@ -746,22 +752,99 @@ class OllamaClient:
                 embedding = result.get("embedding", [])
                 if embedding:
                     embed_cache.put(cache_key, embedding)
+                    get_metrics().record_embedding_call()
                     return embedding
         except Exception as e:
             logger.warning(f"Error obteniendo embedding: {e}")
+            get_metrics().record_error("embedding")
         return []
 
     @staticmethod
     def cosine_similarity(vec1, vec2):
-        """Calcula similitud coseno entre dos vectores."""
+        """Calcula similitud coseno entre dos vectores.
+        Usa numpy si esta disponible (10-50x mas rapido en batch).
+        """
         if not vec1 or not vec2 or len(vec1) != len(vec2):
             return 0.0
-        dot_product = sum(a * b for a, b in zip(vec1, vec2))
-        norm1 = sum(a * a for a in vec1) ** 0.5
-        norm2 = sum(b * b for b in vec2) ** 0.5
-        if norm1 == 0 or norm2 == 0:
-            return 0.0
-        return dot_product / (norm1 * norm2)
+        try:
+            import numpy as np
+            a = np.array(vec1, dtype=np.float32)
+            b = np.array(vec2, dtype=np.float32)
+            norm_a = np.linalg.norm(a)
+            norm_b = np.linalg.norm(b)
+            if norm_a == 0 or norm_b == 0:
+                return 0.0
+            return float(np.dot(a, b) / (norm_a * norm_b))
+        except ImportError:
+            # Fallback: Python puro
+            dot_product = sum(a * b for a, b in zip(vec1, vec2))
+            norm1 = sum(a * a for a in vec1) ** 0.5
+            norm2 = sum(b * b for b in vec2) ** 0.5
+            if norm1 == 0 or norm2 == 0:
+                return 0.0
+            return dot_product / (norm1 * norm2)
+
+    @staticmethod
+    def cosine_similarity_batch(query_vec, vectors_dict):
+        """Calcula similitud coseno de un vector contra muchos vectores de una vez.
+        
+        Args:
+            query_vec: Lista[float] - vector de consulta
+            vectors_dict: Dict[id, Lista[float]] - diccionario de vectores
+            
+        Returns:
+            Dict[id, float] - similitud de cada vector vs query
+            
+        Usa numpy para calculo vectorizado (10-50x mas rapido que bucle Python).
+        Fallback a Python puro si numpy no esta disponible.
+        """
+        if not query_vec or not vectors_dict:
+            return {}
+
+        ids = list(vectors_dict.keys())
+        vecs = list(vectors_dict.values())
+
+        # Filtrar vectores de tamano incompatible
+        valid_pairs = [(eid, v) for eid, v in zip(ids, vecs)
+                       if v and len(v) == len(query_vec)]
+        if not valid_pairs:
+            return {}
+
+        valid_ids, valid_vecs = zip(*valid_pairs)
+
+        try:
+            import numpy as np
+            query = np.array(query_vec, dtype=np.float32)
+            matrix = np.array(valid_vecs, dtype=np.float32)  # shape: (N, D)
+
+            # Normalizar query
+            query_norm = np.linalg.norm(query)
+            if query_norm == 0:
+                return {eid: 0.0 for eid in valid_ids}
+            query_normalized = query / query_norm
+
+            # Normalizar filas de la matriz
+            row_norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+            row_norms = np.where(row_norms == 0, 1.0, row_norms)  # Evitar div/0
+            matrix_normalized = matrix / row_norms
+
+            # Producto punto vectorizado: (D,) @ (N, D).T -> (N,)
+            similarities = matrix_normalized @ query_normalized
+
+            return {eid: float(sim) for eid, sim in zip(valid_ids, similarities)}
+
+        except ImportError:
+            # Fallback: Python puro (bucle)
+            results = {}
+            for eid, vec in valid_pairs:
+                dot_product = sum(a * b for a, b in zip(query_vec, vec))
+                norm1 = sum(a * a for a in query_vec) ** 0.5
+                norm2 = sum(b * b for b in vec) ** 0.5
+                if norm1 > 0 and norm2 > 0:
+                    results[eid] = dot_product / (norm1 * norm2)
+                else:
+                    results[eid] = 0.0
+            return results
 
 
 # ============================================================

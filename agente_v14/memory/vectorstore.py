@@ -12,6 +12,7 @@ v14.3: Skip embedding si el store esta vacio, busqueda
 
 import os
 import json
+import pickle
 import hashlib
 import logging
 from datetime import datetime
@@ -30,39 +31,54 @@ class VectorStore:
         self.store_dir = store_dir or os.path.join(LEARN_DIR, "vectors")
         os.makedirs(self.store_dir, exist_ok=True)
         self.index_file = os.path.join(self.store_dir, "index.json")
-        self.vectors_file = os.path.join(self.store_dir, "vectors.json")
+        self.vectors_file = os.path.join(self.store_dir, "vectors.pkl")  # Pickle: 10x mas rapido que JSON
+        self._vectors_legacy_file = os.path.join(self.store_dir, "vectors.json")  # Legacy JSON
         self.index = self._load_index()
         self._vectors_cache = None
         self._dirty = False
         self._last_search_cache = {}  # Cache de busquedas recientes
+        # Auto-migrar de JSON a Pickle si existe el archivo legacy
+        self._migrate_json_to_pickle()
 
     def _load_index(self):
         try:
             if os.path.exists(self.index_file):
                 with open(self.index_file, "r", encoding="utf-8") as f:
                     return json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error cargando indice: {e}")
         return []
 
     def _save_index(self):
         try:
             with open(self.index_file, "w", encoding="utf-8") as f:
                 json.dump(self.index, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Error guardando indice: {e}")
 
     def _get_vectors(self):
-        """Carga los vectores con cache en memoria."""
+        """Carga los vectores con cache en memoria. Pickle primero, JSON como fallback."""
         if self._vectors_cache is not None:
             return self._vectors_cache
+        # 1. Intentar Pickle (rapido)
         try:
             if os.path.exists(self.vectors_file):
-                with open(self.vectors_file, "r", encoding="utf-8") as f:
-                    self._vectors_cache = json.load(f)
+                with open(self.vectors_file, "rb") as f:
+                    self._vectors_cache = pickle.load(f)
                     return self._vectors_cache
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error cargando vectores Pickle: {e}")
+        # 2. Fallback: JSON legacy
+        try:
+            if os.path.exists(self._vectors_legacy_file):
+                with open(self._vectors_legacy_file, "r", encoding="utf-8") as f:
+                    self._vectors_cache = json.load(f)
+                    # Guardar como Pickle para proxima vez
+                    self._save_vectors(self._vectors_cache)
+                    logger.info("Vectores migrados de JSON a Pickle")
+                    return self._vectors_cache
+        except Exception as e:
+            logger.debug(f"Error cargando vectores JSON legacy: {e}")
         self._vectors_cache = {}
         return self._vectors_cache
 
@@ -72,12 +88,13 @@ class VectorStore:
         return {eid: all_vectors[eid] for eid in entry_ids if eid in all_vectors}
 
     def _save_vectors(self, vectors):
+        """Guarda vectores en formato Pickle (10x mas rapido que JSON para floats)."""
         try:
-            with open(self.vectors_file, "w", encoding="utf-8") as f:
-                json.dump(vectors, f)
+            with open(self.vectors_file, "wb") as f:
+                pickle.dump(vectors, f, protocol=pickle.HIGHEST_PROTOCOL)
             self._vectors_cache = vectors
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Error guardando vectores Pickle: {e}")
 
     def _flush(self):
         if self._dirty:
@@ -162,6 +179,7 @@ class VectorStore:
         """
         Busca entradas semanticamente similares al query.
         Optimizado: si no hay vectores, usa solo busqueda por texto (sin llamar embedding).
+        Usa cosine_similarity_batch para calculo vectorizado con numpy.
         """
         if not self.index:
             return []
@@ -186,13 +204,14 @@ class VectorStore:
         candidate_ids = [c["id"] for c in candidates if c.get("has_vector")]
         vectors = self._load_vectors_for(candidate_ids)
 
-        # Scoring
+        # Scoring vectorizado: cosine_similarity_batch usa numpy (10-50x mas rapido)
+        similarities = ollama.cosine_similarity_batch(query_embedding, vectors)
+
         scored = []
         for entry in candidates:
-            if not entry.get("has_vector") or entry["id"] not in vectors:
+            if not entry.get("has_vector") or entry["id"] not in similarities:
                 continue
-            vec = vectors[entry["id"]]
-            score = ollama.cosine_similarity(query_embedding, vec)
+            score = similarities[entry["id"]]
             if score >= min_similarity:
                 scored.append({**entry, "score": round(score, 3)})
 
@@ -237,3 +256,17 @@ class VectorStore:
             self._save_vectors(vectors)
         self._dirty = True
         self._flush()
+        # Limpiar archivo JSON legacy si existe
+        try:
+            if os.path.exists(self._vectors_legacy_file):
+                os.remove(self._vectors_legacy_file)
+                logger.info("Archivo vectors.json legacy eliminado tras cleanup")
+        except Exception as e:
+            logger.debug(f"Error eliminando archivo vectors.json legacy: {e}")
+
+    def _migrate_json_to_pickle(self):
+        """Migra automaticamente de vectors.json a vectors.pkl si existe el legacy."""
+        if os.path.exists(self.vectors_file):
+            return  # Ya existe Pickle, no migrar
+        if os.path.exists(self._vectors_legacy_file):
+            logger.info("Detectado vectors.json legacy - se migrara a Pickle en la proxima carga")
