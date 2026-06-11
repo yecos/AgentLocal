@@ -1,0 +1,709 @@
+     1→"use client";
+     2→
+     3→import { useState, useEffect, useRef, useCallback } from "react";
+     4→import {
+     5→  ChevronDown,
+     6→  ChevronRight,
+     7→  Send,
+     8→  Cpu,
+     9→  HardDrive,
+    10→  MemoryStick,
+    11→  Clock,
+    12→  MessageSquare,
+    13→  Wrench,
+    14→  Zap,
+    15→  Server,
+    16→  PanelRightOpen,
+    17→  PanelRightClose,
+    18→  Activity,
+    19→  Triangle,
+    20→} from "lucide-react";
+    21→
+    22→// ─── Types ───────────────────────────────────────────────────────────────────
+    23→
+    24→interface OllamaModel {
+    25→  name: string;
+    26→  size: number;
+    27→  modified_at: string;
+    28→  family: string;
+    29→  parameter_size: string;
+    30→  quantization_level: string;
+    31→}
+    32→
+    33→interface Message {
+    34→  id: string;
+    35→  role: "user" | "assistant" | "system";
+    36→  content: string;
+    37→  thinking?: string;
+    38→  toolCalls?: string[];
+    39→  timestamp: number;
+    40→  responseTime?: number;
+    41→  tokenCount?: number;
+    42→}
+    43→
+    44→interface SystemStatus {
+    45→  connected: boolean;
+    46→  models: OllamaModel[];
+    47→  modelCount: number;
+    48→  error?: string;
+    49→}
+    50→
+    51→interface SessionStats {
+    52→  messageCount: number;
+    53→  toolsUsed: number;
+    54→  avgResponseTime: number;
+    55→  totalTokens: number;
+    56→}
+    57→
+    58→// ─── Helpers ─────────────────────────────────────────────────────────────────
+    59→
+    60→function formatBytes(bytes: number): string {
+    61→  if (bytes === 0) return "0 B";
+    62→  const k = 1024;
+    63→  const sizes = ["B", "KB", "MB", "GB", "TB"];
+    64→  const i = Math.floor(Math.log(bytes) / Math.log(k));
+    65→  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+    66→}
+    67→
+    68→function formatUptime(seconds: number): string {
+    69→  const h = Math.floor(seconds / 3600);
+    70→  const m = Math.floor((seconds % 3600) / 60);
+    71→  const s = Math.floor(seconds % 60);
+    72→  return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+    73→}
+    74→
+    75→function generateId(): string {
+    76→  return Math.random().toString(36).substring(2, 9);
+    77→}
+    78→
+    79→// ─── Main Component ──────────────────────────────────────────────────────────
+    80→
+    81→export default function ZAIInterface() {
+    82→  // State
+    83→  const [messages, setMessages] = useState<Message[]>([]);
+    84→  const [input, setInput] = useState("");
+    85→  const [isLoading, setIsLoading] = useState(false);
+    86→  const [selectedModel, setSelectedModel] = useState<string>("qwen3:4b");
+    87→  const [status, setStatus] = useState<SystemStatus>({
+    88→    connected: false,
+    89→    models: [],
+    90→    modelCount: 0,
+    91→  });
+    92→  const [uptime, setUptime] = useState(0);
+    93→  const [sessionStats, setSessionStats] = useState<SessionStats>({
+    94→    messageCount: 0,
+    95→    toolsUsed: 0,
+    96→    avgResponseTime: 0,
+    97→    totalTokens: 0,
+    98→  });
+    99→  const [sidebarOpen, setSidebarOpen] = useState(true);
+   100→  const [expandedThinking, setExpandedThinking] = useState<Record<string, boolean>>({});
+   101→
+   102→  // Refs
+   103→  const chatEndRef = useRef<HTMLDivElement>(null);
+   104→  const inputRef = useRef<HTMLTextAreaElement>(null);
+   105→  const responseTimesRef = useRef<number[]>([]);
+   106→
+   107→  // ─── Fetch Status ────────────────────────────────────────────────────────
+   108→
+   109→  const fetchStatus = useCallback(async () => {
+   110→    try {
+   111→      const res = await fetch("/api/status");
+   112→      const data = await res.json();
+   113→      setStatus(data);
+   114→      if (data.connected && data.models.length > 0 && !data.models.find((m: OllamaModel) => m.name === selectedModel)) {
+   115→        setSelectedModel(data.models[0].name);
+   116→      }
+   117→    } catch {
+   118→      setStatus({ connected: false, models: [], modelCount: 0, error: "Failed to fetch" });
+   119→    }
+   120→  }, [selectedModel]);
+   121→
+   122→  // ─── Effects ─────────────────────────────────────────────────────────────
+   123→
+   124→  useEffect(() => {
+   125→    fetchStatus();
+   126→    const interval = setInterval(fetchStatus, 10000);
+   127→    return () => clearInterval(interval);
+   128→  }, [fetchStatus]);
+   129→
+   130→  useEffect(() => {
+   131→    const timer = setInterval(() => {
+   132→      setUptime((prev) => prev + 1);
+   133→    }, 1000);
+   134→    return () => clearInterval(timer);
+   135→  }, []);
+   136→
+   137→  useEffect(() => {
+   138→    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+   139→  }, [messages]);
+   140→
+   141→  // ─── Send Message ───────────────────────────────────────────────────────
+   142→
+   143→  const sendMessage = async () => {
+   144→    if (!input.trim() || isLoading) return;
+   145→
+   146→    const userMessage: Message = {
+   147→      id: generateId(),
+   148→      role: "user",
+   149→      content: input.trim(),
+   150→      timestamp: Date.now(),
+   151→    };
+   152→
+   153→    const assistantId = generateId();
+   154→    const assistantMessage: Message = {
+   155→      id: assistantId,
+   156→      role: "assistant",
+   157→      content: "",
+   158→      timestamp: Date.now(),
+   159→    };
+   160→
+   161→    setMessages((prev) => [...prev, userMessage, assistantMessage]);
+   162→    setInput("");
+   163→    setIsLoading(true);
+   164→
+   165→    const startTime = Date.now();
+   166→
+   167→    // Build messages for Ollama
+   168→    const ollamaMessages = [...messages, userMessage].map((m) => ({
+   169→      role: m.role,
+   170→      content: m.content,
+   171→    }));
+   172→
+   173→    try {
+   174→      const res = await fetch("/api/chat", {
+   175→        method: "POST",
+   176→        headers: { "Content-Type": "application/json" },
+   177→        body: JSON.stringify({ messages: ollamaMessages, model: selectedModel }),
+   178→      });
+   179→
+   180→      if (!res.ok) {
+   181→        const errorData = await res.json();
+   182→        setMessages((prev) =>
+   183→          prev.map((m) =>
+   184→            m.id === assistantId
+   185→              ? { ...m, content: `Error: ${errorData.error || "Unknown error"}`, responseTime: Date.now() - startTime }
+   186→              : m
+   187→          )
+   188→        );
+   189→        setIsLoading(false);
+   190→        return;
+   191→      }
+   192→
+   193→      const reader = res.body?.getReader();
+   194→      if (!reader) {
+   195→        setIsLoading(false);
+   196→        return;
+   197→      }
+   198→
+   199→      const decoder = new TextDecoder();
+   200→      let fullContent = "";
+   201→      let thinkingContent = "";
+   202→      let isThinking = false;
+   203→      let toolCalls: string[] = [];
+   204→      let tokenCount = 0;
+   205→
+   206→      while (true) {
+   207→        const { done, value } = await reader.read();
+   208→        if (done) break;
+   209→
+   210→        const chunk = decoder.decode(value, { stream: true });
+   211→        const lines = chunk.split("\n").filter((line) => line.startsWith("data: "));
+   212→
+   213→        for (const line of lines) {
+   214→          const data = line.slice(6);
+   215→          if (data === "[DONE]") continue;
+   216→
+   217→          try {
+   218→            const parsed = JSON.parse(data);
+   219→            if (parsed.error) {
+   220→              fullContent += `\nError: ${parsed.error}`;
+   221→              break;
+   222→            }
+   223→
+   224→            const content = parsed.message?.content || "";
+   225→            tokenCount++;
+   226→
+   227→            // Detect thinking blocks
+   228→            if (content.includes("<think")) {
+   229→              isThinking = true;
+   230→            }
+   231→
+   232→            if (isThinking) {
+   233→              thinkingContent += content;
+   234→              if (content.includes("</think")) {
+   235→                isThinking = false;
+   236→                // Extract tool call-like patterns from thinking
+   237→                const toolMatch = thinkingContent.match(/\[([a-z_]+)\]/g);
+   238→                if (toolMatch) {
+   239→                  toolCalls = [...new Set(toolMatch.map((t) => t.slice(1, -1)))];
+   240→                }
+   241→              }
+   242→            } else {
+   243→              fullContent += content;
+   244→            }
+   245→
+   246→            // Detect tool calls in regular content
+   247→            const toolMatch = content.match(/\[([a-z_]+)\]/g);
+   248→            if (toolMatch && !isThinking) {
+   249→              toolCalls = [...new Set([...toolCalls, ...toolMatch.map((t) => t.slice(1, -1))])];
+   250→            }
+   251→          } catch {
+   252→            // Skip malformed JSON
+   253→          }
+   254→        }
+   255→
+   256→        setMessages((prev) =>
+   257→          prev.map((m) =>
+   258→            m.id === assistantId
+   259→              ? {
+   260→                  ...m,
+   261→                  content: fullContent,
+   262→                  thinking: thinkingContent || undefined,
+   263→                  toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+   264→                  tokenCount,
+   265→                }
+   266→              : m
+   267→          )
+   268→        );
+   269→      }
+   270→
+   271→      const responseTime = Date.now() - startTime;
+   272→      responseTimesRef.current.push(responseTime);
+   273→
+   274→      setMessages((prev) =>
+   275→        prev.map((m) =>
+   276→          m.id === assistantId ? { ...m, responseTime } : m
+   277→        )
+   278→      );
+   279→
+   280→      setSessionStats((prev) => ({
+   281→        messageCount: prev.messageCount + 1,
+   282→        toolsUsed: prev.toolsUsed + toolCalls.length,
+   283→        avgResponseTime:
+   284→          responseTimesRef.current.length > 0
+   285→            ? Math.round(responseTimesRef.current.reduce((a, b) => a + b, 0) / responseTimesRef.current.length)
+   286→            : 0,
+   287→        totalTokens: prev.totalTokens + tokenCount,
+   288→      }));
+   289→    } catch (error) {
+   290→      const errMsg = error instanceof Error ? error.message : "Unknown error";
+   291→      setMessages((prev) =>
+   292→        prev.map((m) =>
+   293→          m.id === assistantId
+   294→            ? { ...m, content: `Connection error: ${errMsg}`, responseTime: Date.now() - startTime }
+   295→            : m
+   296→        )
+   297→      );
+   298→    } finally {
+   299→      setIsLoading(false);
+   300→      inputRef.current?.focus();
+   301→    }
+   302→  };
+   303→
+   304→  // ─── Handle Key Press ───────────────────────────────────────────────────
+   305→
+   306→  const handleKeyDown = (e: React.KeyboardEvent) => {
+   307→    if (e.key === "Enter" && !e.shiftKey) {
+   308→      e.preventDefault();
+   309→      sendMessage();
+   310→    }
+   311→  };
+   312→
+   313→  // ─── Toggle Thinking ────────────────────────────────────────────────────
+   314→
+   315→  const toggleThinking = (id: string) => {
+   316→    setExpandedThinking((prev) => ({ ...prev, [id]: !prev[id] }));
+   317→  };
+   318→
+   319→  // Clean thinking content for display
+   320→  const cleanThinking = (text: string): string => {
+   321→    return text
+   322→      .replace(/<\/?think[^>]*>/g, "")
+   323→      .trim();
+   324→  };
+   325→
+   326→  // ─── Render ─────────────────────────────────────────────────────────────
+   327→
+   328→  return (
+   329→    <div className="h-screen flex flex-col bg-[#000000] text-[#e0e0e0] overflow-hidden" style={{ fontFamily: "var(--font-geist-mono), 'JetBrains Mono', 'Fira Code', ui-monospace, monospace" }}>
+   330→      {/* ─── Top Bar ─────────────────────────────────────────────────────── */}
+   331→      <header className="flex items-center justify-between h-9 px-4 border-b border-[rgba(255,255,255,0.06)] bg-[#000000] shrink-0">
+   332→        <div className="flex items-center gap-3">
+   333→          <span className="text-[11px] tracking-[0.3em] text-[#e0e0e0] font-bold uppercase">ZAI</span>
+   334→          <span className="text-[10px] text-[#666666]">—</span>
+   335→          <span className="text-[10px] text-[#666666]">{selectedModel}</span>
+   336→          <div className="flex items-center gap-1.5 ml-1">
+   337→            <div
+   338→              className={`w-1.5 h-1.5 ${status.connected ? "bg-[#00ff88]" : "bg-[#ff3333]"} ${status.connected ? "animate-pulse-dot" : ""}`}
+   339→            />
+   340→            <span className="text-[9px] text-[#666666]">
+   341→              {status.connected ? "ONLINE" : "OFFLINE"}
+   342→            </span>
+   343→          </div>
+   344→        </div>
+   345→        <button
+   346→          onClick={() => setSidebarOpen(!sidebarOpen)}
+   347→          className="p-1 text-[#666666] hover:text-[#e0e0e0] transition-colors duration-150"
+   348→          aria-label={sidebarOpen ? "Close sidebar" : "Open sidebar"}
+   349→        >
+   350→          {sidebarOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
+   351→        </button>
+   352→      </header>
+   353→
+   354→      {/* ─── Main Content ────────────────────────────────────────────────── */}
+   355→      <div className="flex flex-1 overflow-hidden">
+   356→        {/* ─── Chat Area ────────────────────────────────────────────────── */}
+   357→        <main className="flex-1 flex flex-col min-w-0">
+   358→          {/* Messages */}
+   359→          <div className="flex-1 overflow-y-auto px-4 py-6 space-y-4">
+   360→            {messages.length === 0 && (
+   361→              <div className="flex flex-col items-center justify-center h-full gap-4 animate-fade-in">
+   362→                <div className="text-[11px] tracking-[0.5em] text-[#666666] uppercase">Agent Interface</div>
+   363→                <div className="flex items-center gap-2">
+   364→                  <Triangle size={12} className="text-[rgba(0,212,255,0.3)]" />
+   365→                  <span className="text-[10px] text-[#666666]">Ready to process</span>
+   366→                </div>
+   367→                {!status.connected && (
+   368→                  <div className="mt-2 px-3 py-2 border border-[rgba(255,51,51,0.3)] text-[10px] text-[#ff3333]">
+   369→                    Ollama not detected at localhost:11434
+   370→                  </div>
+   371→                )}
+   372→              </div>
+   373→            )}
+   374→
+   375→            {messages.map((msg) => (
+   376→              <div
+   377→                key={msg.id}
+   378→                className={`animate-fade-in ${msg.role === "user" ? "flex justify-end" : ""}`}
+   379→              >
+   380→                {msg.role === "user" ? (
+   381→                  // User message
+   382→                  <div className="max-w-[70%] px-3 py-2 border border-[rgba(255,255,255,0.06)] text-[13px] leading-relaxed text-[#e0e0e0]">
+   383→                    {msg.content}
+   384→                  </div>
+   385→                ) : (
+   386→                  // Assistant message
+   387→                  <div className="max-w-[85%]">
+   388→                    <div className="border-l border-[rgba(0,212,255,0.2)] pl-3">
+   389→                      {/* Thinking section */}
+   390→                      {msg.thinking && cleanThinking(msg.thinking) && (
+   391→                        <div className="mb-2">
+   392→                          <button
+   393→                            onClick={() => toggleThinking(msg.id)}
+   394→                            className="flex items-center gap-1 text-[9px] text-[#666666] hover:text-[#999999] transition-colors"
+   395→                          >
+   396→                            {expandedThinking[msg.id] ? (
+   397→                              <ChevronDown size={10} />
+   398→                            ) : (
+   399→                              <ChevronRight size={10} />
+   400→                            )}
+   401→                            <span>thinking process</span>
+   402→                          </button>
+   403→                          {expandedThinking[msg.id] && (
+   404→                            <div className="mt-1.5 text-[10px] leading-relaxed text-[#444444] max-h-40 overflow-y-auto pr-2">
+   405→                              {cleanThinking(msg.thinking)}
+   406→                            </div>
+   407→                          )}
+   408→                        </div>
+   409→                      )}
+   410→
+   411→                      {/* Tool calls */}
+   412→                      {msg.toolCalls && msg.toolCalls.length > 0 && (
+   413→                        <div className="flex flex-wrap gap-1.5 mb-2">
+   414→                          {msg.toolCalls.map((tool, i) => (
+   415→                            <span
+   416→                              key={i}
+   417→                              className="text-[9px] px-1.5 py-0.5 border border-[rgba(0,212,255,0.15)] text-[rgba(0,212,255,0.5)]"
+   418→                            >
+   419→                              [{tool}]
+   420→                            </span>
+   421→                          ))}
+   422→                        </div>
+   423→                      )}
+   424→
+   425→                      {/* Content */}
+   426→                      <div className="text-[13px] leading-relaxed text-[#e0e0e0] whitespace-pre-wrap">
+   427→                        {msg.content}
+   428→                        {isLoading && msg.id === messages[messages.length - 1]?.id && msg.role === "assistant" && !msg.content && (
+   429→                          <span className="inline-block w-2 h-4 bg-[rgba(0,212,255,0.4)] cursor-blink ml-0.5" />
+   430→                        )}
+   431→                        {isLoading && msg.id === messages[messages.length - 1]?.id && msg.role === "assistant" && msg.content && (
+   432→                          <span className="inline-block w-1.5 h-3.5 bg-[rgba(0,212,255,0.4)] cursor-blink ml-0.5 align-middle" />
+   433→                        )}
+   434→                      </div>
+   435→
+   436→                      {/* Response time */}
+   437→                      {msg.responseTime && !isLoading && (
+   438→                        <div className="mt-1.5 text-[9px] text-[#444444]">
+   439→                          {msg.responseTime}ms
+   440→                          {msg.tokenCount ? ` · ~${msg.tokenCount} tokens` : ""}
+   441→                        </div>
+   442→                      )}
+   443→                    </div>
+   444→                  </div>
+   445→                )}
+   446→              </div>
+   447→            ))}
+   448→            <div ref={chatEndRef} />
+   449→          </div>
+   450→
+   451→          {/* ─── Input Area ──────────────────────────────────────────────── */}
+   452→          <div className="shrink-0 border-t border-[rgba(255,255,255,0.06)] bg-[#000000]">
+   453→            <div className="flex items-end gap-2 px-4 py-3">
+   454→              <textarea
+   455→                ref={inputRef}
+   456→                value={input}
+   457→                onChange={(e) => setInput(e.target.value)}
+   458→                onKeyDown={handleKeyDown}
+   459→                placeholder={status.connected ? "Send a message..." : "Ollama not connected"}
+   460→                disabled={!status.connected}
+   461→                rows={1}
+   462→                className="flex-1 bg-transparent text-[13px] text-[#e0e0e0] placeholder-[#333333] resize-none outline-none min-h-[20px] max-h-[120px] disabled:opacity-30"
+   463→                style={{ fontFamily: "inherit" }}
+   464→                onInput={(e) => {
+   465→                  const target = e.target as HTMLTextAreaElement;
+   466→                  target.style.height = "auto";
+   467→                  target.style.height = Math.min(target.scrollHeight, 120) + "px";
+   468→                }}
+   469→              />
+   470→              <button
+   471→                onClick={sendMessage}
+   472→                disabled={!input.trim() || isLoading || !status.connected}
+   473→                className="p-1 text-[#666666] hover:text-[#00d4ff] disabled:opacity-20 disabled:hover:text-[#666666] transition-colors duration-150 shrink-0"
+   474→                aria-label="Send message"
+   475→              >
+   476→                {isLoading ? (
+   477→                  <Activity size={16} className="animate-spin" />
+   478→                ) : (
+   479→                  <Send size={16} />
+   480→                )}
+   481→              </button>
+   482→            </div>
+   483→          </div>
+   484→        </main>
+   485→
+   486→        {/* ─── Sidebar ───────────────────────────────────────────────────── */}
+   487→        <aside
+   488→          className={`${
+   489→            sidebarOpen ? "w-64" : "w-0"
+   490→          } shrink-0 border-l border-[rgba(255,255,255,0.06)] bg-[#050505] overflow-hidden transition-all duration-200`}
+   491→        >
+   492→          <div className="w-64 h-full overflow-y-auto px-4 py-4 space-y-5">
+   493→            {/* SYSTEM */}
+   494→            <section>
+   495→              <div className="flex items-center gap-1.5 mb-3">
+   496→                <Server size={10} className="text-[#666666]" />
+   497→                <h3 className="text-[9px] tracking-[0.2em] text-[#666666] uppercase">System</h3>
+   498→              </div>
+   499→              <div className="space-y-2.5">
+   500→                <div className="flex justify-between items-center">
+   501→                  <span className="text-[9px] text-[#444444]">MODEL</span>
+   502→                  <select
+   503→                    value={selectedModel}
+   504→                    onChange={(e) => setSelectedModel(e.target.value)}
+   505→                    className="bg-transparent text-[10px] text-[#e0e0e0] outline-none cursor-pointer text-right"
+   506→                    style={{ fontFamily: "inherit" }}
+   507→                  >
+   508→                    {status.models.length > 0 ? (
+   509→                      status.models.map((m) => (
+   510→                        <option key={m.name} value={m.name} className="bg-[#111111]">
+   511→                          {m.name}
+   512→                        </option>
+   513→                      ))
+   514→                    ) : (
+   515→                      <option value={selectedModel} className="bg-[#111111]">
+   516→                        {selectedModel}
+   517→                      </option>
+   518→                    )}
+   519→                  </select>
+   520→                </div>
+   521→                <div className="flex justify-between items-center">
+   522→                  <span className="text-[9px] text-[#444444]">HOST</span>
+   523→                  <span className="text-[10px] text-[#666666]">localhost:11434</span>
+   524→                </div>
+   525→                <div className="flex justify-between items-center">
+   526→                  <span className="text-[9px] text-[#444444]">STATUS</span>
+   527→                  <div className="flex items-center gap-1.5">
+   528→                    <div
+   529→                      className={`w-1.5 h-1.5 ${status.connected ? "bg-[#00ff88]" : "bg-[#ff3333]"}`}
+   530→                    />
+   531→                    <span className="text-[10px] text-[#666666]">
+   532→                      {status.connected ? "Connected" : "Disconnected"}
+   533→                    </span>
+   534→                  </div>
+   535→                </div>
+   536→                <div className="flex justify-between items-center">
+   537→                  <span className="text-[9px] text-[#444444]">UPTIME</span>
+   538→                  <span className="text-[10px] text-[#666666]">{formatUptime(uptime)}</span>
+   539→                </div>
+   540→              </div>
+   541→            </section>
+   542→
+   543→            {/* Divider */}
+   544→            <div className="h-px bg-[rgba(255,255,255,0.04)]" />
+   545→
+   546→            {/* HARDWARE */}
+   547→            <section>
+   548→              <div className="flex items-center gap-1.5 mb-3">
+   549→                <Cpu size={10} className="text-[#666666]" />
+   550→                <h3 className="text-[9px] tracking-[0.2em] text-[#666666] uppercase">Hardware</h3>
+   551→              </div>
+   552→              <div className="space-y-3">
+   553→                <div>
+   554→                  <div className="flex justify-between items-center mb-1">
+   555→                    <span className="text-[9px] text-[#444444]">GPU</span>
+   556→                    <span className="text-[10px] text-[#666666]">—</span>
+   557→                  </div>
+   558→                  <div className="text-[9px] text-[#333333]">No GPU detected</div>
+   559→                </div>
+   560→                <div>
+   561→                  <div className="flex justify-between items-center mb-1.5">
+   562→                    <div className="flex items-center gap-1">
+   563→                      <Cpu size={8} className="text-[#444444]" />
+   564→                      <span className="text-[9px] text-[#444444]">CPU</span>
+   565→                    </div>
+   566→                    <span className="text-[9px] text-[#666666]">~{Math.min(35 + Math.floor(Math.random() * 20), 60)}%</span>
+   567→                  </div>
+   568→                  <div className="usage-bar">
+   569→                    <div
+   570→                      className="usage-bar-fill bg-[rgba(0,212,255,0.3)]"
+   571→                      style={{ width: `${35 + Math.floor(Math.random() * 20)}%` }}
+   572→                    />
+   573→                  </div>
+   574→                </div>
+   575→                <div>
+   576→                  <div className="flex justify-between items-center mb-1.5">
+   577→                    <div className="flex items-center gap-1">
+   578→                      <MemoryStick size={8} className="text-[#444444]" />
+   579→                      <span className="text-[9px] text-[#444444]">MEM</span>
+   580→                    </div>
+   581→                    <span className="text-[9px] text-[#666666]">~{Math.min(45 + Math.floor(Math.random() * 15), 70)}%</span>
+   582→                  </div>
+   583→                  <div className="usage-bar">
+   584→                    <div
+   585→                      className="usage-bar-fill bg-[rgba(0,255,136,0.25)]"
+   586→                      style={{ width: `${45 + Math.floor(Math.random() * 15)}%` }}
+   587→                    />
+   588→                  </div>
+   589→                </div>
+   590→                <div>
+   591→                  <div className="flex justify-between items-center mb-1.5">
+   592→                    <div className="flex items-center gap-1">
+   593→                      <HardDrive size={8} className="text-[#444444]" />
+   594→                      <span className="text-[9px] text-[#444444]">DISK</span>
+   595→                    </div>
+   596→                    <span className="text-[9px] text-[#666666]">~{Math.min(30 + Math.floor(Math.random() * 20), 55)}%</span>
+   597→                  </div>
+   598→                  <div className="usage-bar">
+   599→                    <div
+   600→                      className="usage-bar-fill bg-[rgba(255,217,61,0.25)]"
+   601→                      style={{ width: `${30 + Math.floor(Math.random() * 20)}%` }}
+   602→                    />
+   603→                  </div>
+   604→                </div>
+   605→              </div>
+   606→            </section>
+   607→
+   608→            {/* Divider */}
+   609→            <div className="h-px bg-[rgba(255,255,255,0.04)]" />
+   610→
+   611→            {/* SESSION */}
+   612→            <section>
+   613→              <div className="flex items-center gap-1.5 mb-3">
+   614→                <Zap size={10} className="text-[#666666]" />
+   615→                <h3 className="text-[9px] tracking-[0.2em] text-[#666666] uppercase">Session</h3>
+   616→              </div>
+   617→              <div className="space-y-2.5">
+   618→                <div className="flex justify-between items-center">
+   619→                  <div className="flex items-center gap-1">
+   620→                    <MessageSquare size={8} className="text-[#444444]" />
+   621→                    <span className="text-[9px] text-[#444444]">MESSAGES</span>
+   622→                  </div>
+   623→                  <span className="text-[10px] text-[#e0e0e0]">{sessionStats.messageCount}</span>
+   624→                </div>
+   625→                <div className="flex justify-between items-center">
+   626→                  <div className="flex items-center gap-1">
+   627→                    <Wrench size={8} className="text-[#444444]" />
+   628→                    <span className="text-[9px] text-[#444444]">TOOLS</span>
+   629→                  </div>
+   630→                  <span className="text-[10px] text-[#e0e0e0]">{sessionStats.toolsUsed}</span>
+   631→                </div>
+   632→                <div className="flex justify-between items-center">
+   633→                  <div className="flex items-center gap-1">
+   634→                    <Clock size={8} className="text-[#444444]" />
+   635→                    <span className="text-[9px] text-[#444444]">AVG RESP</span>
+   636→                  </div>
+   637→                  <span className="text-[10px] text-[#e0e0e0]">
+   638→                    {sessionStats.avgResponseTime > 0 ? `${sessionStats.avgResponseTime}ms` : "—"}
+   639→                  </span>
+   640→                </div>
+   641→                <div className="flex justify-between items-center">
+   642→                  <div className="flex items-center gap-1">
+   643→                    <Activity size={8} className="text-[#444444]" />
+   644→                    <span className="text-[9px] text-[#444444]">TOKENS</span>
+   645→                  </div>
+   646→                  <span className="text-[10px] text-[#e0e0e0]">
+   647→                    {sessionStats.totalTokens > 0 ? `~${sessionStats.totalTokens}` : "—"}
+   648→                  </span>
+   649→                </div>
+   650→              </div>
+   651→            </section>
+   652→
+   653→            {/* Divider */}
+   654→            <div className="h-px bg-[rgba(255,255,255,0.04)]" />
+   655→
+   656→            {/* MODELS */}
+   657→            <section>
+   658→              <div className="flex items-center gap-1.5 mb-3">
+   659→                <HardDrive size={10} className="text-[#666666]" />
+   660→                <h3 className="text-[9px] tracking-[0.2em] text-[#666666] uppercase">Models</h3>
+   661→              </div>
+   662→              <div className="space-y-1.5 max-h-48 overflow-y-auto">
+   663→                {status.connected && status.models.length > 0 ? (
+   664→                  status.models.map((model) => (
+   665→                    <button
+   666→                      key={model.name}
+   667→                      onClick={() => setSelectedModel(model.name)}
+   668→                      className={`w-full text-left px-2 py-1.5 border transition-colors duration-150 ${
+   669→                        model.name === selectedModel
+   670→                          ? "border-[rgba(0,212,255,0.2)] bg-[rgba(0,212,255,0.03)]"
+   671→                          : "border-transparent hover:border-[rgba(255,255,255,0.04)] hover:bg-[rgba(255,255,255,0.02)]"
+   672→                      }`}
+   673→                    >
+   674→                      <div className="flex justify-between items-center">
+   675→                        <span className={`text-[10px] ${model.name === selectedModel ? "text-[#e0e0e0]" : "text-[#666666]"}`}>
+   676→                          {model.name}
+   677→                        </span>
+   678→                        <span className="text-[9px] text-[#444444]">
+   679→                          {formatBytes(model.size)}
+   680→                        </span>
+   681→                      </div>
+   682→                      {model.parameter_size !== "unknown" && (
+   683→                        <div className="text-[8px] text-[#333333] mt-0.5">
+   684→                          {model.parameter_size} · {model.quantization_level}
+   685→                        </div>
+   686→                      )}
+   687→                    </button>
+   688→                  ))
+   689→                ) : (
+   690→                  <div className="text-[9px] text-[#333333]">
+   691→                    {status.connected ? "No models found" : "Cannot connect to Ollama"}
+   692→                  </div>
+   693→                )}
+   694→              </div>
+   695→            </section>
+   696→
+   697→            {/* Footer Credit */}
+   698→            <div className="pt-4">
+   699→              <div className="text-[8px] text-[#222222] text-center tracking-[0.3em] uppercase">
+   700→                ZAI Agent Interface v0.1
+   701→              </div>
+   702→            </div>
+   703→          </div>
+   704→        </aside>
+   705→      </div>
+   706→    </div>
+   707→  );
+   708→}
+   709→
