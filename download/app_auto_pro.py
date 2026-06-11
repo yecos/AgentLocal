@@ -540,9 +540,24 @@ class AgentBrain:
         """
         Ejecuta el plan paso a paso, evaluando cada resultado.
         Si algo falla, busca alternativas.
+        Si el plan esta vacio (conversacion), responde directamente.
         """
         results = []
         steps = plan.get("plan", [])
+
+        # Si el plan esta vacio, es una conversacion — responder directamente
+        if not steps:
+            analisis = plan.get("analisis", "")
+            self._log(f"Plan vacio — es conversacion: {analisis}", "thinking")
+            result = self._conversar(st.session_state.messages[-1]["content"] if st.session_state.messages else "hola")
+            results.append({
+                "action": "conversar",
+                "params": {},
+                "reason": analisis,
+                "result": result,
+                "evaluation": {"exitoso": True}
+            })
+            return results
 
         for step in steps:
             action = step.get("accion", "")
@@ -1050,13 +1065,14 @@ def procesar_mensaje(user_message: str) -> tuple:
             if evaluation.get("solucion_alternativa"):
                 respuesta += f"🔧 Intentando: {evaluation['solucion_alternativa']}\n\n"
 
-    # Agregar sugerencia de siguiente paso
-    if plan.get("siguiente_paso_sugerido"):
+    # Agregar sugerencia de siguiente paso (solo si no es conversacion)
+    is_conversation = any(r.get("action") == "conversar" for r in results)
+    if plan.get("siguiente_paso_sugerido") and not is_conversation:
         respuesta += f"💡 **Siguiente paso sugerido:** {plan['siguiente_paso_sugerido']}"
 
-    # Si no hubo resultados utiles y Ollama no conecta, ofrecer consulta cloud
-    if not results or all(not r.get("evaluation", {}).get("exitoso", True) for r in results):
-        respuesta += "\n\n⚠ Tuve problemas. ¿Quieres que consulte una IA cloud para encontrar una solución?"
+    # Si no hubo resultados utiles Y no es conversacion, ofrecer consulta cloud
+    if not is_conversation and (not results or all(not r.get("evaluation", {}).get("exitoso", True) for r in results)):
+        respuesta += "\n\n⚠ Tuve problemas con la ejecucion. ¿Quieres que consulte una IA cloud para encontrar una solucion?"
 
     return respuesta, brain.thinking_log
 
