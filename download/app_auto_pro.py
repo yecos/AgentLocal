@@ -33,8 +33,22 @@ import re
 import json
 import platform
 import hashlib
+import logging
 from datetime import datetime
 from pathlib import Path
+from collections import OrderedDict
+
+# ============================================================
+# LOGGING
+# ============================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler(os.path.join(os.path.expanduser("~"), ".ia-local", "learning", "agent.log"), encoding="utf-8"),
+    ]
+)
+logger = logging.getLogger("agente")
 
 # ============================================================
 # CONFIGURACION
@@ -76,8 +90,108 @@ COMANDOS_PELIGROSOS = [
     "rm -rf", "del /f /s /q", "format", "fdisk",
     "reg delete", "net user", "shutdown", "rmdir /s /q",
     "mkfs", "dd if=", "> /dev/sd", "curl | bash", "curl | sh",
-    "rd /s /q", "taskkill /f /pid system"
+    "rd /s /q", "taskkill /f /pid system",
+    "powershell -enc", "certutil", "bitsadmin", "mshta",
+    "cipher /w", "diskpart", "reg add",
 ]
+
+# Comandos permitidos sin confirmacion (allowlist)
+COMANDOS_SEGUROS = [
+    "git", "npm", "pip", "python", "node", "dir", "ls",
+    "cat", "echo", "cd", "type", "find", "where", "which",
+    "tasklist", "start", "open", "xdg-open",
+    "pipenv", "poetry", "bun", "yarn", "cargo",
+    "docker ps", "docker images", "docker compose",
+]
+
+# Sitios web conocidos (centralizado)
+SITIOS_CONOCIDOS = {
+    "youtube": "https://www.youtube.com",
+    "google": "https://www.google.com",
+    "gmail": "https://mail.google.com",
+    "github": "https://github.com",
+    "stack overflow": "https://stackoverflow.com",
+    "stackoverflow": "https://stackoverflow.com",
+    "twitter": "https://twitter.com",
+    "x": "https://x.com",
+    "facebook": "https://www.facebook.com",
+    "instagram": "https://www.instagram.com",
+    "reddit": "https://www.reddit.com",
+    "whatsapp web": "https://web.whatsapp.com",
+    "whatsappweb": "https://web.whatsapp.com",
+    "netflix": "https://www.netflix.com",
+    "spotify": "https://open.spotify.com",
+    "twitch": "https://www.twitch.tv",
+    "amazon": "https://www.amazon.com",
+    "wikipedia": "https://es.wikipedia.org",
+    "drive": "https://drive.google.com",
+    "google drive": "https://drive.google.com",
+    "maps": "https://maps.google.com",
+    "google maps": "https://maps.google.com",
+    "translate": "https://translate.google.com",
+    "google translate": "https://translate.google.com",
+    "chatgpt": "https://chat.openai.com",
+    "copilot": "https://copilot.microsoft.com",
+    "outlook": "https://outlook.live.com",
+    "notion": "https://www.notion.so",
+    "figma": "https://www.figma.com",
+    "canva": "https://www.canva.com",
+    "trello": "https://trello.com",
+}
+
+# ============================================================
+# UTILIDADES COMPARTIDAS
+# ============================================================
+
+def _strip_prefixes(text: str) -> str:
+    """Elimina prefijos comunes de comandos de voz/texto."""
+    text = text.strip()
+    prefixes = ["abre ", "abrir ", "open ", "inicia ", "lanza ", "mi ",
+                "ve a ", "ir a ", "navega a ", "busca ", "buscar ",
+                "pon ", "ponme ", "reproduce "]
+    for prefix in prefixes:
+        if text.lower().startswith(prefix):
+            text = text[len(prefix):]
+            break
+    return text.strip()
+
+
+def _open_in_browser(url: str) -> str:
+    """Abre una URL en el navegador por defecto. Multi-plataforma."""
+    if platform.system() == "Windows":
+        return ejecutar_comando(f'start "" "{url}"')
+    elif platform.system() == "Darwin":
+        return ejecutar_comando(f'open "{url}"')
+    else:
+        return ejecutar_comando(f'xdg-open "{url}"')
+
+
+def _validate_path(ruta: str) -> str:
+    """Valida que una ruta este dentro de directorios permitidos. Previene path traversal."""
+    allowed_dirs = [REPOS_DIR, LEARN_DIR]
+    try:
+        resolved = Path(ruta).resolve()
+        for allowed in allowed_dirs:
+            if str(resolved).startswith(str(Path(allowed).resolve())):
+                return ruta  # Ruta segura
+        # Tambien permitir rutas relativas dentro de REPOS_DIR
+        if not os.path.isabs(ruta):
+            resolved_in_repos = Path(os.path.join(REPOS_DIR, ruta)).resolve()
+            if str(resolved_in_repos).startswith(str(Path(REPOS_DIR).resolve())):
+                return ruta
+    except (OSError, ValueError):
+        pass
+    # Ruta fuera de directorios permitidos - requerir confirmacion
+    return f"ACCESO DENEGADO: La ruta '{ruta}' esta fuera de los directorios permitidos. Solo puedes acceder a archivos dentro de {REPOS_DIR}"
+
+
+def _sanitize_input(text: str) -> str:
+    """Sanitiza un input para prevenir inyeccion de comandos."""
+    # Solo permitir caracteres alfanumericos, espacios, puntos, guiones y barras
+    if not re.match(r'^[a-zA-Z0-9\s\.\-_:/\\@]+$', text):
+        # Filtrar caracteres peligrosos
+        text = re.sub(r'[`$\{\}();|&<>!#~]', '', text)
+    return text
 
 
 # ============================================================
@@ -88,10 +202,11 @@ def ejecutar_comando(comando: str, cwd: str = None, confirmar_peligroso: bool = 
     """Ejecuta un comando en la terminal con VALIDACION de seguridad."""
     cmd_lower = comando.lower()
 
-    # Validar comandos peligrosos
+    # Validar comandos peligrosos (blocklist)
     for peligro in COMANDOS_PELIGROSOS:
         if peligro in cmd_lower:
             if not confirmar_peligroso:
+                logger.warning(f"Comando peligroso bloqueado: {comando}")
                 return (f"COMANDO PELIGROSO detectado: '{peligro}'\n"
                         f"Si estas seguro, dime: 'ejecuta confirmado: {comando}'")
 
@@ -168,13 +283,18 @@ def instalar_dependencias(ruta: str, gestor: str = "auto") -> str:
 
 
 def leer_archivo(ruta: str) -> str:
+    # Validar path traversal
+    validation = _validate_path(ruta)
+    if validation != ruta:
+        return validation  # Retorna mensaje de ACCESO DENEGADO
+
     rutas_posibles = [ruta]
     if not os.path.isabs(ruta):
         rutas_posibles.append(os.path.join(REPOS_DIR, ruta))
         try:
             for d in os.listdir(REPOS_DIR):
                 rutas_posibles.append(os.path.join(REPOS_DIR, d, ruta))
-        except:
+        except OSError:
             pass
 
     for r in rutas_posibles:
@@ -185,7 +305,7 @@ def leer_archivo(ruta: str) -> str:
                 if len(contenido) > 8000:
                     contenido = contenido[:8000] + "\n... [truncado]"
                 return contenido
-            except Exception as e:
+            except (OSError, UnicodeDecodeError) as e:
                 return f"ERROR leyendo: {e}"
     return f"Archivo no encontrado: {ruta}"
 
@@ -210,11 +330,16 @@ def listar_archivos(ruta: str = None) -> str:
             resultado += f"  [ARCHIVO] {a}\n"
         resultado += f"Total: {len(carpetas)} carpetas, {len(archivos)} archivos"
         return resultado
-    except Exception as e:
+    except OSError as e:
         return f"ERROR: {e}"
 
 
 def escribir_archivo(ruta: str, contenido: str) -> str:
+    # Validar path traversal
+    validation = _validate_path(ruta)
+    if validation != ruta:
+        return validation  # Retorna mensaje de ACCESO DENEGADO
+
     try:
         dir_name = os.path.dirname(ruta)
         if dir_name:
@@ -222,7 +347,7 @@ def escribir_archivo(ruta: str, contenido: str) -> str:
         with open(ruta, "w", encoding="utf-8") as f:
             f.write(contenido)
         return f"Archivo escrito: {ruta}"
-    except Exception as e:
+    except OSError as e:
         return f"ERROR: {e}"
 
 
@@ -338,11 +463,7 @@ def buscar_web(consulta: str) -> str:
 # ============================================================
 
 def buscar_en_start_menu(nombre: str) -> str:
-    nombre_lower = nombre.lower().strip()
-    for prefix in ["abre ", "abrir ", "open ", "inicia ", "lanza ", "mi "]:
-        if nombre_lower.startswith(prefix):
-            nombre_lower = nombre_lower[len(prefix):]
-            break
+    nombre_lower = _strip_prefixes(nombre).lower()
 
     start_menu_dirs = []
     if platform.system() == "Windows":
@@ -372,16 +493,31 @@ def buscar_en_start_menu(nombre: str) -> str:
     return matches[0][0]
 
 
+# Cache para buscar_exe (evita escaneo de disco repetido)
+_exe_cache = {}
+_exe_cache_time = {}
+
 def buscar_exe(nombre: str) -> str:
-    nombre_lower = nombre.lower().strip()
-    for prefix in ["abre ", "abrir ", "open ", "inicia ", "lanza ", "mi "]:
-        if nombre_lower.startswith(prefix):
-            nombre_lower = nombre_lower[len(prefix):]
-            break
+    nombre_lower = _strip_prefixes(nombre).lower()
+
+    # Cache con TTL de 5 minutos
+    import time
+    cache_key = nombre_lower
+    if cache_key in _exe_cache:
+        cached_time = _exe_cache_time.get(cache_key, 0)
+        if time.time() - cached_time < 300:  # 5 minutos
+            return _exe_cache[cache_key]
 
     shortcut = buscar_en_start_menu(nombre)
     if shortcut:
+        _exe_cache[cache_key] = shortcut
+        _exe_cache_time[cache_key] = time.time()
         return shortcut
+
+    # Sanitizar nombre para prevenir inyeccion
+    if not re.match(r'^[a-zA-Z0-9\s\.\-_]+$', nombre_lower):
+        logger.warning(f"Nombre de app rechazado por caracteres invalidos: {nombre_lower}")
+        return ""
 
     if platform.system() == "Windows":
         try:
@@ -430,84 +566,37 @@ def buscar_exe(nombre: str) -> str:
 
 def abrir_url(url: str) -> str:
     """Abre una URL en el navegador por defecto."""
-    # Limpiar la URL
     url = url.strip()
     if not url.startswith("http://") and not url.startswith("https://"):
-        # Detectar si es un sitio conocido
-        sitios_conocidos = {
-            "youtube": "https://www.youtube.com",
-            "google": "https://www.google.com",
-            "gmail": "https://mail.google.com",
-            "github": "https://github.com",
-            "stack overflow": "https://stackoverflow.com",
-            "stackoverflow": "https://stackoverflow.com",
-            "twitter": "https://twitter.com",
-            "x": "https://x.com",
-            "facebook": "https://www.facebook.com",
-            "instagram": "https://www.instagram.com",
-            "reddit": "https://www.reddit.com",
-            "whatsapp web": "https://web.whatsapp.com",
-            "whatsappweb": "https://web.whatsapp.com",
-            "netflix": "https://www.netflix.com",
-            "spotify": "https://open.spotify.com",
-            "twitch": "https://www.twitch.tv",
-            "amazon": "https://www.amazon.com",
-            "wikipedia": "https://es.wikipedia.org",
-            "drive": "https://drive.google.com",
-            "google drive": "https://drive.google.com",
-            "maps": "https://maps.google.com",
-            "google maps": "https://maps.google.com",
-            "translate": "https://translate.google.com",
-            "google translate": "https://translate.google.com",
-            "chatgpt": "https://chat.openai.com",
-            "copilot": "https://copilot.microsoft.com",
-            "outlook": "https://outlook.live.com",
-            "notion": "https://www.notion.so",
-            "figma": "https://www.figma.com",
-            "canva": "https://www.canva.com",
-            "trello": "https://trello.com",
-        }
-        url_lower = url.lower().strip()
-        for prefix in ["abre ", "abrir ", "open ", "ve a ", "ir a ", "navega a "]:
-            if url_lower.startswith(prefix):
-                url_lower = url_lower[len(prefix):]
-                break
-        if url_lower in sitios_conocidos:
-            url = sitios_conocidos[url_lower]
+        url_lower = _strip_prefixes(url).lower()
+        if url_lower in SITIOS_CONOCIDOS:
+            url = SITIOS_CONOCIDOS[url_lower]
         elif "." in url_lower:
             url = "https://" + url_lower
         else:
             return f"No puedo determinar la URL para '{url}'. Intenta con una URL completa como https://www.youtube.com"
 
-    if platform.system() == "Windows":
-        resultado = ejecutar_comando(f'start "" "{url}"')
-    elif platform.system() == "Darwin":
-        resultado = ejecutar_comando(f'open "{url}"')
-    else:
-        resultado = ejecutar_comando(f'xdg-open "{url}"')
+    # Validar esquema de URL (solo http/https)
+    import urllib.parse
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https", ""):
+        return f"Esquema de URL no permitido: {parsed.scheme}. Solo se permite http:// y https://"
 
-    if not resultado or resultado == "(sin salida)":
-        return f"URL abierta en el navegador: {url}"
-    if "error" not in resultado.lower():
+    resultado = _open_in_browser(url)
+    if not resultado or resultado == "(sin salida)" or "error" not in resultado.lower():
         return f"URL abierta en el navegador: {url}"
     return f"Error al abrir URL: {resultado}"
 
 
 def abrir_aplicacion(app: str) -> str:
-    app_clean = app.lower().strip()
-    for prefix in ["abre ", "abrir ", "open ", "inicia ", "lanza ", "mi "]:
-        if app_clean.startswith(prefix):
-            app_clean = app_clean[len(prefix):]
-            break
+    app_clean = _strip_prefixes(app).lower()
 
     # Si parece una URL o sitio web, usar abrir_url en su lugar
     indicadores_url = ["http://", "https://", "www.", ".com", ".org", ".net", ".io"]
     if any(ind in app_clean for ind in indicadores_url):
         return abrir_url(app)
 
-    sitios_web = ["youtube", "google", "gmail", "facebook", "instagram", "twitter",
-                  "netflix", "spotify", "reddit", "whatsapp web", "chatgpt", "copilot"]
-    if app_clean in sitios_web:
+    if app_clean in SITIOS_CONOCIDOS:
         return abrir_url(app_clean)
 
     aliases = {
@@ -550,27 +639,17 @@ def abrir_aplicacion(app: str) -> str:
 def buscar_youtube(consulta: str) -> str:
     """Busca un video en YouTube y lo abre en el navegador."""
     import urllib.parse
-    consulta_clean = consulta.strip()
-    for prefix in ["busca ", "buscar ", "pon ", "ponme ", "reproduce "]:
-        if consulta_clean.lower().startswith(prefix):
-            consulta_clean = consulta_clean[len(prefix):]
-
+    consulta_clean = _strip_prefixes(consulta)
     encoded = urllib.parse.quote(consulta_clean)
     url = f"https://www.youtube.com/results?search_query={encoded}"
 
-    if platform.system() == "Windows":
-        resultado = ejecutar_comando(f'start "" "{url}"')
-    elif platform.system() == "Darwin":
-        resultado = ejecutar_comando(f'open "{url}"')
-    else:
-        resultado = ejecutar_comando(f'xdg-open "{url}"')
-
+    resultado = _open_in_browser(url)
     if not resultado or resultado == "(sin salida)" or "error" not in resultado.lower():
         return f"Buscando '{consulta_clean}' en YouTube. Deberia abrirse en tu navegador."
     return f"Abriendo YouTube con la busqueda: {consulta_clean}"
 
 
-def generar_codigo(descripcion: str, tipo: str, ruta: str) -> str:
+def generar_codigo(descripcion: str, tipo: str, ruta: str = "") -> str:
     """Genera codigo/texto completo usando el LLM y lo guarda en un archivo."""
     if not ruta:
         ext_map = {
@@ -949,7 +1028,7 @@ class LearningSystem:
 
     def get_corrections_for(self, user_msg: str) -> list:
         corrections = self._load(CORRECTIONS_FILE, [])
-        msg_lower = user_message.lower() if False else user_msg.lower()
+        msg_lower = user_msg.lower()
         relevant = []
         for c in corrections:
             if any(w in msg_lower for w in c["user_message"].lower().split() if len(w) > 3):
@@ -990,33 +1069,33 @@ def _get_embedding(text: str) -> list:
     if cache_key in _EMBED_CACHE:
         return _EMBED_CACHE[cache_key]
 
+    # Detectar modelo de embeddings (solo la primera vez)
+    embed_model = _detect_embed_model()
+
     try:
         import urllib.request
-        # Intentar modelos de embeddings en orden de preferencia
-        embed_models = ["nomic-embed-text", "mxbai-embed-large", "all-minilm"]
-        for embed_model in embed_models:
-            data = json.dumps({
-                "model": embed_model,
-                "prompt": text[:2000]  # Limitar texto
-            }).encode("utf-8")
-            req = urllib.request.Request(
-                "http://localhost:11434/api/embeddings",
-                data=data, headers={"Content-Type": "application/json"}
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                result = json.loads(resp.read().decode("utf-8"))
-                embedding = result.get("embedding", [])
-                if embedding:
-                    # Guardar en cache
-                    if len(_EMBED_CACHE) >= _EMBED_CACHE_MAX:
-                        # Eliminar las entradas mas viejas (FIFO simple)
-                        oldest_keys = list(_EMBED_CACHE.keys())[:_EMBED_CACHE_MAX // 2]
-                        for k in oldest_keys:
-                            del _EMBED_CACHE[k]
-                    _EMBED_CACHE[cache_key] = embedding
-                    return embedding
-    except Exception:
-        pass
+        data = json.dumps({
+            "model": embed_model,
+            "prompt": text[:2000]
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "http://localhost:11434/api/embeddings",
+            data=data, headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            embedding = result.get("embedding", [])
+            if embedding:
+                # Guardar en cache con LRU
+                if len(_EMBED_CACHE) >= _EMBED_CACHE_MAX:
+                    # Eliminar las entradas mas viejas
+                    oldest_keys = list(_EMBED_CACHE.keys())[:_EMBED_CACHE_MAX // 2]
+                    for k in oldest_keys:
+                        del _EMBED_CACHE[k]
+                _EMBED_CACHE[cache_key] = embedding
+                return embedding
+    except Exception as e:
+        logger.warning(f"Error obteniendo embedding: {e}")
     return []
 
 
@@ -1530,21 +1609,66 @@ def _detect_best_model() -> str:
     return AGENT_MODEL
 
 
+# Cache de conexion Ollama exitosa - evita probar 12+ combinaciones cada vez
+_ollama_client = None
+_ollama_working_host = None
+_ollama_working_method = None  # "client", "global", "http"
+_ollama_embed_model = None  # Modelo de embeddings detectado
+
+
+def _get_ollama_client():
+    """Obtiene o crea un Ollama Client singleton."""
+    global _ollama_client
+    if _ollama_client is None:
+        try:
+            import ollama
+            host = _ollama_working_host or 'http://localhost:11434'
+            _ollama_client = ollama.Client(host=host)
+        except Exception:
+            pass
+    return _ollama_client
+
+
+def _detect_embed_model() -> str:
+    """Detecta que modelo de embeddings esta disponible. Se ejecuta UNA vez."""
+    global _ollama_embed_model
+    if _ollama_embed_model:
+        return _ollama_embed_model
+
+    embed_models = ["nomic-embed-text", "mxbai-embed-large", "all-minilm"]
+    try:
+        import urllib.request
+        req = urllib.request.Request("http://localhost:11434/api/tags")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            available = [m["name"].lower() for m in data.get("models", [])]
+            for candidate in embed_models:
+                for avail in available:
+                    if candidate in avail:
+                        _ollama_embed_model = candidate
+                        logger.info(f"Modelo de embeddings detectado: {candidate}")
+                        return candidate
+    except Exception as e:
+        logger.warning(f"No se pudo detectar modelo de embeddings: {e}")
+
+    _ollama_embed_model = "nomic-embed-text"  # Default
+    return _ollama_embed_model
+
+
 def _llm_generate(messages: list, tools: list = None) -> str:
-    """Consulta al LLM local. Prueba TODOS los modelos y TODOS los metodos.
+    """Consulta al LLM local. Usa cache de conexion exitosa para velocidad.
     Retorna: str (texto del LLM) o dict (respuesta completa con tool_calls).
     Retorna "" si todo falla.
     """
+    global _ollama_working_host, _ollama_working_method, _ollama_client
+
     # Asegurar que tenemos modelo detectado
     _detect_best_model()
 
     # Modelos a probar en orden
-    models_to_try = [AGENT_MODEL]
-    if FALLBACK_MODEL and FALLBACK_MODEL != AGENT_MODEL:
-        models_to_try.append(FALLBACK_MODEL)
-
-    # Filtrar modelos None
-    models_to_try = [m for m in models_to_try if m]
+    models_to_try = [m for m in [AGENT_MODEL, FALLBACK_MODEL] if m and m != AGENT_MODEL]
+    models_to_try.insert(0, AGENT_MODEL)
+    models_to_try = list(dict.fromkeys(models_to_try))  # Eliminar duplicados manteniendo orden
 
     if not models_to_try:
         return ""
@@ -1555,59 +1679,90 @@ def _llm_generate(messages: list, tools: list = None) -> str:
             return 180
         return 120
 
-    errors = []  # Recolectar errores para diagnostico
+    errors = []
 
+    # ---- ESTRATEGIA 1: Probar conexion exitosa previa primero ----
+    if _ollama_working_host and _ollama_working_method and AGENT_MODEL:
+        try:
+            import ollama
+            if _ollama_working_method == "client":
+                client = _get_ollama_client() or ollama.Client(host=_ollama_working_host)
+                if tools:
+                    response = client.chat(model=AGENT_MODEL, messages=messages, tools=tools)
+                    msg = response.get("message", response)
+                    if msg.get("content") or msg.get("tool_calls"):
+                        return response
+                else:
+                    response = client.chat(model=AGENT_MODEL, messages=messages)
+                    content = response.get("message", {}).get("content", "")
+                    if content:
+                        return content
+            elif _ollama_working_method == "http":
+                import urllib.request
+                data = json.dumps({
+                    "model": AGENT_MODEL, "messages": messages, "stream": False
+                }).encode("utf-8")
+                req = urllib.request.Request(
+                    f"{_ollama_working_host}/api/chat",
+                    data=data, headers={"Content-Type": "application/json"}
+                )
+                timeout = _get_timeout(AGENT_MODEL)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    result = json.loads(resp.read().decode("utf-8"))
+                    content = result.get("message", {}).get("content", "")
+                    if content:
+                        return content
+        except Exception as e:
+            errors.append(f"cached method failed: {str(e)[:60]}")
+            # Resetear cache y probar de nuevo
+            _ollama_working_method = None
+
+    # ---- ESTRATEGIA 2: Buscar conexion que funcione ----
     try:
         import ollama
+        hosts = ['http://localhost:11434', 'http://127.0.0.1:11434']
 
-        # Intentar con function calling nativo si hay tools
+        # Con function calling nativo si hay tools
         if tools:
             for model in models_to_try:
-                for host in ['http://localhost:11434', 'http://127.0.0.1:11434']:
+                for host in hosts:
                     try:
                         client = ollama.Client(host=host)
                         response = client.chat(model=model, messages=messages, tools=tools)
-                        # Verificar que la respuesta tiene contenido o tool_calls
                         msg = response.get("message", response)
-                        has_content = msg.get("content", "")
-                        has_tools = msg.get("tool_calls", [])
-                        if has_content or has_tools:
-                            return response  # Retorna el objeto completo
+                        if msg.get("content") or msg.get("tool_calls"):
+                            # Guardar como conexion exitosa
+                            _ollama_working_host = host
+                            _ollama_working_method = "client"
+                            _ollama_client = client
+                            logger.info(f"LLM conectado: {model}@{host} con tools")
+                            return response
                         errors.append(f"{model}@{host}: respuesta vacia con tools")
                     except Exception as e:
-                        errors.append(f"{model}@{host} tools: {str(e)[:80]}")
+                        errors.append(f"{model}@{host} tools: {str(e)[:60]}")
                         continue
 
-        # Sin tools (o si fallaron los tools) - Intentar con Client
+        # Sin tools - Intentar con Client
         for model in models_to_try:
-            for host in ['http://localhost:11434', 'http://127.0.0.1:11434']:
+            for host in hosts:
                 try:
                     client = ollama.Client(host=host)
                     response = client.chat(model=model, messages=messages)
                     content = response.get("message", {}).get("content", "")
                     if content:
+                        _ollama_working_host = host
+                        _ollama_working_method = "client"
+                        _ollama_client = client
                         return content
-                    errors.append(f"{model}@{host}: respuesta vacia sin tools")
+                    errors.append(f"{model}@{host}: respuesta vacia")
                 except Exception as e:
-                    errors.append(f"{model}@{host}: {str(e)[:80]}")
+                    errors.append(f"{model}@{host}: {str(e)[:60]}")
                     continue
-
-        # ollama.chat() sin Client (modulo global)
-        for model in models_to_try:
-            try:
-                response = ollama.chat(model=model, messages=messages)
-                content = response.get("message", {}).get("content", "")
-                if content:
-                    return content
-                errors.append(f"{model} global: respuesta vacia")
-            except Exception as e:
-                errors.append(f"{model} global: {str(e)[:80]}")
-                continue
 
     except ImportError:
         errors.append("ollama no instalado, usando HTTP directo")
 
-    # HTTP directo como ultimo recurso (funciona sin lib ollama)
+    # ---- ESTRATEGIA 3: HTTP directo (sin lib ollama) ----
     for model in models_to_try:
         timeout = _get_timeout(model)
         try:
@@ -1623,10 +1778,12 @@ def _llm_generate(messages: list, tools: list = None) -> str:
                 result = json.loads(resp.read().decode("utf-8"))
                 content = result.get("message", {}).get("content", "")
                 if content:
+                    _ollama_working_host = "http://localhost:11434"
+                    _ollama_working_method = "http"
                     return content
                 errors.append(f"{model} HTTP: respuesta vacia")
         except Exception as e:
-            errors.append(f"{model} HTTP: {str(e)[:80]}")
+            errors.append(f"{model} HTTP: {str(e)[:60]}")
             continue
 
     # Si llegamos aqui, todo fallo - guardar diagnostico
