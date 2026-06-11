@@ -1,31 +1,31 @@
 """
 =============================================================
-AGENTE LOCAL AUTONOMO v9 - INTELIGENCIA REAL
-Piensa → Planifica → Ejecuta → Evalua → Aprende → Se corrige
+AGENTE LOCAL AUTONOMO v10 - INTELIGENCIA CREATIVA
+Piensa → Planifica → Genera → Ejecuta → Evalua → Aprende
 Consulta IA cloud si necesita ayuda
 =============================================================
 
-FILOSOFIA v9:
-  NO mas listas hardcodeadas de apps, patrones, ni parches.
-  El LLM PIENSA y decide. Las funciones BUSCAN inteligentemente.
-  Cuando se equivoca, APRENDE y no repite el error.
+FILOSOFIA v10:
+  El agente no solo EJECUTA acciones, tambien GENERA contenido.
+  Cuando el usuario pide crear algo (juego, pagina, script),
+  el agente usa el LLM para GENERAR el contenido completo,
+  no solo decidir que herramienta usar.
 
-ARQUITECTURA:
-  Usuario → LLM piensa (SIEMPRE, cuando esta disponible)
+DIFERENCIA vs v9:
+  v9:  Elige acciones → ejecuta. Pero escribir_archivo recibe contenido vacio.
+  v10: Detecta solicitudes CREATIVAS → usa generar_contenido() para que
+       el LLM genere el codigo/texto completo → luego lo escribe al archivo.
+       El agente ahora puede CREAR, no solo EJECUTAR.
+
+ARQUITECTURA v10:
+  Usuario → LLM piensa (SIEMPRE)
                 ↓
          Es conversacion? → Responde natural
-         Es accion?       → Planifica → Ejecuta → Evalua
-         No esta seguro?  → Pregunta al usuario
+         Es accion simple? → Planifica → Ejecuta → Evalua
+         Es solicitud CREATIVA? → generar_contenido() → escribir_archivo() → abrir
                 ↓
-         Si falla → Busca alternativas → Si se atasca → Consulta cloud
-         Si acierta → Aprende el patron para la proxima
-                ↓
-         Si el usuario corrige → Guarda la correccion para siempre
-
-DIFERENCIA vs v8.1:
-  v8.1: Listas de apps hardcodeadas, es_conversacion con 40+ nombres
-  v9:   LLM decide todo, buscar_exe usa Start Menu de Windows (como lo hace Windows),
-        sistema de correcciones persistente, aprende de sus errores
+         Si falla → Busca alternativas → Consulta cloud
+         Si acierta → Aprende el patron
 =============================================================
 """
 
@@ -453,13 +453,14 @@ TOOL_FUNCTIONS = {
 
 TOOL_DESCRIPTIONS = """
 - conversar(mensaje) - Para SALUDOS, preguntas generales, charla. NUNCA para abrir apps.
+- generar_contenido(descripcion, tipo, ruta) - GENERA contenido creativo usando el LLM. Para cuando el usuario pide CREAR algo: juegos, paginas web, scripts, documentos, etc. El LLM genera el contenido COMPLETO y lo guarda en el archivo. tipo puede ser: "html", "python", "javascript", "css", "json", "markdown", "texto". descripcion es que quiere crear.
 - ejecutar_comando(comando) - Ejecuta CUALQUIER comando en la terminal.
 - clonar_repositorio(url) - Clona un repo de GitHub.
 - instalar_dependencias(ruta, gestor="auto") - Instala deps. Detecta npm/pip/poetry.
 - leer_archivo(ruta) - Lee el contenido de un archivo.
 - listar_archivos(ruta) - Lista archivos y carpetas de un directorio.
 - analizar_proyecto(ruta) - Analiza la estructura completa de un proyecto.
-- escribir_archivo(ruta, contenido) - Crea o modifica un archivo.
+- escribir_archivo(ruta, contenido) - Crea o modifica un archivo. SOLO usar cuando ya tienes el contenido exacto. Para generar contenido, usar generar_contenido.
 - abrir_aplicacion(app) - Abre CUALQUIER aplicacion por nombre. Busca automaticamente en el Start Menu, registro y disco. No necesita saber el .exe exacto.
 """
 
@@ -557,14 +558,19 @@ Tu trabajo es ANALIZAR la solicitud del usuario y decidir que hacer.
 REGLAS FUNDAMENTALES:
 1. Si el usuario SALUDA o HABLA contigo → usa "conversar"
 2. Si el usuario pide ABRIR algo → usa "abrir_aplicacion" (busca automaticamente, no necesitas saber el .exe)
-3. Si el usuario pide HACER algo concreto → crea un plan con las herramientas necesarias
-4. NUNCA uses escribir_archivo para responder preguntas o saludos
-5. NUNCA digas que algo "no existe" solo por el nombre — deja que las herramientas lo busquen
+3. Si el usuario pide CREAR algo (juego, pagina, script, codigo, documento) → usa "generar_contenido" NUNCA escribir_archivo con contenido vacio
+4. Si el usuario pide HACER algo concreto → crea un plan con las herramientas necesarias
+5. NUNCA uses escribir_archivo para responder preguntas o saludos
+6. NUNCA uses escribir_archivo con contenido generico como "codigo HTML" — usa generar_contenido
+7. NUNCA digas que algo "no existe" solo por el nombre — deja que las herramientas lo busquen
 
 PIENSA ASI:
 - "hola como estas?" → Es un saludo, usar conversar
 - "whatsapp" → Quiere abrir WhatsApp, usar abrir_aplicacion
 - "autocad 2025" → Quiere abrir AutoCAD, usar abrir_aplicacion
+- "haz un juego en html" → Quiere CREAR un juego, usar generar_contenido
+- "crea una pagina web" → Quiere CREAR una pagina, usar generar_contenido
+- "escribe un script de python" → Quiere CREAR un script, usar generar_contenido
 - "clona https://github.com/..." → Quiere clonar un repo, crear plan
 - "que es Python?" → Es una pregunta, usar conversar
 - "no funciona" → Algo fallo, diagnosticar con herramientas
@@ -620,15 +626,39 @@ Respuesta:
     "siguiente_paso_sugerido": ""
 }}
 
-Usuario: "autocad 2025"
+Usuario: "vamos hacer un juego en html"
 Respuesta:
 {{
-    "analisis": "El usuario quiere abrir AutoCAD 2025. Es una accion, no una conversacion.",
+    "analisis": "El usuario quiere CREAR un juego en HTML. Necesito GENERAR el contenido completo del juego, no solo abrir notepad.",
     "plan": [
-        {{"paso": 1, "accion": "abrir_aplicacion", "params": {{"app": "autocad"}}, "razon": "Abrir AutoCAD, la funcion buscara el ejecutable automaticamente"}}
+        {{"paso": 1, "accion": "generar_contenido", "params": {{"descripcion": "un juego interactivo en HTML5 Canvas con naves espaciales, disparos, enemigos, puntuacion y efectos visuales", "tipo": "html", "ruta": "REPOS_DIR/juego_espacial.html"}}, "razon": "Generar el juego HTML completo con Canvas y JavaScript"}},
+        {{"paso": 2, "accion": "abrir_aplicacion", "params": {{"app": "chrome"}}, "razon": "Abrir el navegador para que el usuario vea el juego"}}
     ],
-    "riesgos": ["AutoCAD puede no estar instalado"],
-    "siguiente_paso_sugerido": ""
+    "riesgos": ["El LLM puede generar codigo con errores"],
+    "siguiente_paso_sugerido": "Si el juego no funciona, puedo revisar y corregir el codigo"
+}}
+
+Usuario: "crea una pagina web para mi portafolio"
+Respuesta:
+{{
+    "analisis": "El usuario quiere CREAR una pagina web de portafolio. Necesito generar el HTML/CSS/JS completo.",
+    "plan": [
+        {{"paso": 1, "accion": "generar_contenido", "params": {{"descripcion": "pagina web de portafolio profesional con secciones: hero, sobre mi, proyectos, contacto. Diseño moderno con CSS gradientes, animaciones y responsive", "tipo": "html", "ruta": "REPOS_DIR/portafolio.html"}}, "razon": "Generar la pagina web completa"}},
+        {{"paso": 2, "accion": "abrir_aplicacion", "params": {{"app": "chrome"}}, "razon": "Abrir el navegador para ver el resultado"}}
+    ],
+    "riesgos": [],
+    "siguiente_paso_sugerido": "Puedo agregar mas secciones o modificar el diseno"
+}}
+
+Usuario: "escribe un script de python para automatizar backups"
+Respuesta:
+{{
+    "analisis": "El usuario quiere CREAR un script de Python. Necesito generar el codigo completo.",
+    "plan": [
+        {{"paso": 1, "accion": "generar_contenido", "params": {{"descripcion": "script de Python para automatizar backups de carpetas, con compresion zip, logging y programacion de tareas", "tipo": "python", "ruta": "REPOS_DIR/backup_auto.py"}}, "razon": "Generar el script completo"}}
+    ],
+    "riesgos": ["Las rutas de carpetas pueden necesitar ajuste"],
+    "siguiente_paso_sugerido": "Ejecutar el script para probarlo"
 }}
 
 Usuario: "clona mi repo https://github.com/yecos/signalTrade"
@@ -959,6 +989,13 @@ class AgentBrain:
         if action == "conversar":
             return self._conversar(params.get("mensaje", ""))
 
+        if action == "generar_contenido":
+            return self._generar_contenido(
+                params.get("descripcion", ""),
+                params.get("tipo", "html"),
+                params.get("ruta", "")
+            )
+
         if action in TOOL_FUNCTIONS:
             try:
                 return TOOL_FUNCTIONS[action](**params)
@@ -969,6 +1006,111 @@ class AgentBrain:
         else:
             return f"Herramienta no encontrada: {action}"
 
+    def _generar_contenido(self, descripcion: str, tipo: str, ruta: str) -> str:
+        """
+        El superpoder del agente: GENERAR contenido usando el LLM.
+        Esto es lo que diferencia v10 de versiones anteriores.
+        El LLM genera codigo/texto completo, no solo decide que hacer.
+        """
+        self._log(f"Generando contenido: {descripcion} ({tipo})", "creative")
+
+        # Resolver ruta
+        if not ruta:
+            ext_map = {
+                "html": ".html", "python": ".py", "javascript": ".js",
+                "css": ".css", "json": ".json", "markdown": ".md", "texto": ".txt"
+            }
+            ext = ext_map.get(tipo, ".txt")
+            safe_name = re.sub(r'[^a-z0-9]', '_', descripcion[:30].lower()).strip('_')
+            ruta = os.path.join(REPOS_DIR, f"{safe_name}{ext}")
+        else:
+            ruta = ruta.replace("REPOS_DIR", REPOS_DIR)
+
+        # Crear el prompt especializado para generar contenido
+        tipo_prompts = {
+            "html": (
+                "Eres un desarrollador web EXPERTO. Genera una pagina web HTML COMPLETA y FUNCIONAL.\n"
+                "REGLAS:\n"
+                "- TODO debe estar en un SOLO archivo HTML (HTML + CSS inline en <style> + JavaScript en <script>)\n"
+                "- El CSS debe ser moderno, con gradientes, sombras, animaciones\n"
+                "- El JavaScript debe ser funcional, no pseudocodigo\n"
+                "- Si es un juego: usa HTML5 Canvas, con game loop, controles, colisiones, puntuacion\n"
+                "- Si es una pagina: responsive, con secciones completas, no vacias\n"
+                "- NO uses placeholder, TODO debe funcionar al abrir en el navegador\n"
+                "- Responde SOLO con el codigo HTML, sin explicaciones, sin markdown"
+            ),
+            "python": (
+                "Eres un desarrollador Python EXPERTO. Genera un script Python COMPLETO y FUNCIONAL.\n"
+                "REGLAS:\n"
+                "- El codigo debe ser ejecutable directamente\n"
+                "- Incluye imports, funciones, manejo de errores\n"
+                "- Si necesita dependencias, incluyelas en un comentario al inicio\n"
+                "- NO uses pseudocodigo ni placeholders\n"
+                "- Responde SOLO con el codigo Python, sin explicaciones"
+            ),
+            "javascript": (
+                "Eres un desarrollador JavaScript EXPERTO. Genera codigo JavaScript COMPLETO.\n"
+                "REGLAS:\n"
+                "- El codigo debe ser funcional y ejecutable\n"
+                "- Incluye manejo de errores\n"
+                "- Responde SOLO con el codigo, sin explicaciones"
+            ),
+            "css": (
+                "Eres un diseador CSS EXPERTO. Genera estilos CSS modernos y completos.\n"
+                "- Responde SOLO con el codigo CSS"
+            ),
+            "json": (
+                "Genera un JSON valido y bien estructurado.\n"
+                "- Responde SOLO con el JSON, sin explicaciones"
+            ),
+            "markdown": (
+                "Genera un documento Markdown bien formateado y completo.\n"
+                "- Responde SOLO con el Markdown"
+            ),
+        }
+
+        system_prompt = tipo_prompts.get(tipo, (
+            "Genera contenido completo y funcional. "
+            "Responde SOLO con el contenido, sin explicaciones ni markdown."
+        ))
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Crea: {descripcion}"}
+        ]
+
+        self._log(f"Llamando al LLM para generar {tipo}...", "creative")
+        contenido = self._ask_llm(messages)
+
+        if not contenido:
+            return "ERROR: No se pudo generar contenido (Ollama no responde)"
+
+        # Limpiar el contenido: quitar markdown code blocks si el LLM los puso
+        contenido = contenido.strip()
+        if contenido.startswith("```"):
+            # Quitar ```html, ```python, ```javascript, etc.
+            contenido = re.sub(r'^```[a-z]*\n?', '', contenido)
+            contenido = re.sub(r'\n?```$', '', contenido)
+            contenido = contenido.strip()
+
+        # Escribir el archivo
+        resultado = escribir_archivo(ruta, contenido)
+
+        if "ERROR" in resultado:
+            return resultado
+
+        # Si es HTML, abrir en el navegador automaticamente
+        if tipo == "html" and platform.system() == "Windows":
+            abrir_result = ejecutar_comando(f'start "" "{ruta}"')
+            if not abrir_result or abrir_result == "(sin salida)":
+                return f"Contenido generado y guardado en: {ruta}\nAbierto en el navegador automaticamente!"
+            return f"Contenido generado y guardado en: {ruta}\nAbrelo en tu navegador para verlo."
+
+        size_kb = len(contenido) / 1024
+        self._log(f"Contenido generado: {size_kb:.1f}KB", "creative")
+
+        return f"Contenido generado ({size_kb:.1f}KB) y guardado en: {ruta}"
+
     def _conversar(self, mensaje: str) -> str:
         """Responde de forma conversacional. Usa LLM para respuestas ricas."""
         msg = mensaje.lower().strip()
@@ -977,6 +1119,7 @@ class AgentBrain:
         saludos = ["hola", "hi", "hello", "hey", "buenos dias", "buenas", "que tal", "que onda", "saludos"]
         if any(msg.startswith(s) for s in saludos):
             return ("Hola! Soy tu agente autonomo local. Puedo hacer cosas como:\n"
+                    "- **CREAR cosas**: juegos HTML, paginas web, scripts (genero el codigo completo!)\n"
                     "- Abrir CUALQUIER aplicacion (busca automaticamente)\n"
                     "- Clonar y analizar repos de GitHub\n"
                     "- Ejecutar comandos en la terminal\n"
@@ -988,8 +1131,9 @@ class AgentBrain:
             return "Listo para trabajar! Tengo acceso a tu terminal. Dime que necesitas."
 
         if any(w in msg for w in ["quien eres", "que eres", "que haces"]):
-            return ("Soy un agente autonomo que PIENSA antes de actuar.\n"
+            return ("Soy un agente autonomo que PIENSA antes de actuar y ahora tambien CREA.\n"
                     "- Analizo tu solicitud y creo un plan\n"
+                    "- **Genero codigo completo** (juegos, paginas web, scripts)\n"
                     "- Busco automaticamente apps y archivos\n"
                     "- Si algo falla, busco alternativas\n"
                     "- Si me equivoco, aprendo y no repito el error\n"
@@ -1000,11 +1144,12 @@ class AgentBrain:
 
         if any(w in msg for w in ["ayuda", "help", "que puedes hacer"]):
             return ("Puedo hacer muchas cosas:\n\n"
+                    "**Crear cosas:** 'haz un juego en html', 'crea una pagina web', 'escribe un script'\n"
                     "**Abrir apps:** 'abre whatsapp', 'autocad', 'chrome'\n"
                     "**Repos:** 'clona https://github.com/usuario/repo'\n"
                     "**Archivos:** 'leer README.md', 'listar archivos'\n"
                     "**Terminal:** 'ejecuta git status', 'npm run dev'\n\n"
-                    "**Lo especial:** Busco automaticamente las apps, aprendo de mis errores, y consulto IA cloud si me atasco.")
+                    "**Lo especial:** Genero codigo completo, busco apps automaticamente, aprendo de mis errores, y consulto IA cloud si me atasco.")
 
         # Para todo lo demas, usar el LLM
         respuesta_llm = self._ask_llm([
@@ -1048,6 +1193,60 @@ class AgentBrain:
                 "analisis": "El usuario esta saludando",
                 "plan": [{"paso": 1, "accion": "conversar", "params": {"mensaje": user_message}, "razon": "Es un saludo"}],
                 "riesgos": [], "siguiente_paso_sugerido": ""
+            }
+
+        # ========================================
+        # DETECCION DE SOLICITUDES CREATIVAS (v10)
+        # ========================================
+        creative_keywords = [
+            "juego", "game", "crear", "crea", "haz", "hacer", "genera", "generar",
+            "pagina web", "webpage", "website", "sitio web", "portafolio", "portfolio",
+            "script", "programa", "aplicacion", "app", "calculator", "calculadora",
+            "formulario", "form", "dashboard", "landing", "blog", "tienda",
+            "escribir codigo", "escribe un", "code ", "programar", "desarrollar",
+            "dise\u00f1ar", "dise\u00f1o", "animacion", "canvas", "jugar"
+        ]
+        is_creative = any(kw in msg for kw in creative_keywords)
+
+        # Detectar tipo de archivo por extension o contexto
+        tipo_detectado = "texto"
+        ext_detectada = ".txt"
+        if "html" in msg or "web" in msg or "pagina" in msg or "juego" in msg or "game" in msg:
+            tipo_detectado = "html"
+            ext_detectada = ".html"
+        elif "python" in msg or ".py" in msg:
+            tipo_detectado = "python"
+            ext_detectada = ".py"
+        elif "javascript" in msg or ".js" in msg or "js " in msg:
+            tipo_detectado = "javascript"
+            ext_detectada = ".js"
+        elif "css" in msg or "estilo" in msg:
+            tipo_detectado = "css"
+            ext_detectada = ".css"
+        elif "json" in msg:
+            tipo_detectado = "json"
+            ext_detectada = ".json"
+
+        if is_creative:
+            safe_name = re.sub(r'[^a-z0-9]', '_', msg[:30].lower()).strip('_')
+            ruta = os.path.join(REPOS_DIR, f"{safe_name}{ext_detectada}")
+            plan_steps = [
+                {"paso": 1, "accion": "generar_contenido",
+                 "params": {"descripcion": user_message, "tipo": tipo_detectado, "ruta": ruta},
+                 "razon": "El usuario quiere crear algo - generar contenido completo"}
+            ]
+            # Si es HTML, abrir navegador despues
+            if tipo_detectado == "html":
+                plan_steps.append(
+                    {"paso": 2, "accion": "abrir_aplicacion",
+                     "params": {"app": "chrome"},
+                     "razon": "Abrir navegador para ver el resultado"}
+                )
+            return {
+                "analisis": f"Solicitud creativa detectada: {user_message}",
+                "plan": plan_steps,
+                "riesgos": ["El contenido generado puede necesitar ajustes"],
+                "siguiente_paso_sugerido": "Revisar y ajustar el contenido si es necesario"
             }
 
         # URLs de GitHub
@@ -1105,11 +1304,9 @@ class AgentBrain:
                 }
 
         # Si contiene algo que podria ser un nombre de app, intentar abrirlo
-        # (Heuristica: palabras con mayuscula inicial, o numeros de version como "2025")
         words = msg.split()
         has_version = any(re.match(r'\d{4}', w) for w in words)
         if has_version or (len(words) <= 3 and len(words[0]) > 2):
-            # Podria ser una app
             return {
                 "analisis": f"Posible solicitud de abrir app: {user_message}",
                 "plan": [{"paso": 1, "accion": "abrir_aplicacion", "params": {"app": user_message.strip()}, "razon": "Parece una app, intentar abrirla"}],
@@ -1176,7 +1373,7 @@ def procesar_mensaje(user_message: str) -> tuple:
 
 def main():
     st.set_page_config(
-        page_title="Agente Autonomo v9",
+        page_title="Agente Autonomo v10",
         page_icon="🧠",
         layout="wide"
     )
@@ -1210,6 +1407,7 @@ def main():
     .thinking-box .error { color: #ff4444; }
     .thinking-box .cloud { color: #44aaff; }
     .thinking-box .input { color: #88ff88; }
+    .thinking-box .creative { color: #ff88ff; font-weight: bold; }
 
     [data-testid="stChatMessage"] { border-radius: 12px; padding: 12px 16px; margin: 4px 0; }
 
@@ -1227,8 +1425,8 @@ def main():
     if "thinking_history" not in st.session_state:
         st.session_state.thinking_history = []
 
-    st.markdown('<div class="main-title">Agente Autonomo v9</div>', unsafe_allow_html=True)
-    st.markdown('<div class="main-subtitle">Piensa → Planifica → Ejecuta → Evalua → Aprende → Se corrige</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-title">Agente Autonomo v10</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-subtitle">Piensa → Planifica → Genera → Ejecuta → Evalua → Aprende</div>', unsafe_allow_html=True)
 
     # === SIDEBAR ===
     with st.sidebar:
