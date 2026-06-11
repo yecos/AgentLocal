@@ -685,29 +685,29 @@ class AgentBrain:
         self.thinking_log.append(f"[{timestamp}] [{category.upper()}] {message}")
 
     def _ask_llm(self, messages: list) -> str:
-        """Consulta al LLM local (Ollama). Prueba multiples formas de conectar."""
+        """Consulta al LLM local (Ollama). Usa Client explicito que SI conecta."""
         try:
             import ollama
 
-            # Metodo 1: Conexion directa (default)
-            try:
-                response = ollama.chat(model=AGENT_MODEL, messages=messages)
-                return response.get("message", {}).get("content", "")
-            except Exception:
-                pass
-
-            # Metodo 2: Cliente explicito con localhost
+            # Metodo principal: Client explicito con localhost (EL QUE FUNCIONA)
             try:
                 client = ollama.Client(host='http://localhost:11434')
                 response = client.chat(model=AGENT_MODEL, messages=messages)
                 return response.get("message", {}).get("content", "")
-            except Exception:
-                pass
+            except Exception as e:
+                self._log(f"Client(localhost) fallo: {e}", "warning")
 
-            # Metodo 3: Cliente con 127.0.0.1
+            # Metodo alternativo: Client con 127.0.0.1
             try:
                 client = ollama.Client(host='http://127.0.0.1:11434')
                 response = client.chat(model=AGENT_MODEL, messages=messages)
+                return response.get("message", {}).get("content", "")
+            except Exception as e:
+                self._log(f"Client(127.0.0.1) fallo: {e}", "warning")
+
+            # Metodo 3: Default (a veces funciona)
+            try:
+                response = ollama.chat(model=AGENT_MODEL, messages=messages)
                 return response.get("message", {}).get("content", "")
             except Exception:
                 pass
@@ -730,7 +730,7 @@ class AgentBrain:
                     result = json.loads(resp.read().decode("utf-8"))
                     return result.get("message", {}).get("content", "")
             except Exception as e2:
-                self._log(f"Error HTTP directo: {e2}", "error")
+                self._log(f"HTTP directo fallo: {e2}", "error")
 
             self._log("Todos los metodos de conexion a Ollama fallaron", "error")
             return ""
