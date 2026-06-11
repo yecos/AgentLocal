@@ -13,11 +13,13 @@ import logging
 from config import (
     REPOS_DIR, IS_WINDOWS, DEFAULT_TIMEOUT, LONG_TIMEOUT, MAX_TOOL_OUTPUT, logger
 )
-from utils.security import is_dangerous_command
+from utils.security import is_dangerous_command, sanitize_input
 
 
 def ejecutar_comando(comando: str, cwd: str = None, confirmar_peligroso: bool = False) -> str:
     """Ejecuta un comando en la terminal con VALIDACION de seguridad."""
+    # Sanitizar input del usuario
+    comando = sanitize_input(comando)
     cmd_lower = comando.lower()
 
     # Validar comandos peligrosos

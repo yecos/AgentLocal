@@ -10,7 +10,7 @@ import os
 import platform
 
 from config import REPOS_DIR, MAX_FILE_READ, MAX_TOOL_OUTPUT, IS_WINDOWS
-from utils.security import validate_path
+from utils.security import validate_path, sanitize_input
 from tools.sistema import ejecutar_comando
 
 
@@ -86,6 +86,8 @@ def listar_archivos(ruta: str = None) -> str:
 
 def buscar_en_archivos(ruta: str, patron: str) -> str:
     """Busca texto dentro de archivos (como grep/findstr)."""
+    # Sanitizar patron para prevenir inyeccion
+    patron = sanitize_input(patron)
     if IS_WINDOWS:
         return ejecutar_comando(f'findstr /s /i /n "{patron}" "{ruta}\\*"')
     else:

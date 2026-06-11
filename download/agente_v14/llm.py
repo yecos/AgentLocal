@@ -383,6 +383,94 @@ class OllamaClient:
         return self.generate(messages, model_override=self.code_model)
 
     # ----------------------------------------------------------
+    # MULTIMODAL (vision - imagenes)
+    # ----------------------------------------------------------
+
+    def generate_with_image(self, text, image_path, model_override=None):
+        """
+        Genera respuesta del LLM con una imagen (multimodal/vision).
+        Soporta modelos como llava, llama3.2-vision, etc.
+        Retorna: str con la descripcion/respuesta sobre la imagen.
+        """
+        self.detect_models()
+        
+        # Buscar modelo con capacidad de vision
+        vision_model = self._detect_vision_model()
+        model = model_override or vision_model or self.model
+        
+        try:
+            import base64
+            with open(image_path, "rb") as f:
+                image_data = base64.b64encode(f.read()).decode("utf-8")
+            
+            # Detectar tipo de imagen
+            ext = image_path.lower().split(".")[-1]
+            mime_type = {
+                "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "png": "image/png", "gif": "image/gif",
+                "webp": "image/webp",
+            }.get(ext, "image/jpeg")
+
+            messages = [{
+                "role": "user",
+                "content": text,
+                "images": [image_data]
+            }]
+
+            # Intentar via HTTP
+            for host in ['http://localhost:11434', 'http://127.0.0.1:11434']:
+                try:
+                    payload = {
+                        "model": model,
+                        "messages": messages,
+                        "stream": False
+                    }
+                    data = json.dumps(payload).encode("utf-8")
+                    req = urllib.request.Request(
+                        f"{host}/api/chat",
+                        data=data,
+                        headers={"Content-Type": "application/json"}
+                    )
+                    with urllib.request.urlopen(req, timeout=LLM_TIMEOUT_LARGE) as resp:
+                        result = json.loads(resp.read().decode("utf-8"))
+                        content = result.get("message", {}).get("content", "")
+                        if content:
+                            return content
+                except Exception as e:
+                    logger.debug(f"Vision HTTP failed on {host}: {e}")
+
+            # Intentar via ollama client
+            try:
+                import ollama as ollama_lib
+                client = ollama_lib.Client(host='http://localhost:11434')
+                response = client.chat(
+                    model=model,
+                    messages=messages
+                )
+                return response.get("message", {}).get("content", "")
+            except Exception as e:
+                logger.debug(f"Vision client failed: {e}")
+
+        except FileNotFoundError:
+            return f"ERROR: Imagen no encontrada: {image_path}"
+        except Exception as e:
+            return f"ERROR en vision: {e}"
+
+        return "No se pudo procesar la imagen. Puede que el modelo no soporte vision."
+
+    def _detect_vision_model(self):
+        """Detecta si hay un modelo de vision disponible."""
+        available = self._fetch_available_models(refresh=False)
+        # Modelos con capacidad de vision
+        vision_patterns = ["llava", "llama3.2-vision", "minicpm-v", "bakllava", 
+                          "moondream", "llama3.1:8b", "qwen2.5-coder"]
+        for pattern in vision_patterns:
+            for model in available:
+                if pattern in model.lower():
+                    return model
+        return None
+
+    # ----------------------------------------------------------
     # GENERACION CON STREAMING
     # ----------------------------------------------------------
 

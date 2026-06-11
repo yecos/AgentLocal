@@ -213,13 +213,28 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "buscar_web",
-            "description": "Busca en internet cuando no sabes algo.",
+            "description": "Busca en internet cuando no sabes algo. Retorna resultados con links.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "consulta": {"type": "string", "description": "Consulta de busqueda"}
                 },
                 "required": ["consulta"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analizar_imagen",
+            "description": "Analiza una imagen usando vision AI. Describe lo que ve, lee texto de la imagen, o responde preguntas sobre ella. Necesita un modelo de vision instalado (llava, llama3.2-vision, etc).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ruta": {"type": "string", "description": "Ruta de la imagen a analizar"},
+                    "pregunta": {"type": "string", "description": "Pregunta sobre la imagen (por defecto: describela)"}
+                },
+                "required": ["ruta"]
             }
         }
     },

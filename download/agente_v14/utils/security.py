@@ -34,11 +34,37 @@ COMANDOS_SEGUROS = [
 
 
 def is_dangerous_command(comando: str) -> bool:
-    """Verifica si un comando es peligroso."""
-    cmd_lower = comando.lower()
+    """Verifica si un comando es peligroso. 
+    Comandos en la allowlist (COMANDOS_SEGUROS) nunca son peligrosos."""
+    cmd_lower = comando.lower().strip()
+    
+    # 1. Si empieza con un comando seguro, NO es peligroso
+    for seguro in COMANDOS_SEGUROS:
+        if cmd_lower.startswith(seguro):
+            return False
+    
+    # 2. Verificar contra lista de peligrosos
     for peligro in COMANDOS_PELIGROSOS:
         if peligro in cmd_lower:
             return True
+    
+    # 3. Detectar patrones sospechosos por regex
+    sospechosos = [
+        r';\s*rm\b',           # ; rm (encadenado)
+        r'&&\s*rm\b',          # && rm
+        r'\|\s*sh\b',          # | sh
+        r'\|\s*bash\b',        # | bash
+        r'>\s*/etc/',          # > /etc/
+        r'>\s*/dev/',          # > /dev/ (excepto null)
+        r'chmod\s+777',        # chmod 777
+        r'chown\s+root',       # chown root
+        r'sudo\s+rm\b',        # sudo rm
+        r'sudo\s+dd\b',        # sudo dd
+    ]
+    for pattern in sospechosos:
+        if re.search(pattern, cmd_lower):
+            return True
+    
     return False
 
 
