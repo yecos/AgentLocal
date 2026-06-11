@@ -1,19 +1,12 @@
 """
 =============================================================================
-  AGENTE AUTÓNOMO PRO v3 - Con Tool Calling NATIVO de Ollama
+  AGENTE AUTÓNOMO PRO v4 - Tool Calling + Auto-ejecución forzada
 =============================================================================
-  Esta versión usa la API nativa de tool/function calling de Ollama.
-  El modelo YA NO da instrucciones en texto - EJECUTA herramientas directamente
-  porque Ollama lo obliga a devolver llamadas estructuradas.
-
-  Modelos que soportan tool calling:
-  - qwen2.5:14b ✅ (recomendado)
-  - qwen2.5:7b ✅
-  - llama3.1:8b ✅
+  v4: Si el usuario pide clonar un repo y el modelo no lo hace,
+  lo ejecutamos AUTOMÁTICAMENTE. No dependemos 100% del modelo.
   
   Requisitos:
   pip install streamlit ollama chromadb pypdf ddgs psutil
-  Ollama >= 0.4
 =============================================================================
 """
 
@@ -21,16 +14,13 @@ import streamlit as st
 import ollama
 import json
 import os
-import sys
 import subprocess
 import platform
 import datetime
 import re
 import shutil
-import time
 import urllib.request
 import urllib.error
-from pathlib import Path
 
 # =====================================================================
 # CONFIGURACIÓN
@@ -39,13 +29,11 @@ from pathlib import Path
 AGENT_MODEL = "qwen2.5:14b"
 CHAT_MODEL = "llama3.1:8b"
 CODE_MODEL = "qwen2.5-coder:7b"
-
 IS_WINDOWS = platform.system() == "Windows"
 
 USER_HOME = os.path.expanduser("~")
 DOWNLOADS_DIR = os.path.join(USER_HOME, "Downloads")
 DOCUMENTS_DIR = os.path.join(USER_HOME, "Documents")
-DESKTOP_DIR = os.path.join(USER_HOME, "Desktop")
 PROJECTS_DIR = os.path.join(USER_HOME, "Projects")
 os.makedirs(PROJECTS_DIR, exist_ok=True)
 
@@ -59,7 +47,6 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "bridge_config.json")
 DANGEROUS_COMMANDS = [
     "rm ", "del ", "rmdir", "format", "mkfs", "dd ",
     "shutdown", "restart", "reboot",
-    "reg ", "registry", "net user", "net localgroup",
     "taskkill", "kill ", "pkill",
     "format ", "fdisk", "diskpart",
     "docker rm", "docker rmi", "docker system prune",
@@ -72,113 +59,41 @@ BLOCKED_COMMANDS = [
     "shutdown /s", "shutdown /r",
 ]
 
-DEFAULT_COMMAND_TIMEOUT = 120
-
 # =====================================================================
-# CONFIGURACIÓN DE PÁGINA
+# PÁGINA
 # =====================================================================
 
-st.set_page_config(
-    page_title="IA Local Pro - Agente Autónomo",
-    page_icon="🤖",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="IA Local Pro", page_icon="🤖", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
 <style>
     .stApp { max-width: 1400px; margin: 0 auto; }
-    .tool-result {
-        background: #1e1e2e;
-        border: 1px solid #45475a;
-        border-radius: 8px;
-        padding: 12px;
-        margin: 8px 0;
-        font-family: 'Consolas', monospace;
-        font-size: 13px;
-        color: #cdd6f4;
-        white-space: pre-wrap;
-        max-height: 400px;
-        overflow-y: auto;
-    }
-    .tool-cmd {
-        background: #1e1e2e;
-        border: 1px solid #89b4fa;
-        border-radius: 8px;
-        padding: 12px;
-        margin: 8px 0;
-        font-family: 'Consolas', monospace;
-        font-size: 13px;
-        color: #89b4fa;
-    }
-    .tool-success {
-        background: #1e1e2e;
-        border: 1px solid #a6e3a1;
-        border-radius: 8px;
-        padding: 12px;
-        margin: 8px 0;
-        color: #a6e3a1;
-    }
-    .bridge-box {
-        background: linear-gradient(135deg, #1e1e2e, #1e3a5f);
-        border: 1px solid #89b4fa;
-        border-radius: 10px;
-        padding: 16px;
-        margin: 12px 0;
-        color: #89b4fa;
-    }
-    .plan-box {
-        background: linear-gradient(135deg, #1e1e2e, #313244);
-        border: 1px solid #cba6f7;
-        border-radius: 10px;
-        padding: 16px;
-        margin: 12px 0;
-        color: #cba6f7;
-    }
+    .tool-result { background: #1e1e2e; border: 1px solid #45475a; border-radius: 8px; padding: 12px; margin: 8px 0; font-family: 'Consolas', monospace; font-size: 13px; color: #cdd6f4; white-space: pre-wrap; max-height: 400px; overflow-y: auto; }
+    .tool-cmd { background: #1e1e2e; border: 1px solid #89b4fa; border-radius: 8px; padding: 12px; margin: 8px 0; font-family: 'Consolas', monospace; font-size: 13px; color: #89b4fa; }
+    .tool-success { background: #1e1e2e; border: 1px solid #a6e3a1; border-radius: 8px; padding: 12px; margin: 8px 0; color: #a6e3a1; }
+    .tool-auto { background: #1e1e2e; border: 2px solid #f9e2af; border-radius: 8px; padding: 12px; margin: 8px 0; font-family: 'Consolas', monospace; font-size: 13px; color: #f9e2af; }
+    .bridge-box { background: linear-gradient(135deg, #1e1e2e, #1e3a5f); border: 1px solid #89b4fa; border-radius: 10px; padding: 16px; margin: 12px 0; color: #89b4fa; }
+    .plan-box { background: linear-gradient(135deg, #1e1e2e, #313244); border: 1px solid #cba6f7; border-radius: 10px; padding: 16px; margin: 12px 0; color: #cba6f7; }
 </style>
 """, unsafe_allow_html=True)
 
 # =====================================================================
-# IA BRIDGE - Conexión con IA en la nube
+# IA BRIDGE
 # =====================================================================
 
 PROVEEDORES = {
-    "groq": {
-        "nombre": "Groq (GRATIS - Súper rápido)",
-        "url_base": "https://api.groq.com/openai/v1",
-        "modelos": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768", "gemma2-9b-it"],
-        "modelo_default": "llama-3.3-70b-versatile",
-        "como_obtener_key": "https://console.groq.com/keys",
-        "gratis": True,
-        "descripcion": "Gratis, muy rápido, buenos modelos."
-    },
-    "openrouter": {
-        "nombre": "OpenRouter (Múltiples modelos)",
-        "url_base": "https://openrouter.ai/api/v1",
-        "modelos": ["meta-llama/llama-3.3-70b-instruct:free", "deepseek/deepseek-chat:free", "qwen/qwen-2.5-72b-instruct:free"],
-        "modelo_default": "meta-llama/llama-3.3-70b-instruct:free",
-        "como_obtener_key": "https://openrouter.ai/keys",
-        "gratis": True,
-        "descripcion": "Acceso a muchos modelos con opciones gratuitas."
-    },
-    "openai": {
-        "nombre": "OpenAI (GPT-4)",
-        "url_base": "https://api.openai.com/v1",
-        "modelos": ["gpt-4o", "gpt-4o-mini"],
-        "modelo_default": "gpt-4o-mini",
-        "como_obtener_key": "https://platform.openai.com/api-keys",
-        "gratis": False,
-        "descripcion": "La IA más conocida. De pago pero muy capaz."
-    },
-    "deepseek": {
-        "nombre": "DeepSeek (Barato y muy bueno)",
-        "url_base": "https://api.deepseek.com/v1",
-        "modelos": ["deepseek-chat", "deepseek-reasoner"],
-        "modelo_default": "deepseek-chat",
-        "como_obtener_key": "https://platform.deepseek.com/api_keys",
-        "gratis": False,
-        "descripcion": "Excelente para código a bajo precio."
-    }
+    "groq": {"nombre": "Groq (GRATIS)", "url_base": "https://api.groq.com/openai/v1",
+        "modelos": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
+        "modelo_default": "llama-3.3-70b-versatile", "como_obtener_key": "https://console.groq.com/keys", "gratis": True},
+    "openrouter": {"nombre": "OpenRouter", "url_base": "https://openrouter.ai/api/v1",
+        "modelos": ["meta-llama/llama-3.3-70b-instruct:free", "deepseek/deepseek-chat:free"],
+        "modelo_default": "meta-llama/llama-3.3-70b-instruct:free", "como_obtener_key": "https://openrouter.ai/keys", "gratis": True},
+    "openai": {"nombre": "OpenAI (GPT-4)", "url_base": "https://api.openai.com/v1",
+        "modelos": ["gpt-4o", "gpt-4o-mini"], "modelo_default": "gpt-4o-mini",
+        "como_obtener_key": "https://platform.openai.com/api-keys", "gratis": False},
+    "deepseek": {"nombre": "DeepSeek", "url_base": "https://api.deepseek.com/v1",
+        "modelos": ["deepseek-chat", "deepseek-reasoner"], "modelo_default": "deepseek-chat",
+        "como_obtener_key": "https://platform.deepseek.com/api_keys", "gratis": False},
 }
 
 def load_bridge_config():
@@ -186,9 +101,8 @@ def load_bridge_config():
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        except:
-            pass
-    return {"proveedor": "groq", "api_key": "", "modelo": "", "contexto_proyecto": "", "historial_consultas": []}
+        except: pass
+    return {"proveedor": "groq", "api_key": "", "modelo": "", "contexto_proyecto": ""}
 
 def save_bridge_config(config):
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
@@ -200,60 +114,37 @@ def call_cloud_api(url_base, api_key, model, messages, temperature=0.7, max_toke
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
     if "openrouter" in url_base:
         headers["HTTP-Referer"] = "https://ia-local.app"
-        headers["X-Title"] = "IA Local Pro"
     req = urllib.request.Request(endpoint, data=payload, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=60) as response:
             result = json.loads(response.read().decode('utf-8'))
             return {"success": True, "content": result["choices"][0]["message"]["content"]}
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode('utf-8', errors='replace')
-        try:
-            error_msg = json.loads(error_body).get("error", {}).get("message", error_body[:200])
-        except:
-            error_msg = error_body[:200]
-        return {"success": False, "error": f"HTTP {e.code}: {error_msg}"}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 def consultar_experto(pregunta, contexto="", modo="general"):
     config = load_bridge_config()
     if not config.get("api_key"):
-        return "❌ No hay API key configurada. Configúrala en ☁️ IA Bridge en el sidebar."
-    proveedor = config.get("proveedor", "groq")
-    prov_config = PROVEEDORES.get(proveedor, PROVEEDORES["groq"])
-    modelo = config.get("modelo") or prov_config["modelo_default"]
-    system_prompts = {
-        "general": "Eres un experto consultor. Respondes en español.",
-        "codigo": "Eres un programador experto senior. Código en inglés, explicaciones en español.",
-        "analisis": "Eres un analista de software experto. Respondes en español.",
-        "plan": "Eres un arquitecto de software. Creas planes detallados. Respondes en español."
-    }
+        return "❌ No hay API key. Configúrala en ☁️ IA Bridge en el sidebar."
+    prov = PROVEEDORES.get(config.get("proveedor", "groq"), PROVEEDORES["groq"])
+    modelo = config.get("modelo") or prov["modelo_default"]
+    system_prompts = {"general": "Eres un experto. Respondes en español.", "codigo": "Eres un programador experto. Código en inglés, explicaciones en español.", "analisis": "Eres un analista experto. Respondes en español.", "plan": "Eres un arquitecto de software. Respondes en español."}
     messages = [{"role": "system", "content": system_prompts.get(modo, system_prompts["general"])}]
-    contexto_proyecto = config.get("contexto_proyecto", "")
-    if contexto_proyecto:
-        messages.append({"role": "system", "content": f"Contexto del proyecto:\n{contexto_proyecto}"})
     if contexto:
         messages.append({"role": "user", "content": f"Contexto:\n{contexto}\n\nPregunta: {pregunta}"})
     else:
         messages.append({"role": "user", "content": pregunta})
-    result = call_cloud_api(prov_config["url_base"], config["api_key"], modelo, messages)
-    if result["success"]:
-        return result["content"]
-    return f"❌ Error consultando IA: {result['error']}"
+    result = call_cloud_api(prov["url_base"], config["api_key"], modelo, messages)
+    return result["content"] if result["success"] else f"❌ Error: {result['error']}"
 
-def test_bridge_connection():
+def test_bridge():
     config = load_bridge_config()
-    if not config.get("api_key"):
-        return False, "No hay API key configurada"
-    proveedor = config.get("proveedor", "groq")
-    prov_config = PROVEEDORES.get(proveedor, PROVEEDORES["groq"])
-    modelo = config.get("modelo") or prov_config["modelo_default"]
-    result = call_cloud_api(prov_config["url_base"], config["api_key"], modelo,
-        [{"role": "user", "content": "Responde solo: CONEXION_OK"}], temperature=0, max_tokens=10)
-    if result["success"]:
-        return True, f"✅ Conexión exitosa con {prov_config['nombre']}"
-    return False, f"❌ Error: {result['error']}"
+    if not config.get("api_key"): return False, "Sin API key"
+    prov = PROVEEDORES.get(config.get("proveedor", "groq"), PROVEEDORES["groq"])
+    modelo = config.get("modelo") or prov["modelo_default"]
+    result = call_cloud_api(prov["url_base"], config["api_key"], modelo,
+        [{"role": "user", "content": "Responde: OK"}], temperature=0, max_tokens=5)
+    return (True, f"✅ {prov['nombre']}") if result["success"] else (False, f"❌ {result['error']}")
 
 # =====================================================================
 # FUNCIONES AUXILIARES
@@ -262,291 +153,193 @@ def test_bridge_connection():
 def create_backup(filepath):
     try:
         if os.path.exists(filepath):
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            basename = os.path.basename(filepath)
-            backup_path = os.path.join(BACKUP_DIR, f"{basename}.{timestamp}.bak")
-            shutil.copy2(filepath, backup_path)
-            return backup_path
-    except:
-        pass
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            bp = os.path.join(BACKUP_DIR, f"{os.path.basename(filepath)}.{ts}.bak")
+            shutil.copy2(filepath, bp)
+            return bp
+    except: pass
     return None
 
-def is_dangerous_command(cmd):
-    cmd_lower = cmd.lower().strip()
-    for blocked in BLOCKED_COMMANDS:
-        if blocked in cmd_lower:
-            return "blocked"
-    for dangerous in DANGEROUS_COMMANDS:
-        if dangerous.lower() in cmd_lower:
-            return "dangerous"
+def is_dangerous(cmd):
+    c = cmd.lower().strip()
+    for b in BLOCKED_COMMANDS:
+        if b in c: return "blocked"
+    for d in DANGEROUS_COMMANDS:
+        if d.lower() in c: return "dangerous"
     return "safe"
 
-def run_command(command, cwd=None, timeout=DEFAULT_COMMAND_TIMEOUT):
+def run_cmd(command, cwd=None, timeout=120):
     try:
-        danger_level = is_dangerous_command(command)
-        if danger_level == "blocked":
-            return "⛔ COMANDO BLOQUEADO por seguridad.", -1
-        if danger_level == "dangerous":
-            return "⚠️ Comando peligroso. Requiere confirmación.", -2
-        result = subprocess.run(command, shell=IS_WINDOWS, capture_output=True, text=True,
-            timeout=timeout, cwd=cwd, encoding='utf-8', errors='replace')
-        output = ""
-        if result.stdout:
-            output += result.stdout
-        if result.stderr:
-            output += f"\n[STDERR]: {result.stderr}"
-        if not output.strip():
-            output = "(Comando ejecutado sin salida visible)"
-        return output.strip(), result.returncode
-    except subprocess.TimeoutExpired:
-        return f"⏱️ Tiempo agotado ({timeout}s).", -3
-    except FileNotFoundError:
-        return "❌ Comando no encontrado.", -4
-    except Exception as e:
-        return f"❌ Error: {str(e)}", -5
-
-def force_run_command(command, cwd=None, timeout=DEFAULT_COMMAND_TIMEOUT):
-    try:
-        result = subprocess.run(command, shell=IS_WINDOWS, capture_output=True, text=True,
-            timeout=timeout, cwd=cwd, encoding='utf-8', errors='replace')
-        output = ""
-        if result.stdout:
-            output += result.stdout
-        if result.stderr:
-            output += f"\n[STDERR]: {result.stderr}"
-        if not output.strip():
-            output = "(Comando ejecutado sin salida visible)"
-        return output.strip(), result.returncode
-    except Exception as e:
-        return f"❌ Error: {str(e)}", -5
+        dl = is_dangerous(command)
+        if dl == "blocked": return "⛔ BLOQUEADO.", -1
+        if dl == "dangerous": return "⚠️ Peligroso. Requiere confirmación.", -2
+        r = subprocess.run(command, shell=IS_WINDOWS, capture_output=True, text=True, timeout=timeout, cwd=cwd, encoding='utf-8', errors='replace')
+        out = (r.stdout or "") + (f"\n[STDERR]: {r.stderr}" if r.stderr else "")
+        return (out.strip() or "(Sin salida)"), r.returncode
+    except subprocess.TimeoutExpired: return f"⏱️ Timeout ({timeout}s)", -3
+    except FileNotFoundError: return "❌ Comando no encontrado.", -4
+    except Exception as e: return f"❌ Error: {e}", -5
 
 # =====================================================================
-# IMPLEMENTACIÓN DE HERRAMIENTAS (funciones reales)
+# HERRAMIENTAS - Funciones Python reales
 # =====================================================================
 
 def tool_ejecutar_comando(comando: str, directorio: str = None) -> str:
-    """Ejecuta un comando del sistema operativo como git, npm, pip, python, dir, etc."""
+    """Ejecuta un comando del sistema (git, npm, pip, python, etc.)"""
     cwd = directorio if directorio and os.path.isdir(directorio) else None
-    if cwd:
-        result, code = run_command(comando, cwd=cwd)
-    else:
-        result, code = run_command(comando)
-    if code == -2:
-        return result + "\n\nSi estás seguro, indica que se fuerce la ejecución."
+    result, code = run_cmd(comando, cwd=cwd)
     return result
 
 def tool_clonar_repositorio(url: str, directorio_destino: str = None) -> str:
-    """Clona un repositorio de GitHub automáticamente. Descarga todo el código del proyecto."""
-    if not url.startswith("https://github.com/") and not url.startswith("git@github.com:"):
-        return "❌ URL inválida. Debe ser una URL de GitHub (https://github.com/usuario/repo)."
+    """Clona un repositorio de GitHub automáticamente."""
+    if not url.startswith("https://github.com/"): return "❌ URL inválida."
     if not directorio_destino:
         repo_name = url.rstrip("/").split("/")[-1].replace(".git", "")
         directorio_destino = os.path.join(PROJECTS_DIR, repo_name)
     if os.path.exists(directorio_destino):
-        return f"⚠️ El directorio ya existe: {directorio_destino}\nUsa ejecutar_comando con 'git pull' para actualizar."
-    result, code = run_command(f'git clone {url} "{directorio_destino}"')
+        return f"⚠️ Ya existe: {directorio_destino}\nUsa ejecutar_comando('git pull', '{directorio_destino}') para actualizar."
+    result, code = run_cmd(f'git clone {url} "{directorio_destino}"')
     if code == 0:
-        return f"✅ Repositorio clonado exitosamente en: {directorio_destino}\n\nContenido:\n" + tool_listar_archivos(directorio_destino, 2)
-    return f"❌ Error clonando repositorio:\n{result}"
+        return f"✅ Clonado en: {directorio_destino}\n\nContenido:\n" + tool_listar_archivos(directorio_destino, 2)
+    return f"❌ Error:\n{result}"
 
 def tool_instalar_dependencias(directorio: str, tipo: str = None) -> str:
-    """Instala las dependencias de un proyecto. Detecta automáticamente si es npm o pip."""
-    if not os.path.isdir(directorio):
-        return f"❌ Directorio no encontrado: {directorio}"
+    """Instala dependencias de un proyecto (npm o pip)."""
+    if not os.path.isdir(directorio): return f"❌ Directorio no encontrado: {directorio}"
     if not tipo:
-        if os.path.exists(os.path.join(directorio, "package.json")):
-            tipo = "npm"
-        elif os.path.exists(os.path.join(directorio, "requirements.txt")):
-            tipo = "pip"
-        elif os.path.exists(os.path.join(directorio, "pyproject.toml")):
-            tipo = "pip"
-        else:
-            return "❌ No se detectó tipo de proyecto. Especifica: npm o pip."
+        if os.path.exists(os.path.join(directorio, "package.json")): tipo = "npm"
+        elif os.path.exists(os.path.join(directorio, "requirements.txt")): tipo = "pip"
+        else: return "❌ No se detectó tipo. Especifica: npm o pip."
     if tipo == "npm":
-        result, code = run_command("npm install", cwd=directorio, timeout=300)
-        if code == 0:
-            return f"✅ Dependencias npm instaladas en: {directorio}\n\n{result[:500]}"
-        return f"❌ Error instalando npm:\n{result}"
+        result, code = run_cmd("npm install", cwd=directorio, timeout=300)
+        return f"✅ npm install completado\n\n{result[:500]}" if code == 0 else f"❌ Error npm:\n{result}"
     elif tipo == "pip":
-        req_file = os.path.join(directorio, "requirements.txt")
-        if os.path.exists(req_file):
-            result, code = run_command(f'pip install -r "{req_file}"', cwd=directorio, timeout=300)
-            if code == 0:
-                return f"✅ Dependencias pip instaladas\n\n{result[:500]}"
-            return f"❌ Error instalando pip:\n{result}"
-        return "❌ No se encontró requirements.txt"
+        rf = os.path.join(directorio, "requirements.txt")
+        if os.path.exists(rf):
+            result, code = run_cmd(f'pip install -r "{rf}"', cwd=directorio, timeout=300)
+            return f"✅ pip install completado\n\n{result[:500]}" if code == 0 else f"❌ Error pip:\n{result}"
+        return "❌ No hay requirements.txt"
     return f"❌ Tipo no soportado: {tipo}"
 
 def tool_listar_archivos(ruta: str, profundidad: int = 3) -> str:
-    """Lista los archivos y carpetas de un directorio. Muestra la estructura del proyecto."""
-    if not os.path.exists(ruta):
-        return f"❌ Ruta no encontrada: {ruta}"
-    if os.path.isfile(ruta):
-        return f"📄 Archivo: {ruta} ({os.path.getsize(ruta)} bytes)"
-    resultado = [f"📂 {ruta}\n"]
+    """Lista archivos y carpetas de un directorio."""
+    if not os.path.exists(ruta): return f"❌ Ruta no encontrada: {ruta}"
+    if os.path.isfile(ruta): return f"📄 {ruta} ({os.path.getsize(ruta)} bytes)"
+    res = [f"📂 {ruta}\n"]
     for root, dirs, files in os.walk(ruta):
-        rel_path = os.path.relpath(root, ruta)
-        depth = rel_path.count(os.sep) if rel_path != "." else 0
-        if depth >= profundidad:
-            dirs.clear()
-            continue
-        skip_dirs = ['node_modules', '.git', '.next', '__pycache__', '.venv', 'venv', 'dist', '.cache', '.turbo']
-        dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith('.')]
+        depth = os.path.relpath(root, ruta).count(os.sep) if os.path.relpath(root, ruta) != "." else 0
+        if depth >= profundidad: dirs.clear(); continue
+        skip = ['node_modules', '.git', '.next', '__pycache__', '.venv', 'venv', 'dist', '.cache', '.turbo']
+        dirs[:] = [d for d in dirs if d not in skip and not d.startswith('.')]
         indent = "  " * (depth + 1)
-        for d in sorted(dirs):
-            resultado.append(f"{indent}📁 {d}/")
+        for d in sorted(dirs): res.append(f"{indent}📁 {d}/")
         for f in sorted(files):
-            size = 0
-            try:
-                size = os.path.getsize(os.path.join(root, f))
-            except:
-                pass
-            size_str = f" ({size}b)" if size < 1024 else f" ({size//1024}kb)"
-            resultado.append(f"{indent}📄 {f}{size_str}")
-    return "\n".join(resultado)
+            try: s = os.path.getsize(os.path.join(root, f))
+            except: s = 0
+            res.append(f"{indent}📄 {f} ({s//1024}kb)" if s >= 1024 else f"{indent}📄 {f} ({s}b)")
+    return "\n".join(res)
 
 def tool_leer_archivo(ruta: str) -> str:
-    """Lee el contenido completo de un archivo de texto o código fuente."""
-    if not os.path.exists(ruta):
-        return f"❌ Archivo no encontrado: {ruta}"
+    """Lee el contenido de un archivo."""
+    if not os.path.exists(ruta): return f"❌ No encontrado: {ruta}"
     try:
         with open(ruta, 'r', encoding='utf-8', errors='replace') as f:
-            contenido = f.read()
-        if len(contenido) > 15000:
-            contenido = contenido[:15000] + f"\n\n... [Truncado - {len(contenido)} caracteres total]"
-        return contenido
-    except Exception as e:
-        return f"❌ Error leyendo archivo: {str(e)}"
+            c = f.read()
+        return c[:15000] + f"\n... [Truncado: {len(c)} chars]" if len(c) > 15000 else c
+    except Exception as e: return f"❌ Error: {e}"
 
 def tool_escribir_archivo(ruta: str, contenido: str) -> str:
-    """Escribe contenido en un archivo. Crea el archivo si no existe. Hace backup automático."""
+    """Escribe contenido en un archivo (con backup automático)."""
     try:
-        directorio = os.path.dirname(ruta)
-        if directorio:
-            os.makedirs(directorio, exist_ok=True)
-        backup_path = create_backup(ruta)
-        backup_msg = f"\n📦 Backup: {backup_path}" if backup_path else ""
-        with open(ruta, 'w', encoding='utf-8') as f:
-            f.write(contenido)
-        return f"✅ Archivo escrito: {ruta} ({len(contenido)} caracteres){backup_msg}"
-    except Exception as e:
-        return f"❌ Error: {str(e)}"
+        d = os.path.dirname(ruta)
+        if d: os.makedirs(d, exist_ok=True)
+        bp = create_backup(ruta)
+        with open(ruta, 'w', encoding='utf-8') as f: f.write(contenido)
+        return f"✅ Escrito: {ruta} ({len(contenido)} chars)" + (f"\n📦 Backup: {bp}" if bp else "")
+    except Exception as e: return f"❌ Error: {e}"
 
 def tool_modificar_archivo(ruta: str, texto_original: str, texto_nuevo: str) -> str:
-    """Modifica una parte específica de un archivo. Busca texto_original y lo reemplaza con texto_nuevo."""
-    if not os.path.exists(ruta):
-        return f"❌ Archivo no encontrado: {ruta}"
+    """Modifica parte de un archivo (busca y reemplaza)."""
+    if not os.path.exists(ruta): return f"❌ No encontrado: {ruta}"
     try:
-        with open(ruta, 'r', encoding='utf-8', errors='replace') as f:
-            contenido = f.read()
-        if texto_original not in contenido:
-            return f"❌ Texto no encontrado. Usa leer_archivo primero para ver el contenido exacto."
-        backup_path = create_backup(ruta)
-        backup_msg = f"\n📦 Backup: {backup_path}" if backup_path else ""
-        nuevo_contenido = contenido.replace(texto_original, texto_nuevo)
-        with open(ruta, 'w', encoding='utf-8') as f:
-            f.write(nuevo_contenido)
-        return f"✅ Archivo modificado: {ruta}{backup_msg}"
-    except Exception as e:
-        return f"❌ Error: {str(e)}"
+        with open(ruta, 'r', encoding='utf-8', errors='replace') as f: c = f.read()
+        if texto_original not in c: return f"❌ Texto no encontrado. Usa leer_archivo primero."
+        bp = create_backup(ruta)
+        with open(ruta, 'w', encoding='utf-8') as f: f.write(c.replace(texto_original, texto_nuevo))
+        return f"✅ Modificado: {ruta}" + (f"\n📦 Backup: {bp}" if bp else "")
+    except Exception as e: return f"❌ Error: {e}"
 
 def tool_buscar_en_archivos(directorio: str, texto: str, extension: str = None) -> str:
-    """Busca un texto dentro de todos los archivos de un directorio (como grep)."""
-    if not os.path.isdir(directorio):
-        return f"❌ Directorio no encontrado: {directorio}"
-    resultados = []
-    skip_dirs = ['node_modules', '.git', '.next', '__pycache__', '.venv', 'venv', 'dist', '.cache', '.turbo', 'build']
-    skip_exts = ['.png', '.jpg', '.jpeg', '.gif', '.ico', '.svg', '.woff', '.woff2', '.ttf', '.eot', '.map', '.lock']
+    """Busca texto dentro de archivos de un directorio."""
+    if not os.path.isdir(directorio): return f"❌ Directorio no encontrado: {directorio}"
+    res = []
+    skip_d = ['node_modules', '.git', '.next', '__pycache__', '.venv', 'venv', 'dist', '.cache', '.turbo', 'build']
+    skip_e = ['.png', '.jpg', '.jpeg', '.gif', '.ico', '.svg', '.woff', '.woff2', '.ttf', '.eot', '.map', '.lock']
     for root, dirs, files in os.walk(directorio):
-        dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith('.')]
-        for fname in files:
-            fpath = os.path.join(root, fname)
-            _, ext = os.path.splitext(fname)
-            if ext.lower() in skip_exts:
-                continue
-            if extension and ext.lower() != extension.lower():
-                continue
+        dirs[:] = [d for d in dirs if d not in skip_d and not d.startswith('.')]
+        for fn in files:
+            fp = os.path.join(root, fn)
+            ext = os.path.splitext(fn)[1]
+            if ext.lower() in skip_e: continue
+            if extension and ext.lower() != extension.lower(): continue
             try:
-                with open(fpath, 'r', encoding='utf-8', errors='replace') as f:
+                with open(fp, 'r', encoding='utf-8', errors='replace') as f:
                     for i, line in enumerate(f, 1):
                         if texto.lower() in line.lower():
-                            rel_path = os.path.relpath(fpath, directorio)
-                            resultados.append(f"{rel_path}:{i} → {line.strip()[:120]}")
-                            if len(resultados) >= 50:
-                                return "\n".join(resultados) + "\n\n... [50 resultados máximo]"
-            except:
-                continue
-    if not resultados:
-        return f"🔍 No se encontró '{texto}' en {directorio}"
-    return "\n".join(resultados)
+                            res.append(f"{os.path.relpath(fp, directorio)}:{i} → {line.strip()[:120]}")
+                            if len(res) >= 50: return "\n".join(res) + "\n... [50 máx]"
+            except: continue
+    return "\n".join(res) if res else f"🔍 '{texto}' no encontrado en {directorio}"
 
 def tool_calcular(expresion: str) -> str:
-    """Evalúa una expresión matemática. Solo acepta números y operadores."""
+    """Evalúa una expresión matemática."""
     expresion = expresion.replace("^", "**")
-    if not re.match(r'^[\d\s\+\-\*\/\.\(\)eE]+$', expresion):
-        return "❌ Solo números y operadores (+, -, *, /, (), **)"
-    try:
-        return str(eval(expresion, {"__builtins__": {}}, {}))
-    except Exception as e:
-        return f"❌ Error: {str(e)}"
+    if not re.match(r'^[\d\s\+\-\*\/\.\(\)eE]+$', expresion): return "❌ Solo números y operadores"
+    try: return str(eval(expresion, {"__builtins__": {}}, {}))
+    except Exception as e: return f"❌ Error: {e}"
 
 def tool_buscar(consulta: str) -> str:
-    """Busca información en internet usando DuckDuckGo."""
+    """Busca en internet con DuckDuckGo."""
     try:
         from ddgs import DDGS
-        with DDGS() as ddgs:
-            results = list(ddgs.text(consulta, max_results=5))
-        if not results:
-            return "🔍 No se encontraron resultados"
-        return "\n\n".join([f"📌 {r.get('title', '')}\n   {r.get('body', '')}\n   🔗 {r.get('href', '')}" for r in results])
+        with DDGS() as ddgs: results = list(ddgs.text(consulta, max_results=5))
+        if not results: return "🔍 Sin resultados"
+        return "\n\n".join([f"📌 {r.get('title','')}\n   {r.get('body','')}\n   🔗 {r.get('href','')}" for r in results])
     except ImportError:
         try:
             from duckduckgo_search import DDGS
-            with DDGS() as ddgs:
-                results = list(ddgs.text(consulta, max_results=5))
-            if not results:
-                return "🔍 No se encontraron resultados"
-            return "\n\n".join([f"📌 {r.get('title', '')}\n   {r.get('body', '')}\n   🔗 {r.get('href', '')}" for r in results])
-        except ImportError:
-            return "❌ Instala: pip install ddgs"
-    except Exception as e:
-        return f"❌ Error: {str(e)}"
+            with DDGS() as ddgs: results = list(ddgs.text(consulta, max_results=5))
+            if not results: return "🔍 Sin resultados"
+            return "\n\n".join([f"📌 {r.get('title','')}\n   {r.get('body','')}\n   🔗 {r.get('href','')}" for r in results])
+        except: return "❌ pip install ddgs"
+    except Exception as e: return f"❌ Error: {e}"
 
 def tool_consultar_experto(pregunta: str, modo: str = "general") -> str:
-    """Consulta con una IA avanzada en la nube para tareas complejas o cuando se necesita razonamiento profundo."""
+    """Consulta con IA avanzada en la nube."""
     return consultar_experto(pregunta, modo=modo)
 
 def tool_consultar_plan(tarea: str, contexto: str = "") -> str:
-    """Pide a la IA avanzada que cree un plan de implementación detallado paso a paso."""
+    """Pide un plan de implementación a la IA avanzada."""
     return consultar_experto(tarea, contexto=contexto, modo="plan")
 
 def tool_info_sistema() -> str:
-    """Muestra información del sistema: OS, RAM, disco, CPU, proyectos."""
-    info = [f"🖥️ Sistema: {platform.system()} {platform.release()}", f"💻 Procesador: {platform.processor()}",
-            f"🏠 Usuario: {USER_HOME}", f"📂 Proyectos: {PROJECTS_DIR}"]
+    """Información del sistema."""
+    info = [f"🖥️ {platform.system()} {platform.release()}", f"💻 {platform.processor()}",
+            f"📂 Proyectos: {PROJECTS_DIR}", f"📂 Descargas: {DOWNLOADS_DIR}"]
     try:
-        if IS_WINDOWS:
-            for drive in ['C:', 'D:']:
-                if os.path.exists(drive + '\\'):
-                    usage = shutil.disk_usage(drive + '\\')
-                    info.append(f"💾 Disco {drive}: {usage.free // (1024**3)}GB libres de {usage.total // (1024**3)}GB")
-    except:
-        pass
+        for d in ['C:', 'D:']:
+            if os.path.exists(d + '\\'):
+                u = shutil.disk_usage(d + '\\')
+                info.append(f"💾 {d}: {u.free//(1024**3)}GB libres de {u.total//(1024**3)}GB")
+    except: pass
     try:
-        import psutil
-        mem = psutil.virtual_memory()
-        info.append(f"🧠 RAM: {mem.available // (1024**3)}GB disponibles de {mem.total // (1024**3)}GB")
-    except:
-        info.append("🧠 RAM: (pip install psutil)")
-    bridge_config = load_bridge_config()
-    if bridge_config.get("api_key"):
-        info.append(f"☁️ IA Nube: {bridge_config.get('proveedor', '?')} ✅")
-    else:
-        info.append("☁️ IA Nube: No configurada")
+        import psutil; m = psutil.virtual_memory()
+        info.append(f"🧠 RAM: {m.available//(1024**3)}GB de {m.total//(1024**3)}GB")
+    except: pass
     return "\n".join(info)
 
 # =====================================================================
-# MAPA DE FUNCIONES - Nombre → Función Python
+# MAPA DE FUNCIONES
 # =====================================================================
 
 AVAILABLE_FUNCTIONS = {
@@ -566,48 +359,19 @@ AVAILABLE_FUNCTIONS = {
 }
 
 # =====================================================================
-# DEFINICIÓN DE HERRAMIENTAS PARA OLLAMA (JSON Schema)
-# Esta es la clave: Ollama usa estos schemas para el tool calling NATIVO
+# HERRAMIENTAS PARA OLLAMA (JSON Schema)
 # =====================================================================
 
 OLLAMA_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "ejecutar_comando",
-            "description": "Ejecuta un comando del sistema operativo (git, npm, pip, python, dir, etc.). El comando se ejecuta directamente en la terminal y retorna la salida.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "comando": {
-                        "type": "string",
-                        "description": "El comando a ejecutar, ej: 'git clone https://...', 'npm install', 'dir', 'python script.py'"
-                    },
-                    "directorio": {
-                        "type": "string",
-                        "description": "Directorio donde ejecutar el comando (opcional)"
-                    }
-                },
-                "required": ["comando"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "clonar_repositorio",
-            "description": "Clona un repositorio de GitHub automáticamente. Descarga todo el código del proyecto a la carpeta de proyectos del usuario.",
+            "description": "Clona un repositorio de GitHub. Descarga todo el código a la carpeta Projects del usuario. Esta es la herramienta que debes usar SIEMPRE que el usuario quiera descargar o clonar un repositorio de GitHub.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "URL del repositorio de GitHub, ej: https://github.com/usuario/repo.git"
-                    },
-                    "directorio_destino": {
-                        "type": "string",
-                        "description": "Directorio donde clonar (opcional, por defecto va a la carpeta Projects)"
-                    }
+                    "url": {"type": "string", "description": "URL del repositorio de GitHub, ej: https://github.com/usuario/repo.git"}
                 },
                 "required": ["url"]
             }
@@ -616,20 +380,28 @@ OLLAMA_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "instalar_dependencias",
-            "description": "Instala las dependencias de un proyecto. Detecta automáticamente si es npm o pip.",
+            "name": "ejecutar_comando",
+            "description": "Ejecuta un comando del sistema operativo. Úsalo para git, npm, pip, python, dir, etc.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "directorio": {
-                        "type": "string",
-                        "description": "Ruta del directorio del proyecto"
-                    },
-                    "tipo": {
-                        "type": "string",
-                        "description": "Tipo de proyecto: 'npm' o 'pip' (opcional, se autodetecta)",
-                        "enum": ["npm", "pip"]
-                    }
+                    "comando": {"type": "string", "description": "Comando a ejecutar"},
+                    "directorio": {"type": "string", "description": "Directorio donde ejecutar (opcional)"}
+                },
+                "required": ["comando"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "instalar_dependencias",
+            "description": "Instala las dependencias de un proyecto (npm install o pip install).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "directorio": {"type": "string", "description": "Ruta del proyecto"},
+                    "tipo": {"type": "string", "description": "npm o pip (se autodetecta si no se especifica)", "enum": ["npm", "pip"]}
                 },
                 "required": ["directorio"]
             }
@@ -639,18 +411,12 @@ OLLAMA_TOOLS = [
         "type": "function",
         "function": {
             "name": "listar_archivos",
-            "description": "Lista los archivos y carpetas de un directorio mostrando la estructura del proyecto.",
+            "description": "Lista archivos y carpetas de un directorio.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "ruta": {
-                        "type": "string",
-                        "description": "Ruta del directorio a listar"
-                    },
-                    "profundidad": {
-                        "type": "integer",
-                        "description": "Profundidad máxima de carpetas (por defecto 3)"
-                    }
+                    "ruta": {"type": "string", "description": "Ruta del directorio"},
+                    "profundidad": {"type": "integer", "description": "Profundidad (default 3)"}
                 },
                 "required": ["ruta"]
             }
@@ -660,15 +426,10 @@ OLLAMA_TOOLS = [
         "type": "function",
         "function": {
             "name": "leer_archivo",
-            "description": "Lee el contenido completo de un archivo de texto o código fuente.",
+            "description": "Lee el contenido de un archivo.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "ruta": {
-                        "type": "string",
-                        "description": "Ruta del archivo a leer"
-                    }
-                },
+                "properties": {"ruta": {"type": "string", "description": "Ruta del archivo"}},
                 "required": ["ruta"]
             }
         }
@@ -677,19 +438,10 @@ OLLAMA_TOOLS = [
         "type": "function",
         "function": {
             "name": "escribir_archivo",
-            "description": "Escribe contenido en un archivo. Crea el archivo si no existe. Hace backup automático del archivo anterior.",
+            "description": "Escribe contenido en un archivo. Backup automático.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "ruta": {
-                        "type": "string",
-                        "description": "Ruta del archivo a escribir"
-                    },
-                    "contenido": {
-                        "type": "string",
-                        "description": "Contenido a escribir en el archivo"
-                    }
-                },
+                "properties": {"ruta": {"type": "string", "description": "Ruta del archivo"}, "contenido": {"type": "string", "description": "Contenido a escribir"}},
                 "required": ["ruta", "contenido"]
             }
         }
@@ -698,23 +450,10 @@ OLLAMA_TOOLS = [
         "type": "function",
         "function": {
             "name": "modificar_archivo",
-            "description": "Modifica una parte específica de un archivo. Busca texto_original y lo reemplaza con texto_nuevo. Más seguro que escribir todo el archivo.",
+            "description": "Modifica parte de un archivo (buscar y reemplazar).",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "ruta": {
-                        "type": "string",
-                        "description": "Ruta del archivo a modificar"
-                    },
-                    "texto_original": {
-                        "type": "string",
-                        "description": "Texto que se va a buscar y reemplazar"
-                    },
-                    "texto_nuevo": {
-                        "type": "string",
-                        "description": "Texto nuevo que reemplazará al original"
-                    }
-                },
+                "properties": {"ruta": {"type": "string"}, "texto_original": {"type": "string"}, "texto_nuevo": {"type": "string"}},
                 "required": ["ruta", "texto_original", "texto_nuevo"]
             }
         }
@@ -723,23 +462,10 @@ OLLAMA_TOOLS = [
         "type": "function",
         "function": {
             "name": "buscar_en_archivos",
-            "description": "Busca un texto dentro de todos los archivos de un directorio (como grep).",
+            "description": "Busca texto dentro de archivos de un directorio.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "directorio": {
-                        "type": "string",
-                        "description": "Directorio donde buscar"
-                    },
-                    "texto": {
-                        "type": "string",
-                        "description": "Texto a buscar"
-                    },
-                    "extension": {
-                        "type": "string",
-                        "description": "Filtrar por extensión, ej: '.tsx', '.py' (opcional)"
-                    }
-                },
+                "properties": {"directorio": {"type": "string"}, "texto": {"type": "string"}, "extension": {"type": "string"}},
                 "required": ["directorio", "texto"]
             }
         }
@@ -747,33 +473,11 @@ OLLAMA_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "calcular",
-            "description": "Evalúa una expresión matemática. Solo acepta números y operadores.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "expresion": {
-                        "type": "string",
-                        "description": "Expresión matemática, ej: '2 + 3 * 4', '100 * 0.15'"
-                    }
-                },
-                "required": ["expresion"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "buscar",
-            "description": "Busca información en internet usando DuckDuckGo.",
+            "description": "Busca información en internet.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "consulta": {
-                        "type": "string",
-                        "description": "Consulta de búsqueda"
-                    }
-                },
+                "properties": {"consulta": {"type": "string", "description": "Consulta de búsqueda"}},
                 "required": ["consulta"]
             }
         }
@@ -781,21 +485,23 @@ OLLAMA_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "consultar_experto",
-            "description": "Consulta con una IA avanzada en la nube para tareas complejas, razonamiento profundo, o código difícil.",
+            "name": "calcular",
+            "description": "Calcula una expresión matemática.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "pregunta": {
-                        "type": "string",
-                        "description": "Pregunta o tarea para la IA experta"
-                    },
-                    "modo": {
-                        "type": "string",
-                        "description": "Modo: 'general', 'codigo', 'analisis', 'plan'",
-                        "enum": ["general", "codigo", "analisis", "plan"]
-                    }
-                },
+                "properties": {"expresion": {"type": "string"}},
+                "required": ["expresion"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "consultar_experto",
+            "description": "Consulta con IA avanzada en la nube para tareas complejas.",
+            "parameters": {
+                "type": "object",
+                "properties": {"pregunta": {"type": "string"}, "modo": {"type": "string", "enum": ["general", "codigo", "analisis", "plan"]}},
                 "required": ["pregunta"]
             }
         }
@@ -804,19 +510,10 @@ OLLAMA_TOOLS = [
         "type": "function",
         "function": {
             "name": "consultar_plan",
-            "description": "Pide a la IA avanzada que cree un plan de implementación detallado paso a paso.",
+            "description": "Pide un plan de implementación a la IA avanzada.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "tarea": {
-                        "type": "string",
-                        "description": "Tarea para la cual crear un plan"
-                    },
-                    "contexto": {
-                        "type": "string",
-                        "description": "Contexto adicional (opcional)"
-                    }
-                },
+                "properties": {"tarea": {"type": "string"}, "contexto": {"type": "string"}},
                 "required": ["tarea"]
             }
         }
@@ -825,420 +522,385 @@ OLLAMA_TOOLS = [
         "type": "function",
         "function": {
             "name": "info_sistema",
-            "description": "Muestra información del sistema: OS, RAM, disco, CPU, proyectos.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
+            "description": "Muestra información del sistema.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
         }
     }
 ]
 
 # =====================================================================
-# AGENTE AUTÓNOMO - CON TOOL CALLING NATIVO
+# DETECCIÓN DE INTENCIÓN + AUTO-EJECUCIÓN
+# Esta es la solución principal: NO dependemos del modelo para
+# acciones críticas. Si el usuario menciona un GitHub URL, 
+# EJECUTAMOS DIRECTAMENTE.
 # =====================================================================
 
-AGENT_SYSTEM_MSG = f"""Eres un agente de IA que ejecuta acciones reales en la computadora del usuario.
-Tienes herramientas para ejecutar comandos, clonar repositorios, leer/escribir archivos, etc.
-Cuando el usuario te pida algo, USA LAS HERRAMIENTAS para hacerlo directamente.
-NUNCA le digas al usuario que abra una terminal o ejecute comandos manualmente. TÚ lo haces.
-Responde siempre en español.
-Directorios del usuario: Proyectos={PROJECTS_DIR}, Descargas={DOWNLOADS_DIR}, Documentos={DOCUMENTS_DIR}"""
+def detect_intent_actions(user_message):
+    """Detecta intenciones claras y devuelve acciones a ejecutar directamente."""
+    msg = user_message.lower()
+    actions = []
+    
+    # Detectar GitHub URL + intención de clonar/descargar
+    github_match = re.search(r'https://github\.com/[\w.-]+/[\w.-]+', user_message)
+    if github_match:
+        url = github_match.group(0)
+        if not url.endswith(".git"):
+            url += ".git"
+        clone_keywords = ["clona", "descargar", "descarga", "baja", "download", "github", "repo", "repositorio"]
+        if any(k in msg for k in clone_keywords):
+            actions.append({
+                "tool": "clonar_repositorio",
+                "args": {"url": url},
+                "reason": "🔗 GitHub URL detectada + intención de clonar"
+            })
+    
+    # Detectar "instalar dependencias" con proyecto activo
+    if any(k in msg for k in ["instal", "dependencia", "npm install"]):
+        project = st.session_state.get('active_project', '')
+        if project and os.path.exists(project):
+            actions.append({
+                "tool": "instalar_dependencias",
+                "args": {"directorio": project},
+                "reason": "📦 Intención de instalar + proyecto activo"
+            })
+    
+    # Detectar "analizar proyecto" con proyecto activo
+    if any(k in msg for k in ["analiz", "revis", "estructura"]) and not github_match:
+        project = st.session_state.get('active_project', '')
+        if project and os.path.exists(project):
+            actions.append({
+                "tool": "listar_archivos",
+                "args": {"ruta": project, "profundidad": 3},
+                "reason": "🔍 Intención de análisis + proyecto activo"
+            })
+    
+    return actions
+
+def execute_action(action, container):
+    """Ejecuta una acción directa y muestra el resultado."""
+    with container:
+        fn = AVAILABLE_FUNCTIONS.get(action["tool"])
+        if fn:
+            st.markdown(f'<div class="tool-auto">⚡ AUTO-EJECUCIÓN: {action["reason"]}<br>🔧 {action["tool"]}({", ".join(f"{k}={str(v)[:40]}" for k,v in action["args"].items())})</div>', unsafe_allow_html=True)
+            try:
+                result = fn(**action["args"])
+            except Exception as e:
+                result = f"❌ Error: {e}"
+            st.markdown(f'<div class="tool-result">{str(result)[:800]}</div>', unsafe_allow_html=True)
+            return result
+    return "❌ Función no encontrada"
+
+# =====================================================================
+# AGENTE PRINCIPAL
+# =====================================================================
+
+SYSTEM_MSG = f"""Eres un agente que EJECUTA acciones reales. Tienes herramientas para ejecutar comandos, clonar repositorios, leer/escribir archivos, etc.
+CUANDO el usuario quiera descargar un repositorio de GitHub, usa clonar_repositorio.
+CUANDO el usuario quiera instalar dependencias, usa instalar_dependencias.
+CUANDO el usuario quiera analizar un proyecto, usa listar_archivos y leer_archivo.
+NUNCA le digas al usuario que abra una terminal. TÚ ejecutas las herramientas.
+Responde en español.
+Proyectos: {PROJECTS_DIR}
+Descargas: {DOWNLOADS_DIR}"""
 
 def run_agent(user_message, history=[]):
-    """Ejecuta el agente usando Ollama tool calling NATIVO"""
+    """Agente con auto-ejecución forzada + tool calling nativo"""
     
-    # Construir mensajes
-    messages = [{"role": "system", "content": AGENT_SYSTEM_MSG}]
-    # Agregar historial (últimos 10 mensajes)
+    # === PASO 0: AUTO-EJECUCIÓN - Acciones críticas detectadas ===
+    auto_actions = detect_intent_actions(user_message)
+    auto_results = []
+    
+    if auto_actions:
+        container = st.container()
+        for action in auto_actions:
+            result = execute_action(action, container)
+            auto_results.append({"tool": action["tool"], "args": action["args"], "result": result})
+            
+            # Si clonamos un repo, actualizar proyecto activo
+            if action["tool"] == "clonar_repositorio" and "✅" in str(result):
+                # Extraer ruta del resultado
+                match = re.search(r'Clonado en: (.+)', str(result))
+                if match:
+                    project_path = match.group(1).strip()
+                    st.session_state['active_project'] = project_path
+    
+    # === PASO 1: Llamar a Ollama con tools ===
+    messages = [{"role": "system", "content": SYSTEM_MSG}]
     for msg in history[-10:]:
         messages.append(msg)
+    
+    # Agregar resultados de auto-ejecución al contexto
+    if auto_results:
+        context = "Ya ejecuté estas acciones automáticamente:\n\n"
+        for r in auto_results:
+            context += f"- {r['tool']}({r['args']}): {str(r['result'])[:500]}\n"
+        context += "\nAhora necesito dar una respuesta al usuario basándome en estos resultados. Si faltan acciones, debo llamar más herramientas."
+        messages.append({"role": "assistant", "content": context})
+    
     messages.append({"role": "user", "content": user_message})
     
-    # === LLAMADA A OLLAMA CON TOOLS NATIVO ===
+    results = list(auto_results)  # Empezar con resultados de auto-ejecución
+    tool_container = st.container()
+    
     try:
-        response = ollama.chat(
-            model=AGENT_MODEL,
-            messages=messages,
-            tools=OLLAMA_TOOLS,
-        )
+        response = ollama.chat(model=AGENT_MODEL, messages=messages, tools=OLLAMA_TOOLS)
     except Exception as e:
-        return f"❌ Error conectando con Ollama: {str(e)}", []
+        # Si falla tool calling, generar respuesta con los resultados que tenemos
+        if results:
+            summary = "Resultados:\n\n"
+            for r in results:
+                summary += f"- {r['tool']}: {str(r['result'])[:300]}\n"
+            try:
+                final = ollama.chat(model=AGENT_MODEL, messages=[
+                    {"role": "system", "content": "Responde en español basándote en estos resultados. Explica lo que se hizo."},
+                    {"role": "user", "content": f"Tarea: {user_message}\n\n{summary}"}
+                ])
+                return final.message.content, history + [{"role": "user", "content": user_message}, {"role": "assistant", "content": final.message.content}]
+            except:
+                return summary, history + [{"role": "user", "content": user_message}, {"role": "assistant", "content": summary}]
+        return f"❌ Error: {e}", []
     
-    results = []
-    tool_results_container = st.container()
-    max_iterations = 5  # Máximo de iteraciones de tool calling
-    
-    for iteration in range(max_iterations):
-        # Verificar si el modelo quiere llamar herramientas
+    # === PASO 2: Loop de tool calling ===
+    max_iter = 5
+    for iteration in range(max_iter):
         if not response.message.tool_calls:
-            # El modelo respondió con texto, no con herramientas
             break
         
-        # === EJECUTAR CADA HERRAMIENTA ===
-        # Agregar mensaje del asistente (con tool_calls) al historial
         messages.append(response.message)
         
         for tool_call in response.message.tool_calls:
             fn_name = tool_call.function.name
             fn_args = tool_call.function.arguments
             
-            with tool_results_container:
-                is_bridge = fn_name.startswith("consultar")
-                css_class = "bridge-box" if is_bridge else "tool-cmd"
-                icon = "☁️" if is_bridge else "🔧"
+            with tool_container:
+                icon = "☁️" if fn_name.startswith("consultar") else "🔧"
                 args_preview = ", ".join(f"{k}={str(v)[:40]}" for k, v in fn_args.items())
-                st.markdown(f'<div class="{css_class}">{icon} Paso {len(results)+1}: {fn_name}({args_preview})</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="tool-cmd">{icon} {fn_name}({args_preview})</div>', unsafe_allow_html=True)
                 
-                # Ejecutar la función
                 fn = AVAILABLE_FUNCTIONS.get(fn_name)
                 if fn:
-                    try:
-                        result = fn(**fn_args)
-                    except Exception as e:
-                        result = f"❌ Error ejecutando {fn_name}: {str(e)}"
+                    try: result = fn(**fn_args)
+                    except Exception as e: result = f"❌ Error: {e}"
                 else:
                     result = f"❌ Función no encontrada: {fn_name}"
                 
                 results.append({"tool": fn_name, "args": fn_args, "result": result})
-                
-                # Mostrar resultado
-                result_preview = str(result)[:800]
-                st.markdown(f'<div class="tool-result">{result_preview}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="tool-result">{str(result)[:800]}</div>', unsafe_allow_html=True)
             
-            # Agregar resultado de la herramienta al historial de mensajes
-            messages.append({
-                "role": "tool",
-                "content": str(result),
-            })
+            messages.append({"role": "tool", "content": str(result)})
         
-        # === PEDIR SIGUIENTE RESPUESTA ===
         try:
-            response = ollama.chat(
-                model=AGENT_MODEL,
-                messages=messages,
-                tools=OLLAMA_TOOLS,
-            )
-        except Exception as e:
+            response = ollama.chat(model=AGENT_MODEL, messages=messages, tools=OLLAMA_TOOLS)
+        except:
             break
     
-    # === RESPUESTA FINAL ===
+    # === PASO 3: Respuesta final ===
     final_text = ""
     if response.message.content:
         final_text = response.message.content
     elif results:
-        # Si no hay texto final pero sí resultados, generar resumen
-        results_summary = "Resultados:\n\n"
+        summary = "Acciones ejecutadas:\n\n"
         for r in results:
-            results_summary += f"- {r['tool']}: {str(r['result'])[:300]}\n"
-        
-        summary_messages = messages.copy()
-        summary_messages.append({
-            "role": "user",
-            "content": "Basándote en los resultados de las herramientas, da una respuesta final clara y útil en español. Explica lo que hiciste y los resultados."
-        })
+            summary += f"- {r['tool']}: {str(r['result'])[:300]}\n"
         try:
-            summary_response = ollama.chat(model=AGENT_MODEL, messages=summary_messages)
-            final_text = summary_response.message.content
+            final = ollama.chat(model=AGENT_MODEL, messages=[
+                {"role": "system", "content": "Responde en español. Explica qué se hizo y los resultados. NUNCA des instrucciones de terminal."},
+                {"role": "user", "content": f"Tarea: {user_message}\n\n{summary}"}
+            ])
+            final_text = final.message.content
         except:
-            final_text = results_summary
+            final_text = summary
     else:
-        final_text = "No se pudo completar la tarea. Intenta de nuevo."
+        final_text = "No se pudo completar la tarea."
     
     new_history = history + [
         {"role": "user", "content": user_message},
         {"role": "assistant", "content": final_text}
     ]
-    
     return final_text, new_history
 
 # =====================================================================
-# CHAT SIMPLE
+# CHAT / RAG / CÓDIGO (iguales que antes)
 # =====================================================================
 
 def chat_simple(message, history=[]):
-    messages = [{"role": "system", "content": "Eres un asistente útil. Respondes en español."}]
-    messages.extend(history[-10:])
-    messages.append({"role": "user", "content": message})
+    messages = [{"role": "system", "content": "Asistente útil. Español."}] + history[-10:] + [{"role": "user", "content": message}]
     try:
-        response = ollama.chat(model=CHAT_MODEL, messages=messages, stream=False)
-        return response["message"]["content"]
-    except Exception as e:
-        return f"❌ Error: {str(e)}"
-
-# =====================================================================
-# RAG - DOCUMENTOS
-# =====================================================================
+        r = ollama.chat(model=CHAT_MODEL, messages=messages)
+        return r.message.content
+    except Exception as e: return f"❌ {e}"
 
 def init_chroma():
     try:
         import chromadb
         client = chromadb.PersistentClient(path=os.path.join(USER_HOME, ".ia-chromadb"))
-        collection = client.get_or_create_collection("documentos")
-        return client, collection
-    except Exception as e:
-        st.error(f"Error ChromaDB: {e}")
-        return None, None
-
-def add_document_to_chroma(text, source, collection):
-    try:
-        chunk_size = 500
-        chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
-        for i, chunk in enumerate(chunks):
-            embedding_response = ollama.embeddings(model="nomic-embed-text", prompt=chunk)
-            collection.add(ids=[f"{source}_{i}"], embeddings=[embedding_response["embedding"]],
-                documents=[chunk], metadatas=[{"source": source, "chunk": i}])
-        return len(chunks)
-    except Exception as e:
-        st.error(f"Error: {e}")
-        return 0
+        return client, client.get_or_create_collection("documentos")
+    except Exception as e: st.error(f"ChromaDB: {e}"); return None, None
 
 def rag_query(question, collection):
     try:
-        query_embedding = ollama.embeddings(model="nomic-embed-text", prompt=question)["embedding"]
-        results = collection.query(query_embeddings=[query_embedding], n_results=5)
-        if not results["documents"][0]:
-            return "No encontré documentos relevantes."
-        context = "\n\n".join(results["documents"][0])
-        messages = [{"role": "system", "content": f"Contexto:\n\n{context}\n\nResponde en español."},
-            {"role": "user", "content": question}]
-        response = ollama.chat(model=CHAT_MODEL, messages=messages, stream=False)
-        return response["message"]["content"]
-    except Exception as e:
-        return f"❌ Error: {str(e)}"
-
-# =====================================================================
-# ASISTENTE DE CÓDIGO
-# =====================================================================
+        emb = ollama.embeddings(model="nomic-embed-text", prompt=question)["embedding"]
+        results = collection.query(query_embeddings=[emb], n_results=5)
+        if not results["documents"][0]: return "Sin resultados."
+        ctx = "\n\n".join(results["documents"][0])
+        r = ollama.chat(model=CHAT_MODEL, messages=[{"role": "system", "content": f"Contexto:\n{ctx}\nEspañol."}, {"role": "user", "content": question}])
+        return r.message.content
+    except Exception as e: return f"❌ {e}"
 
 def code_assistant(message, mode="explicar"):
-    prompts = {"explicar": "Explica el código:", "mejorar": "Mejora el código:", "corregir": "Corrige el código:", "crear": "Crea el código:"}
-    bridge_config = load_bridge_config()
-    if bridge_config.get("api_key"):
-        return consultar_experto(message, modo="codigo")
-    messages = [{"role": "system", "content": "Eres un programador experto. Explicaciones en español, código en inglés."},
-        {"role": "user", "content": f"{prompts.get(mode, 'Explica:')}\n\n{message}"}]
+    prompts = {"explicar": "Explica:", "mejorar": "Mejora:", "corregir": "Corrige:", "crear": "Crea:"}
+    config = load_bridge_config()
+    if config.get("api_key"): return consultar_experto(message, modo="codigo")
     try:
-        response = ollama.chat(model=CODE_MODEL, messages=messages, stream=False)
-        return response["message"]["content"]
-    except Exception as e:
-        return f"❌ Error: {str(e)}"
+        r = ollama.chat(model=CODE_MODEL, messages=[{"role": "system", "content": "Programador experto. Español."}, {"role": "user", "content": f"{prompts.get(mode, 'Explica:')}\n\n{message}"}])
+        return r.message.content
+    except Exception as e: return f"❌ {e}"
 
 # =====================================================================
-# INTERFAZ - IA BRIDGE SETTINGS
+# INTERFAZ
 # =====================================================================
 
-def render_bridge_settings():
+def render_bridge():
     st.subheader("☁️ IA Bridge")
     config = load_bridge_config()
-    proveedor_nombres = {k: v["nombre"] for k, v in PROVEEDORES.items()}
-    selected = st.selectbox("Proveedor", options=list(proveedor_nombres.keys()),
-        format_func=lambda x: proveedor_nombres[x],
-        index=list(proveedor_nombres.keys()).index(config.get("proveedor", "groq")))
-    config["proveedor"] = selected
-    prov = PROVEEDORES[selected]
-    if prov["gratis"]:
-        st.success("🆓 Gratuito")
-    else:
-        st.info("💰 De pago")
-    st.caption(prov["descripcion"])
-    api_key = st.text_input("API Key", value=config.get("api_key", ""), type="password",
-        help=f"Obtén tu key en: {prov['como_obtener_key']}")
+    nombres = {k: v["nombre"] for k, v in PROVEEDORES.items()}
+    sel = st.selectbox("Proveedor", list(nombres.keys()), format_func=lambda x: nombres[x],
+        index=list(nombres.keys()).index(config.get("proveedor", "groq")))
+    config["proveedor"] = sel
+    prov = PROVEEDORES[sel]
+    if prov["gratis"]: st.success("🆓 Gratis")
+    else: st.info("💰 Pago")
+    api_key = st.text_input("API Key", config.get("api_key", ""), type="password")
     config["api_key"] = api_key
-    st.markdown(f"🔑 [Obtener API Key]({prov['como_obtener_key']})")
+    st.markdown(f"🔑 [Obtener Key]({prov['como_obtener_key']})")
     modelos = prov["modelos"]
-    modelo_default = config.get("modelo") or prov["modelo_default"]
-    modelo_index = modelos.index(modelo_default) if modelo_default in modelos else 0
-    modelo = st.selectbox("Modelo", options=modelos, index=modelo_index)
-    config["modelo"] = modelo
-    with st.expander("📝 Contexto del Proyecto"):
-        contexto = st.text_area("Describe tu proyecto", value=config.get("contexto_proyecto", ""), height=100,
-            placeholder="Ej: SignalTrader Pro - Motor de trading con Next.js...")
-        config["contexto_proyecto"] = contexto
-    if st.button("💾 Guardar Configuración"):
-        save_bridge_config(config)
-        st.success("✅ Guardado")
-    if st.button("🔌 Probar Conexión"):
-        if not api_key:
-            st.error("❌ Ingresa API Key")
+    md = config.get("modelo") or prov["modelo_default"]
+    mi = modelos.index(md) if md in modelos else 0
+    config["modelo"] = st.selectbox("Modelo", modelos, index=mi)
+    with st.expander("📝 Contexto"):
+        config["contexto_proyecto"] = st.text_area("Proyecto", config.get("contexto_proyecto", ""), height=80)
+    if st.button("💾 Guardar"): save_bridge_config(config); st.success("✅")
+    if st.button("🔌 Probar"):
+        if not api_key: st.error("Sin key")
         else:
-            with st.spinner("Probando..."):
-                success, msg = test_bridge_connection()
-                if success:
-                    st.success(msg)
-                else:
-                    st.error(msg)
+            ok, msg = test_bridge()
+            st.success(msg) if ok else st.error(msg)
     st.divider()
-    if config.get("api_key"):
-        st.success(f"☁️ {prov['nombre']} ✅")
-    else:
-        st.warning("☁️ Sin configurar")
-
-# =====================================================================
-# INTERFAZ PRINCIPAL
-# =====================================================================
+    st.success(f"☁️ {prov['nombre']} ✅") if api_key else st.warning("☁️ Sin configurar")
 
 def main():
     with st.sidebar:
-        st.title("🤖 IA Local Pro v3")
-        st.caption("Con Tool Calling Nativo")
-        
-        mode = st.radio("Modo", ["🚀 Agente Autónomo", "💬 Chat Simple", "📚 RAG Documentos", "💻 Código"], index=0)
-        
+        st.title("🤖 IA Local Pro v4")
+        st.caption("Auto-ejecución + Tool Calling")
+        mode = st.radio("Modo", ["🚀 Agente Autónomo", "💬 Chat", "📚 RAG", "💻 Código"], index=0)
         st.divider()
-        st.subheader("⚙️ Modelos Locales")
-        agente_model = st.selectbox("Agente", ["qwen2.5:14b", "qwen2.5:7b", "llama3.1:8b"], index=0)
+        st.subheader("⚙️ Config")
         global AGENT_MODEL
-        AGENT_MODEL = agente_model
-        
+        AGENT_MODEL = st.selectbox("Agente", ["qwen2.5:14b", "qwen2.5:7b", "llama3.1:8b"], index=0)
         st.divider()
-        render_bridge_settings()
-        
+        render_bridge()
         st.divider()
         st.subheader("📁 Proyectos")
         if os.path.exists(PROJECTS_DIR):
             proyectos = [d for d in os.listdir(PROJECTS_DIR) if os.path.isdir(os.path.join(PROJECTS_DIR, d))]
             if proyectos:
-                selected_project = st.selectbox("Proyecto activo", proyectos)
-                st.session_state['active_project'] = os.path.join(PROJECTS_DIR, selected_project)
-            else:
-                st.info("Clona un repositorio")
-        
+                sp = st.selectbox("Activo", proyectos)
+                st.session_state['active_project'] = os.path.join(PROJECTS_DIR, sp)
         st.divider()
-        if st.button("📊 Info Sistema"):
-            st.text(tool_info_sistema())
-        if st.button("🗑️ Limpiar Historial"):
-            st.session_state['history'] = []
-            st.rerun()
-    
-    if "🚀" in mode:
-        render_autonomous_agent()
-    elif "💬" in mode:
-        render_simple_chat()
-    elif "📚" in mode:
-        render_rag()
-    elif "💻" in mode:
-        render_code_assistant()
+        if st.button("📊 Sistema"): st.text(tool_info_sistema())
+        if st.button("🗑️ Limpiar"): st.session_state['history'] = []; st.rerun()
 
-def render_autonomous_agent():
-    st.title("🚀 Agente Autónomo Pro v3")
-    st.caption("Usa Tool Calling Nativo de Ollama — El agente EJECUTA, no da instrucciones")
-    
-    bridge_config = load_bridge_config()
-    if bridge_config.get("api_key"):
-        prov = PROVEEDORES.get(bridge_config.get("proveedor", "groq"), {})
-        st.success(f"☁️ IA Avanzada: {prov.get('nombre', '?')}")
-    else:
-        st.caption("💡 Configura ☁️ IA Bridge para consultas avanzadas")
+    if "🚀" in mode: render_agent()
+    elif "💬" in mode: render_chat()
+    elif "📚" in mode: render_rag()
+    elif "💻" in mode: render_code()
+
+def render_agent():
+    st.title("🚀 Agente Autónomo v4")
+    st.caption("Auto-ejecución forzada — Si detecta GitHub URL, clona directamente")
     
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("📥 Clonar signalTrade"):
-            st.session_state['quick_task'] = "Clona el repositorio https://github.com/yecos/signalTrade.git en mi carpeta de proyectos"
+            st.session_state['quick_task'] = "Clona https://github.com/yecos/signalTrade.git y analízalo"
     with col2:
-        if st.button("📦 Instalar Deps"):
-            project = st.session_state.get('active_project', '')
-            if project and os.path.exists(project):
-                st.session_state['quick_task'] = f"Instala las dependencias del proyecto en {project}"
+        if st.button("📦 Instalar"):
+            p = st.session_state.get('active_project', '')
+            if p and os.path.exists(p): st.session_state['quick_task'] = f"Instala dependencias en {p}"
     with col3:
-        if st.button("🔍 Analizar Proyecto"):
-            project = st.session_state.get('active_project', '')
-            if project and os.path.exists(project):
-                st.session_state['quick_task'] = f"Analiza el proyecto en {project}. Lista los archivos, lee el package.json y README, y dame un resumen completo."
+        if st.button("🔍 Analizar"):
+            p = st.session_state.get('active_project', '')
+            if p and os.path.exists(p): st.session_state['quick_task'] = f"Analiza {p}. Lee package.json y README."
     
-    if 'history' not in st.session_state:
-        st.session_state['history'] = []
-    
+    if 'history' not in st.session_state: st.session_state['history'] = []
     for msg in st.session_state['history']:
-        if msg["role"] == "user":
-            st.chat_message("user").write(msg["content"])
-        elif msg["role"] == "assistant":
-            st.chat_message("assistant").write(msg["content"])
-    
-    quick_task = st.session_state.pop('quick_task', None)
-    prompt = st.chat_input("¿Qué quieres que haga?")
-    user_input = quick_task or prompt
-    
-    if user_input:
-        st.chat_message("user").write(user_input)
-        with st.chat_message("assistant"):
-            with st.spinner("🤖 Agente ejecutando..."):
-                response, new_history = run_agent(user_input, st.session_state['history'])
-                st.session_state['history'] = new_history
-                st.markdown(response)
-
-def render_simple_chat():
-    st.title("💬 Chat Simple")
-    if 'chat_history' not in st.session_state:
-        st.session_state['chat_history'] = []
-    for msg in st.session_state['chat_history']:
         st.chat_message(msg["role"]).write(msg["content"])
-    prompt = st.chat_input("Escribe tu mensaje...")
-    if prompt:
-        st.chat_message("user").write(prompt)
+    
+    qt = st.session_state.pop('quick_task', None)
+    prompt = st.chat_input("¿Qué quieres que haga?")
+    ui = qt or prompt
+    if ui:
+        st.chat_message("user").write(ui)
         with st.chat_message("assistant"):
-            with st.spinner("Pensando..."):
-                response = chat_simple(prompt, st.session_state['chat_history'])
-                st.markdown(response)
-        st.session_state['chat_history'].append({"role": "user", "content": prompt})
-        st.session_state['chat_history'].append({"role": "assistant", "content": response})
+            with st.spinner("🤖 Ejecutando..."):
+                resp, hist = run_agent(ui, st.session_state['history'])
+                st.session_state['history'] = hist
+                st.markdown(resp)
+
+def render_chat():
+    st.title("💬 Chat")
+    if 'ch' not in st.session_state: st.session_state['ch'] = []
+    for m in st.session_state['ch']: st.chat_message(m["role"]).write(m["content"])
+    p = st.chat_input("Mensaje...")
+    if p:
+        st.chat_message("user").write(p)
+        with st.chat_message("assistant"):
+            r = chat_simple(p, st.session_state['ch'])
+            st.markdown(r)
+        st.session_state['ch'].extend([{"role": "user", "content": p}, {"role": "assistant", "content": r}])
 
 def render_rag():
-    st.title("📚 RAG - Documentos")
-    client, collection = init_chroma()
-    if collection:
-        uploaded = st.file_uploader("Subir documento", type=["pdf", "txt", "md"])
-        if uploaded:
+    st.title("📚 RAG")
+    _, col = init_chroma()
+    if col:
+        up = st.file_uploader("Subir", type=["pdf", "txt", "md"])
+        if up:
             with st.spinner("Procesando..."):
-                text = ""
-                if uploaded.name.endswith(".pdf"):
+                txt = ""
+                if up.name.endswith(".pdf"):
                     try:
                         import pypdf
-                        reader = pypdf.PdfReader(uploaded)
-                        for page in reader.pages:
-                            text += page.extract_text() or ""
-                    except:
-                        st.error("pip install pypdf")
-                else:
-                    text = uploaded.getvalue().decode("utf-8", errors="replace")
-                if text:
-                    chunks = add_document_to_chroma(text, uploaded.name, collection)
-                    st.success(f"✅ {uploaded.name} ({chunks} fragmentos)")
-        if 'rag_history' not in st.session_state:
-            st.session_state['rag_history'] = []
-        for msg in st.session_state['rag_history']:
-            st.chat_message(msg["role"]).write(msg["content"])
-        prompt = st.chat_input("Pregunta sobre tus documentos...")
-        if prompt:
-            st.chat_message("user").write(prompt)
+                        for pg in pypdf.PdfReader(up).pages: txt += pg.extract_text() or ""
+                    except: st.error("pip install pypdf")
+                else: txt = up.getvalue().decode("utf-8", errors="replace")
+                if txt:
+                    try:
+                        chunks = [txt[i:i+500] for i in range(0, len(txt), 500)]
+                        for i, ch in enumerate(chunks):
+                            emb = ollama.embeddings(model="nomic-embed-text", prompt=ch)["embedding"]
+                            col.add(ids=[f"{up.name}_{i}"], embeddings=[emb], documents=[ch])
+                        st.success(f"✅ {up.name} ({len(chunks)} fragmentos)")
+                    except Exception as e: st.error(e)
+        if 'rh' not in st.session_state: st.session_state['rh'] = []
+        for m in st.session_state['rh']: st.chat_message(m["role"]).write(m["content"])
+        p = st.chat_input("Pregunta...")
+        if p:
+            st.chat_message("user").write(p)
             with st.chat_message("assistant"):
-                response = rag_query(prompt, collection)
-                st.markdown(response)
-            st.session_state['rag_history'].append({"role": "user", "content": prompt})
-            st.session_state['rag_history'].append({"role": "assistant", "content": response})
+                r = rag_query(p, col); st.markdown(r)
+            st.session_state['rh'].extend([{"role": "user", "content": p}, {"role": "assistant", "content": r}])
 
-def render_code_assistant():
-    st.title("💻 Asistente de Código")
-    bridge_config = load_bridge_config()
-    if bridge_config.get("api_key"):
-        st.success("☁️ Usando IA avanzada")
-    else:
-        st.caption(f"Modelo local {CODE_MODEL}")
+def render_code():
+    st.title("💻 Código")
     mode = st.selectbox("Modo", ["explicar", "mejorar", "corregir", "crear"])
-    if 'code_history' not in st.session_state:
-        st.session_state['code_history'] = []
-    for msg in st.session_state['code_history']:
-        st.chat_message(msg["role"]).write(msg["content"])
-    prompt = st.chat_input("Pega código o describe qué crear...")
-    if prompt:
-        st.chat_message("user").write(prompt)
+    if 'coh' not in st.session_state: st.session_state['coh'] = []
+    for m in st.session_state['coh']: st.chat_message(m["role"]).write(m["content"])
+    p = st.chat_input("Código...")
+    if p:
+        st.chat_message("user").write(p)
         with st.chat_message("assistant"):
-            with st.spinner("Generando código..."):
-                response = code_assistant(prompt, mode)
-                st.markdown(response)
-        st.session_state['code_history'].append({"role": "user", "content": prompt})
-        st.session_state['code_history'].append({"role": "assistant", "content": response})
+            r = code_assistant(p, mode); st.markdown(r)
+        st.session_state['coh'].extend([{"role": "user", "content": p}, {"role": "assistant", "content": r}])
 
 if __name__ == "__main__":
     main()
