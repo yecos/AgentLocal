@@ -821,88 +821,115 @@ TOOL_FUNCTIONS = {
 # PROMPT DEL AGENTE AUTÓNOMO
 # =====================================================================
 
-AGENT_SYSTEM_PROMPT = """Eres un agente de IA autónomo avanzado que PUEDE hacer cosas reales en el sistema del usuario.
+AGENT_SYSTEM_PROMPT = """Eres un agente de IA que EJECUTA acciones reales en la computadora del usuario.
+NO eres un asistente que da instrucciones. Eres un OPERADOR que HACE las cosas.
 
-## TUS CAPACIDADES:
-- ✅ Ejecutar comandos del sistema (git, npm, pip, python, etc.)
-- ✅ Clonar repositorios de GitHub
-- ✅ Instalar dependencias de proyectos
-- ✅ Leer, escribir y modificar archivos
-- ✅ Buscar texto dentro de archivos
-- ✅ Buscar información en internet
-- ✅ Hacer cálculos matemáticos
-- ✅ 🔍 CONSULTAR CON IA AVANZADA EN LA NUBE (¡muy importante!)
+## ⚠️ REGLA #1 - LA MÁS IMPORTANTE:
+NUNCA le digas al usuario que abra una terminal, que ejecute un comando, o que haga algo manualmente.
+TÚ ERES QUIEN EJECUTA. TÚ tienes las herramientas. ÚSALAS.
 
-## HERRAMIENTAS DISPONIBLES:
+❌ MAL: "Abre una terminal y ejecuta git clone https://..."
+❌ MAL: "Puedes usar el comando npm install para instalar dependencias"
+❌ MAL: "Te sugiero que abras PowerShell y corras..."
+❌ MAL: "Ejecuta el siguiente comando: git clone ..."
+❌ MAL: "Para clonar el repositorio, sigue estos pasos:"
 
-1. ejecutar_comando(comando, directorio?) - Ejecuta un comando del sistema
-2. clonar_repositorio(url, directorio_destino?) - Clona un repo de GitHub
-3. instalar_dependencias(directorio, tipo?) - Instala dependencias (npm/pip)
+✅ BIEN: clonar_repositorio("https://github.com/user/repo.git")
+✅ BIEN: ejecutar_comando("npm install", "C:\\Projects\\mi-app")
+✅ BIEN: instalar_dependencias("C:\\Projects\\mi-app", "npm")
+✅ BIEN: leer_archivo("C:\\Projects\\mi-app\\package.json")
+
+## HERRAMIENTAS QUE TIENES (ÚSALAS DIRECTAMENTE):
+
+1. clonar_repositorio(url, directorio_destino?) - Clona un repo de GitHub DIRECTAMENTE
+   Ejemplo: clonar_repositorio("https://github.com/yecos/signalTrade.git")
+
+2. ejecutar_comando(comando, directorio?) - Ejecuta un comando del sistema DIRECTAMENTE
+   Ejemplo: ejecutar_comando("git status", "C:\\Projects\\signalTrade")
+
+3. instalar_dependencias(directorio, tipo?) - Instala dependencias DIRECTAMENTE
+   Ejemplo: instalar_dependencias("C:\\Projects\\signalTrade", "npm")
+
 4. listar_archivos(ruta, profundidad?) - Lista archivos de un directorio
+   Ejemplo: listar_archivos("C:\\Projects\\signalTrade", 3)
+
 5. leer_archivo(ruta) - Lee el contenido de un archivo
-6. escribir_archivo(ruta, contenido) - Escribe un archivo completo
+   Ejemplo: leer_archivo("C:\\Projects\\signalTrade\\package.json")
+
+6. escribir_archivo(ruta, contenido) - Escribe un archivo completo (con backup automático)
+   Ejemplo: escribir_archivo("C:\\Projects\\signalTrade\\test.js", "console.log('hello')")
+
 7. modificar_archivo(ruta, texto_original, texto_nuevo) - Modifica parte de un archivo
+   Ejemplo: modificar_archivo("app.js", "version: 1.0", "version: 2.0")
+
 8. buscar_en_archivos(directorio, texto, extension?) - Busca en archivos
+   Ejemplo: buscar_en_archivos("C:\\Projects\\signalTrade", "useEffect", ".tsx")
+
 9. calcular(expresion) - Calcula expresión matemática
+   Ejemplo: calcular("100 * 0.15")
+
 10. buscar(consulta) - Busca en internet
-11. 🔍 consultar_experto(pregunta, modo?) - CONSULTA CON IA AVANZADA EN LA NUBE
-12. 🔍 consultar_con_codigo(pregunta, codigo, lenguaje?) - Envía código a IA avanzada
-13. 🔍 consultar_plan(tarea, contexto?) - Pide plan a IA avanzada
+    Ejemplo: buscar("Next.js 14 app router tutorial")
+
+11. consultar_experto(pregunta, modo?) - Consulta con IA avanzada en la nube
+    Ejemplo: consultar_experto("¿Cómo implementar WebSocket en Next.js?", "codigo")
+
+12. consultar_con_codigo(pregunta, codigo, lenguaje?) - Envía código a IA avanzada
+    Ejemplo: consultar_con_codigo("Mejora esta función", "function x() { ... }", "typescript")
+
+13. consultar_plan(tarea, contexto?) - Pide plan a IA avanzada
+    Ejemplo: consultar_plan("Agregar alertas al motor de trading")
+
 14. info_sistema() - Información del sistema
 
-## 🔍 CUÁNDO USAR consultar_experto:
+## CÓMO RESPONDER:
 
-USA consultar_experto cuando:
-- Necesites razonamiento profundo o complejo
-- El código sea difícil y necesites una solución experta
-- Necesites crear un plan de implementación detallado
-- No estés seguro de la mejor arquitectura para algo
-- Necesites analizar código complejo de un proyecto
-- El usuario te pida algo que requiere conocimiento experto
+Cuando el usuario te pida algo, debes responder CON LLAMADAS A HERRAMIENTAS.
+Escribe las llamadas directamente en tu respuesta. El sistema las ejecutará automáticamente.
 
-NO lo uses cuando:
-- Es una tarea simple (listar archivos, leer archivo, etc.)
-- Ya sabes la respuesta con confianza
-- Es solo un cálculo o búsqueda simple
+Formato de llamada: nombre_herramienta("parametro1", "parametro2")
 
-Modos de consultar_experto:
-- "general" - Para preguntas generales
-- "codigo" - Para tareas de programación
-- "analisis" - Para análisis de código/sistemas
-- "plan" - Para crear planes de implementación
+Puedes hacer múltiples llamadas en una sola respuesta.
 
-## CÓMO FUNCIONAS:
+## EJEMPLOS:
 
-### PASO 1: PLANIFICAR
-Piensa qué necesitas hacer. Devuelve un JSON:
-```json
-{
-  "pensamiento": "Qué necesito hacer y por qué",
-  "pasos": [
-    {"paso": 1, "accion": "descripción", "herramienta": "nombre", "parametros": ["p1", "p2"]},
-    {"paso": 2, ...}
-  ]
-}
-```
+Usuario: "Clona mi repositorio https://github.com/yecos/signalTrade.git"
+Tu respuesta:
+clonar_repositorio("https://github.com/yecos/signalTrade.git")
 
-### PASO 2: EJECUTAR
-Ejecuta cada paso usando las herramientas.
+Usuario: "Analiza el proyecto signalTrade"
+Tu respuesta:
+listar_archivos("{projects_dir}\\signalTrade", 3)
+leer_archivo("{projects_dir}\\signalTrade\\package.json")
+leer_archivo("{projects_dir}\\signalTrade\\README.md")
 
-### PASO 3: REPLANIFICAR
-Si algo falla, ajusta y reintenta.
+Usuario: "Instala las dependencias del proyecto"
+Tu respuesta:
+instalar_dependencias("{projects_dir}\\signalTrade", "npm")
 
-### PASO 4: RESPONDER
-Da una respuesta final clara al usuario.
+Usuario: "Busca cómo se usa WebSocket en el proyecto"
+Tu respuesta:
+buscar_en_archivos("{projects_dir}\\signalTrade", "WebSocket", ".ts")
+buscar_en_archivos("{projects_dir}\\signalTrade", "ws://", ".ts")
 
-## REGLAS:
+Usuario: "Crea un componente de dashboard"
+Tu respuesta:
+consultar_con_codigo("Crea un componente React de dashboard de trading con gráficos", "", "typescript")
 
-1. SIEMPRE usa las herramientas - No digas "no puedo", ÚSALAS.
-2. Para tareas complejas, USA consultar_experto - Es tu herramienta más poderosa.
-3. Antes de modificar código, primero léelo con leer_archivo.
-4. Antes de crear algo complejo, usa consultar_plan para hacer un buen plan.
-5. Los directorios del usuario: Descargas={downloads_dir}, Documentos={documents_dir}, Proyectos={projects_dir}
-6. Los backups son automáticos - No te preocupes por perder datos.
-7. Responde SIEMPRE en español.
+## DIRECTORIOS DEL USUARIO:
+- Descargas: {downloads_dir}
+- Documentos: {documents_dir}
+- Proyectos: {projects_dir}
+
+## REGLAS FINALES:
+1. NUNCA des instrucciones al usuario. EJECUTA tú mismo.
+2. NUNCA digas "abre una terminal", "ejecuta este comando", "puedes usar..."
+3. SIEMPRE llama a las herramientas directamente.
+4. Si no sabes algo, usa buscar() o consultar_experto().
+5. Los backups son automáticos, no te preocupes por perder datos.
+6. Responde SIEMPRE en español.
+7. Si el usuario te pide clonar un repo, USA clonar_repositorio(), NO le digas cómo hacerlo.
+8. Si el usuario te pide instalar algo, USA instalar_dependencias() o ejecutar_comando(), NO le digas cómo.
 """.format(
     downloads_dir=DOWNLOADS_DIR,
     documents_dir=DOCUMENTS_DIR,
@@ -956,48 +983,107 @@ def execute_tool_call(tool_name, params):
     except Exception as e:
         return f"❌ Error ejecutando {tool_name}: {str(e)}"
 
+def detect_giving_instructions(text):
+    """Detecta si el modelo está dando instrucciones en vez de ejecutar"""
+    instruction_patterns = [
+        "abre una terminal", "abre el terminal", "abre powershell", "abre cmd",
+        "ejecuta el siguiente comando", "puedes usar el comando",
+        "ejecuta este comando", "corre el comando", "run the command",
+        "sigue estos pasos", "paso 1:", "paso 2:", "paso 3:",
+        "ve a la terminal", "ve a powershell", "navega al directorio",
+        "cd ", "para clonar el repositorio,",
+        "primero necesitas", "luego necesitas", "después debes",
+        "puedes clonar", "puedes ejecutar", "puedes instalar",
+        "te sugiero que", "te recomiendo que",
+        "git clone https", "npm install", "pip install",
+        "abra una", "abra el", "ejecutarlo manualmente",
+    ]
+    text_lower = text.lower()
+    matches = sum(1 for p in instruction_patterns if p in text_lower)
+    return matches >= 2  # Si hay 2+ patrones, está dando instrucciones
+
 def run_agent(user_message, history=[]):
     """Ejecuta el agente autónomo completo"""
     messages = [{"role": "system", "content": AGENT_SYSTEM_PROMPT}]
     messages.extend(history[-6:])
     messages.append({"role": "user", "content": user_message})
     
-    # === PASO 1: PLANIFICAR ===
-    plan_prompt = messages.copy()
-    plan_prompt.append({
+    # === PASO 1: El agente responde con llamadas a herramientas ===
+    exec_prompt = messages.copy()
+    exec_prompt.append({
         "role": "user", 
-        "content": "\n\nPlanifica tu respuesta. Devuelve SOLO el JSON con tu plan. No ejecutes nada todavía."
+        "content": "\n\nEJECUTA las herramientas necesarias AHORA. Escribe las llamadas directamente. NO expliques cómo hacerlo, HAZLO tú. Ejemplo: clonar_repositorio(\"https://github.com/...\")"
     })
     
     try:
-        plan_response = ollama.chat(model=AGENT_MODEL, messages=plan_prompt, stream=False)
-        plan_text = plan_response["message"]["content"]
+        response = ollama.chat(model=AGENT_MODEL, messages=exec_prompt, stream=False)
+        agent_text = response["message"]["content"]
     except Exception as e:
         return f"❌ Error conectando con Ollama: {str(e)}", []
     
+    # Mostrar lo que el agente quiere hacer
     st.markdown(f"""
     <div class="plan-box">
-    <strong>📋 Plan del Agente:</strong><br><br>
-    {plan_text.replace(chr(10), '<br>')}
+    <strong>🤖 Agente ejecutando:</strong><br><br>
+    {agent_text.replace(chr(10), '<br>')}
     </div>
     """, unsafe_allow_html=True)
     
-    # === PASO 2: EJECUTAR HERRAMIENTAS ===
-    tool_calls = parse_tool_calls(plan_text)
+    # === PASO 2: Extraer y ejecutar herramientas ===
+    tool_calls = parse_tool_calls(agent_text)
     
-    if not tool_calls:
-        exec_prompt = messages.copy()
-        exec_prompt.append({"role": "assistant", "content": plan_text})
-        exec_prompt.append({
+    # === AUTO-CORRECCIÓN: Si el modelo dio instrucciones en vez de ejecutar ===
+    if not tool_calls and detect_giving_instructions(agent_text):
+        st.markdown('<div class="tool-warning">⚠️ El agente dio instrucciones en vez de ejecutar. Corrigiendo automáticamente...</div>', unsafe_allow_html=True)
+        
+        # Extraer comandos del texto y ejecutarlos nosotros
+        correction_prompt = messages.copy()
+        correction_prompt.append({"role": "assistant", "content": agent_text})
+        correction_prompt.append({
             "role": "user",
-            "content": "Ahora ejecuta las herramientas necesarias. Formato: herramienta(\"param1\", \"param2\")"
+            "content": """NO expliques qué hacer. NO des pasos. NO digas 'ejecuta este comando'.
+EJECUTA las herramientas directamente escribiendo las llamadas.
+
+Ejemplo de lo que DEBES escribir:
+clonar_repositorio("https://github.com/yecos/signalTrade.git")
+
+Ejemplo de lo que NO debes escribir:
+"Abre una terminal y ejecuta git clone..."
+"Puedes usar el comando npm install"
+
+Ahora EJECUTA las herramientas:"""
+        })
+        
+        try:
+            correction_response = ollama.chat(model=AGENT_MODEL, messages=correction_prompt, stream=False)
+            agent_text = correction_response["message"]["content"]
+            tool_calls = parse_tool_calls(agent_text)
+            st.markdown(f"""
+            <div class="plan-box">
+            <strong>🔄 Corrección:</strong><br><br>
+            {agent_text.replace(chr(10), '<br>')}
+            </div>
+            """, unsafe_allow_html=True)
+        except Exception as e:
+            pass
+    
+    # Segundo intento si aún no hay herramientas
+    if not tool_calls:
+        exec_prompt2 = messages.copy()
+        exec_prompt2.append({
+            "role": "user",
+            "content": "Escribe SOLO las llamadas a herramientas, nada más. Formato: herramienta(\"param1\", \"param2\")"
         })
         try:
-            exec_response = ollama.chat(model=AGENT_MODEL, messages=exec_prompt, stream=False)
-            exec_text = exec_response["message"]["content"]
-            tool_calls = parse_tool_calls(exec_text)
-        except Exception as e:
-            return f"❌ Error: {str(e)}", []
+            response2 = ollama.chat(model=AGENT_MODEL, messages=exec_prompt2, stream=False)
+            agent_text2 = response2["message"]["content"]
+            tool_calls = parse_tool_calls(agent_text2)
+        except:
+            pass
+    
+    # Si aún no hay herramientas, intentar ejecución directa basada en la intención
+    if not tool_calls:
+        tool_calls = auto_execute_from_intent(user_message)
     
     results = []
     tool_results_container = st.container()
@@ -1023,11 +1109,11 @@ def run_agent(user_message, history=[]):
     
     if replan_needed and len(results) > 0:
         replan_prompt = messages.copy()
-        replan_prompt.append({"role": "assistant", "content": plan_text})
+        replan_prompt.append({"role": "assistant", "content": agent_text})
         results_text = "Resultados de la ejecución:\n\n"
         for r in results:
             results_text += f"- {r['tool']}({', '.join(str(p)[:30] for p in r['params'])}): {str(r['result'])[:300]}\n"
-        replan_prompt.append({"role": "user", "content": results_text + "\n\nAlgunas herramientas fallaron. Replanifica."})
+        replan_prompt.append({"role": "user", "content": results_text + "\n\nAlgunas herramientas fallaron. EJECUTA las herramientas corregidas directamente."})
         
         try:
             replan_response = ollama.chat(model=AGENT_MODEL, messages=replan_prompt, stream=False)
@@ -1045,13 +1131,13 @@ def run_agent(user_message, history=[]):
     
     # === PASO 4: RESPUESTA FINAL ===
     final_prompt = messages.copy()
-    final_prompt.append({"role": "assistant", "content": plan_text})
+    final_prompt.append({"role": "assistant", "content": agent_text})
     results_summary = "Resultados de las herramientas:\n\n"
     for r in results:
         results_summary += f"- {r['tool']}: {str(r['result'])[:500]}\n"
     final_prompt.append({
         "role": "user", 
-        "content": results_summary + "\n\nBasándote en estos resultados, da una respuesta final clara y útil al usuario en español."
+        "content": results_summary + "\n\nBasándote en estos resultados, da una respuesta final clara y útil al usuario en español. NO des instrucciones de comandos, solo explica lo que hiciste y los resultados."
     })
     
     try:
@@ -1066,6 +1152,42 @@ def run_agent(user_message, history=[]):
     ]
     
     return final_text, new_history
+
+def auto_execute_from_intent(user_message):
+    """Ejecución directa basada en la intención del mensaje cuando el modelo no genera herramientas"""
+    msg_lower = user_message.lower()
+    calls = []
+    
+    # Detectar clonar repositorio
+    github_match = re.search(r'https://github\.com/[\w-]+/[\w-]+', user_message)
+    if github_match and ("clona" in msg_lower or "descargar" in msg_lower or "descarga" in msg_lower or "github" in msg_lower):
+        url = github_match.group(0)
+        if not url.endswith(".git"):
+            url += ".git"
+        calls.append({"tool": "clonar_repositorio", "params": [url]})
+    
+    # Detectar instalar dependencias
+    if ("instal" in msg_lower or "dependencia" in msg_lower or "npm install" in msg_lower) and not calls:
+        project = st.session_state.get('active_project', '')
+        if project and os.path.exists(project):
+            calls.append({"tool": "instalar_dependencias", "params": [project]})
+    
+    # Detectar analizar proyecto
+    if ("analiz" in msg_lower or "estructura" in msg_lower or "revisa" in msg_lower) and not calls:
+        project = st.session_state.get('active_project', '')
+        if project and os.path.exists(project):
+            calls.append({"tool": "listar_archivos", "params": [project, "3"]})
+            pkg_json = os.path.join(project, "package.json")
+            if os.path.exists(pkg_json):
+                calls.append({"tool": "leer_archivo", "params": [pkg_json]})
+    
+    # Detectar ejecutar proyecto
+    if ("ejecuta" in msg_lower or "corre" in msg_lower or "run" in msg_lower or "inicia" in msg_lower) and "dev" in msg_lower and not calls:
+        project = st.session_state.get('active_project', '')
+        if project and os.path.exists(project):
+            calls.append({"tool": "ejecutar_comando", "params": ["npm run dev", project]})
+    
+    return calls
 
 # =====================================================================
 # CHAT SIMPLE
