@@ -1,8 +1,19 @@
 """
 =============================================================
- AGENTE LOCAL AUTONOMO v6 - AUTO-MEJORABLE
- Detecta intencion + Ejecuta directamente + Aprende de errores
- + Feedback de usuario + Auto-reflexion + Patrones aprendidos
+ AGENTE LOCAL AUTONOMO v7 - AGENTE QUE PIENSA
+ Piensa → Planifica → Ejecuta → Evalua → Ajusta
+ Consulta IA cloud si necesita ayuda
+=============================================================
+
+ARQUITECTURA:
+  Usuario → Agente PIENSA (LLM local) → Plan → Ejecuta → Evalua
+                ↑                                              |
+                └── Si falla, ajusta y reintenta ←─────────────┘
+                └── Si se atasca, consulta IA cloud ←──────────┘
+
+DIFERENCIA vs v5/v6:
+  v5/v6: "Detectar intencion → Ejecutar mecanicamente"
+  v7:    "Entender el problema → PENSAR como resolverlo → Ejecutar → Aprender"
 =============================================================
 """
 
@@ -20,7 +31,9 @@ from pathlib import Path
 # ============================================================
 
 AGENT_MODEL = "qwen2.5:14b"
-MAX_ITERATIONS = 6
+CHAT_MODEL = "llama3.1:8b"
+MAX_THINKING_ROUNDS = 5
+MAX_EXECUTION_RETRIES = 3
 
 if platform.system() == "Windows":
     REPOS_DIR = os.path.join(os.path.expanduser("~"), "Documents")
@@ -37,271 +50,31 @@ CORRECTIONS_FILE = os.path.join(LEARN_DIR, "corrections.json")
 FEEDBACK_FILE = os.path.join(LEARN_DIR, "feedback.json")
 PATTERNS_FILE = os.path.join(LEARN_DIR, "patterns.json")
 KNOWLEDGE_FILE = os.path.join(LEARN_DIR, "knowledge.json")
-CONVERSATIONS_FILE = os.path.join(LEARN_DIR, "conversations.json")
-
-
-# ============================================================
-# SISTEMA DE APRENDIZAJE - Auto-mejora
-# ============================================================
-
-class LearningSystem:
-    """Sistema de auto-mejora del agente."""
-
-    @staticmethod
-    def _load_json(filepath: str, default=None):
-        if default is None:
-            default = []
-        try:
-            if os.path.exists(filepath):
-                with open(filepath, "r", encoding="utf-8") as f:
-                    return json.load(f)
-        except:
-            pass
-        return default
-
-    @staticmethod
-    def _save_json(filepath: str, data):
-        try:
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"Error guardando {filepath}: {e}")
-
-    # --- CORRECCIONES ---
-
-    def save_correction(self, user_message: str, wrong_action: str, correct_action: str, reason: str = ""):
-        """Guarda una correccion del usuario para no repetir el error."""
-        corrections = self._load_json(CORRECTIONS_FILE, [])
-        corrections.append({
-            "timestamp": datetime.now().isoformat(),
-            "user_message": user_message,
-            "wrong_action": wrong_action,
-            "correct_action": correct_action,
-            "reason": reason
-        })
-        self._save_json(CORRECTIONS_FILE, corrections)
-
-    def get_corrections(self) -> list:
-        """Obtiene todas las correcciones guardadas."""
-        return self._load_json(CORRECTIONS_FILE, [])
-
-    def check_corrections(self, user_message: str, proposed_action: str) -> dict:
-        """Verifica si una accion propuesta fue corregida antes."""
-        corrections = self.get_corrections()
-        msg_lower = user_message.lower()
-
-        for corr in corrections:
-            # Buscar correcciones para mensajes similares
-            if any(w in msg_lower for w in corr["user_message"].lower().split()):
-                if corr["wrong_action"] == proposed_action:
-                    return {
-                        "corrected": True,
-                        "correct_action": corr["correct_action"],
-                        "reason": corr.get("reason", "")
-                    }
-        return {"corrected": False}
-
-    # --- FEEDBACK ---
-
-    def save_feedback(self, user_message: str, agent_response: str, action_taken: str, rating: str, comment: str = ""):
-        """Guarda el feedback del usuario (positivo/negativo)."""
-        feedback = self._load_json(FEEDBACK_FILE, [])
-        feedback.append({
-            "timestamp": datetime.now().isoformat(),
-            "user_message": user_message,
-            "agent_response": agent_response[:200],
-            "action_taken": action_taken,
-            "rating": rating,  # "positive" or "negative"
-            "comment": comment
-        })
-        self._save_json(FEEDBACK_FILE, feedback)
-
-    def get_feedback_stats(self) -> dict:
-        """Obtiene estadisticas de feedback."""
-        feedback = self._load_json(FEEDBACK_FILE, [])
-        if not feedback:
-            return {"total": 0, "positive": 0, "negative": 0, "best_actions": [], "worst_actions": []}
-
-        positive = [f for f in feedback if f["rating"] == "positive"]
-        negative = [f for f in feedback if f["rating"] == "negative"]
-
-        # Encontrar las acciones mas exitosas y las que fallan
-        action_counts = {}
-        for f in feedback:
-            action = f.get("action_taken", "unknown")
-            if action not in action_counts:
-                action_counts[action] = {"positive": 0, "negative": 0}
-            action_counts[action][f["rating"]] += 1
-
-        best = sorted(action_counts.items(), key=lambda x: x[1]["positive"], reverse=True)[:5]
-        worst = sorted(action_counts.items(), key=lambda x: x[1]["negative"], reverse=True)[:5]
-
-        return {
-            "total": len(feedback),
-            "positive": len(positive),
-            "negative": len(negative),
-            "best_actions": [(a, c) for a, c in best],
-            "worst_actions": [(a, c) for a, c in worst]
-        }
-
-    # --- PATRONES APRENDIDOS ---
-
-    def save_pattern(self, trigger: str, actions: list, context: str = ""):
-        """Guarda un patron de acciones que el usuario repite."""
-        patterns = self._load_json(PATTERNS_FILE, [])
-        # Verificar si ya existe un patron similar
-        for p in patterns:
-            if p["trigger"].lower() == trigger.lower():
-                p["actions"] = actions
-                p["last_used"] = datetime.now().isoformat()
-                p["use_count"] = p.get("use_count", 0) + 1
-                self._save_json(PATTERNS_FILE, patterns)
-                return
-
-        patterns.append({
-            "trigger": trigger,
-            "actions": actions,
-            "context": context,
-            "created": datetime.now().isoformat(),
-            "last_used": datetime.now().isoformat(),
-            "use_count": 1
-        })
-        self._save_json(PATTERNS_FILE, patterns)
-
-    def get_patterns(self) -> list:
-        """Obtiene los patrones aprendidos."""
-        return self._load_json(PATTERNS_FILE, [])
-
-    def match_pattern(self, user_message: str) -> list:
-        """Busca si el mensaje coincide con un patron aprendido."""
-        patterns = self.get_patterns()
-        msg_lower = user_message.lower()
-
-        matched = []
-        for p in patterns:
-            # Coincidencia simple por palabras clave
-            trigger_words = p["trigger"].lower().split()
-            match_count = sum(1 for w in trigger_words if w in msg_lower)
-            if match_count >= len(trigger_words) * 0.6:  # 60% de coincidencia
-                matched.append(p)
-
-        # Ordenar por uso (los mas usados primero)
-        matched.sort(key=lambda x: x.get("use_count", 0), reverse=True)
-        return matched
-
-    # --- CONOCIMIENTO ---
-
-    def save_knowledge(self, topic: str, content: str, source: str = "conversation"):
-        """Guarda conocimiento adquirido para uso futuro."""
-        knowledge = self._load_json(KNOWLEDGE_FILE, [])
-
-        # Verificar si ya existe
-        for k in knowledge:
-            if k["topic"].lower() == topic.lower():
-                k["content"] = content
-                k["updated"] = datetime.now().isoformat()
-                self._save_json(KNOWLEDGE_FILE, knowledge)
-                return
-
-        knowledge.append({
-            "topic": topic,
-            "content": content,
-            "source": source,
-            "created": datetime.now().isoformat(),
-            "updated": datetime.now().isoformat()
-        })
-        self._save_json(KNOWLEDGE_FILE, knowledge)
-
-    def get_knowledge(self, topic: str = None) -> list:
-        """Obtiene conocimiento guardado."""
-        knowledge = self._load_json(KNOWLEDGE_FILE, [])
-        if topic:
-            return [k for k in knowledge if topic.lower() in k["topic"].lower()]
-        return knowledge
-
-    # --- AUTO-REFLEXION ---
-
-    def self_reflect(self, action: str, result: str, user_message: str) -> dict:
-        """El agente reflexiona sobre si su accion fue correcta."""
-        reflection = {
-            "action": action,
-            "success": True,
-            "lesson": "",
-            "improvement": ""
-        }
-
-        # Detectar fallos comunes
-        if "ERROR" in result or "Error" in result:
-            reflection["success"] = False
-
-            if "no existe" in result.lower() or "not found" in result.lower():
-                reflection["lesson"] = "Verificar que la ruta existe antes de intentar leer/ejecutar"
-                reflection["improvement"] = "listar_archivos primero para confirmar rutas"
-
-            elif "timeout" in result.lower():
-                reflection["lesson"] = "El comando tardo demasiado"
-                reflection["improvement"] = "Usar comandos mas especificos o aumentar timeout"
-
-            elif "permission" in result.lower() or "denegado" in result.lower():
-                reflection["lesson"] = "Sin permisos para ejecutar"
-                reflection["improvement"] = "Sugerir ejecutar como administrador"
-
-            elif "already exists" in result.lower() or "ya existe" in result.lower():
-                reflection["success"] = True  # No es realmente un error
-                reflection["lesson"] = "El recurso ya existe, usarlo en vez de recrear"
-
-        # Guardar la reflexion como conocimiento
-        if reflection["lesson"]:
-            self.save_knowledge(
-                f"leccion:{action}",
-                reflection["lesson"],
-                source="auto_reflection"
-            )
-
-        return reflection
-
-    # --- ESTADISTICAS ---
-
-    def get_stats(self) -> dict:
-        """Obtiene estadisticas generales del sistema de aprendizaje."""
-        corrections = self.get_corrections()
-        patterns = self.get_patterns()
-        knowledge = self.get_knowledge()
-        feedback_stats = self.get_feedback_stats()
-
-        return {
-            "corrections_count": len(corrections),
-            "patterns_count": len(patterns),
-            "knowledge_count": len(knowledge),
-            "feedback": feedback_stats,
-            "total_learning_items": len(corrections) + len(patterns) + len(knowledge)
-        }
-
-
-# Instancia global del sistema de aprendizaje
-learning = LearningSystem()
 
 
 # ============================================================
 # HERRAMIENTAS - Funciones que EJECUTAN de verdad
 # ============================================================
 
-def ejecutar_comando(comando: str) -> str:
+def ejecutar_comando(comando: str, cwd: str = None) -> str:
     try:
         result = subprocess.run(
             comando, shell=True, capture_output=True, text=True,
-            timeout=120, cwd=REPOS_DIR
+            timeout=120, cwd=cwd or REPOS_DIR
         )
         output = ""
         if result.stdout:
             output += result.stdout.strip()
         if result.stderr:
-            output += ("\n[STDERR] " + result.stderr.strip()) if output else result.stderr.strip()
+            stderr = result.stderr.strip()
+            # Algunos stderr son solo warnings, no errores reales
+            if stderr and "npm notice" not in stderr.lower():
+                output += ("\n[STDERR] " + stderr) if output else stderr
         if not output:
-            output = "(Comando ejecutado sin salida)"
+            output = "(sin salida)"
         return output
     except subprocess.TimeoutExpired:
-        return "ERROR: Comando cancelado por timeout (>120s)"
+        return "ERROR_TIMEOUT: Comando cancelado (>120s)"
     except Exception as e:
         return f"ERROR: {e}"
 
@@ -316,27 +89,18 @@ def clonar_repositorio(url: str) -> str:
         archivos_reales = [f for f in contenido if f != ".git"]
 
         if os.path.exists(git_dir) and len(archivos_reales) > 1:
-            return f"Repositorio ya existe y esta completo en: {target_dir}\nCarpetas: {[f for f in contenido if os.path.isdir(os.path.join(target_dir, f))]}\nArchivos: {archivos_reales[:10]}..."
+            return f"Ya existe en: {target_dir}"
         else:
             import shutil
             try:
                 shutil.rmtree(target_dir)
             except Exception as e:
-                return f"La carpeta existe pero esta vacia/incompleta y no se pudo borrar: {e}\nBorrala manualmente: Remove-Item -Recurse -Force \"{target_dir}\""
+                return f"Carpeta vacia, no se pudo borrar: {e}"
 
-    comando = f'git clone {url} "{target_dir}"'
-    resultado = ejecutar_comando(comando)
+    resultado = ejecutar_comando(f'git clone {url} "{target_dir}"')
 
-    if os.path.exists(target_dir):
-        contenido = os.listdir(target_dir)
-        carpetas = [f for f in contenido if os.path.isdir(os.path.join(target_dir, f))]
-        archivos = [f for f in contenido if os.path.isfile(os.path.join(target_dir, f))]
-        if len(carpetas) > 0 or len(archivos) > 1:
-            # Guardar conocimiento sobre este repo
-            learning.save_knowledge(f"repo:{repo_name}", f"Clonado desde {url} en {target_dir}")
-            return f"CLONADO OK en: {target_dir}\nCarpetas: {carpetas}\nArchivos: {archivos[:10]}"
-        else:
-            return f"Clonado pero parece vacio. Salida de git:\n{resultado}"
+    if os.path.exists(target_dir) and len(os.listdir(target_dir)) > 1:
+        return f"CLONADO OK en: {target_dir}"
     else:
         return f"ERROR al clonar:\n{resultado}"
 
@@ -359,19 +123,9 @@ def instalar_dependencias(ruta: str, gestor: str = "auto") -> str:
         "npm": f'cd "{ruta}" && npm install',
         "pip": f'cd "{ruta}" && pip install -r requirements.txt',
         "poetry": f'cd "{ruta}" && poetry install',
-        "yarn": f'cd "{ruta}" && yarn install',
         "bun": f'cd "{ruta}" && bun install',
     }
-
-    comando = comandos.get(gestor, f'cd "{ruta}" && {gestor} install')
-    resultado = ejecutar_comando(comando)
-
-    # Guardar conocimiento
-    if "ERROR" not in resultado:
-        repo_name = os.path.basename(ruta)
-        learning.save_knowledge(f"deps:{repo_name}", f"Dependencias instaladas con {gestor}")
-
-    return resultado
+    return ejecutar_comando(comandos.get(gestor, f'cd "{ruta}" && {gestor} install'))
 
 
 def leer_archivo(ruta: str) -> str:
@@ -380,8 +134,7 @@ def leer_archivo(ruta: str) -> str:
         rutas_posibles.append(os.path.join(REPOS_DIR, ruta))
         try:
             for d in os.listdir(REPOS_DIR):
-                full = os.path.join(REPOS_DIR, d, ruta)
-                rutas_posibles.append(full)
+                rutas_posibles.append(os.path.join(REPOS_DIR, d, ruta))
         except:
             pass
 
@@ -395,31 +148,22 @@ def leer_archivo(ruta: str) -> str:
                 return contenido
             except Exception as e:
                 return f"ERROR leyendo: {e}"
-
     return f"Archivo no encontrado: {ruta}"
 
 
 def listar_archivos(ruta: str = None) -> str:
     if ruta is None:
         ruta = REPOS_DIR
-
     if not os.path.exists(ruta):
         alt = os.path.join(REPOS_DIR, ruta) if not os.path.isabs(ruta) else ruta
         if os.path.exists(alt):
             ruta = alt
         else:
             return f"Directorio no existe: {ruta}"
-
     try:
         items = os.listdir(ruta)
-        carpetas = []
-        archivos = []
-        for item in sorted(items):
-            full = os.path.join(ruta, item)
-            if os.path.isdir(full):
-                carpetas.append(item)
-            else:
-                archivos.append(item)
+        carpetas = sorted([f for f in items if os.path.isdir(os.path.join(ruta, f))])
+        archivos = sorted([f for f in items if os.path.isfile(os.path.join(ruta, f))])
         resultado = f"Contenido de {ruta}:\n"
         for c in carpetas:
             resultado += f"  [CARPETA] {c}\n"
@@ -439,8 +183,7 @@ def analizar_proyecto(ruta: str) -> str:
         else:
             return f"Directorio no existe: {ruta}"
 
-    resultado = f"Analisis de: {ruta}\n"
-    resultado += "=" * 40 + "\n\n"
+    resultado = f"Analisis de: {ruta}\n" + "=" * 40 + "\n\n"
 
     for root, dirs, files in os.walk(ruta):
         level = root.replace(ruta, "").count(os.sep)
@@ -457,14 +200,10 @@ def analizar_proyecto(ruta: str) -> str:
 
     resultado += "\nDeteccion:\n"
     checks = {
-        "package.json": "Node.js",
-        "tsconfig.json": "TypeScript",
-        "next.config.js": "Next.js",
-        "next.config.ts": "Next.js",
-        "requirements.txt": "Python (pip)",
-        "Dockerfile": "Docker",
-        ".git": "Repositorio Git",
-        "README.md": "Tiene README",
+        "package.json": "Node.js", "tsconfig.json": "TypeScript",
+        "next.config.js": "Next.js", "next.config.ts": "Next.js",
+        "requirements.txt": "Python", "Dockerfile": "Docker",
+        ".git": "Git", "README.md": "README",
     }
     for fname, desc in checks.items():
         if os.path.exists(os.path.join(ruta, fname)):
@@ -475,16 +214,11 @@ def analizar_proyecto(ruta: str) -> str:
         try:
             with open(pkg_path, "r", encoding="utf-8") as f:
                 pkg = json.load(f)
-            resultado += f"\npackage.json:\n"
-            resultado += f"  Nombre: {pkg.get('name', 'N/A')}\n"
-            resultado += f"  Version: {pkg.get('version', 'N/A')}\n"
+            resultado += f"\npackage.json: {pkg.get('name', 'N/A')} v{pkg.get('version', 'N/A')}\n"
             resultado += f"  Descripcion: {pkg.get('description', 'N/A')}\n"
             deps = pkg.get("dependencies", {})
             if deps:
                 resultado += f"  Deps: {', '.join(list(deps.keys())[:15])}\n"
-            dev_deps = pkg.get("devDependencies", {})
-            if dev_deps:
-                resultado += f"  DevDeps: {', '.join(list(dev_deps.keys())[:15])}\n"
             scripts = pkg.get("scripts", {})
             if scripts:
                 resultado += f"  Scripts: {', '.join(scripts.keys())}\n"
@@ -502,10 +236,6 @@ def analizar_proyecto(ruta: str) -> str:
         except:
             pass
 
-    # Guardar conocimiento del proyecto
-    repo_name = os.path.basename(ruta)
-    learning.save_knowledge(f"proyecto:{repo_name}", f"Analizado: {ruta}. Tipo: Next.js/TypeScript")
-
     return resultado
 
 
@@ -522,755 +252,636 @@ def escribir_archivo(ruta: str, contenido: str) -> str:
 
 
 def abrir_aplicacion(app: str) -> str:
-    """Abre una aplicacion en el sistema."""
-    # Mapeo de nombres comunes a comandos
     app_map = {
-        "chrome": "start chrome",
-        "google chrome": "start chrome",
-        "firefox": "start firefox",
-        "edge": "start msedge",
-        "explorador": "start explorer",
-        "file explorer": "start explorer",
-        "vscode": "start code",
-        "visual studio code": "start code",
-        "vs code": "start code",
-        "notepad": "start notepad",
-        "bloc de notas": "start notepad",
-        "calculator": "start calc",
-        "calculadora": "start calc",
-        "paint": "start mspaint",
-        "word": "start winword",
-        "excel": "start excel",
-        "powerpoint": "start powerpnt",
-        "outlook": "start outlook",
-        "spotify": "start spotify",
-        "discord": "start discord",
-        "slack": "start slack",
-        "terminal": "start cmd",
-        "powershell": "start powershell",
-        "cmd": "start cmd",
+        "chrome": "start chrome", "google chrome": "start chrome",
+        "firefox": "start firefox", "edge": "start msedge",
+        "explorador": "start explorer", "file explorer": "start explorer",
+        "vscode": "start code", "visual studio code": "start code",
+        "notepad": "start notepad", "bloc de notas": "start notepad",
+        "calculadora": "start calc", "calculator": "start calc",
+        "paint": "start mspaint", "word": "start winword",
+        "excel": "start excel", "powerpoint": "start powerpnt",
+        "spotify": "start spotify", "discord": "start discord",
+        "terminal": "start cmd", "powershell": "start powershell",
         "configuracion": "start ms-settings:",
-        "settings": "start ms-settings:",
-        "tienda": "start ms-windows-store:",
-        "windows store": "start ms-windows-store:",
-        "fotos": "start ms-photos:",
-        "camera": "start microsoft.windows.camera:",
-        "camara": "start microsoft.windows.camera:",
     }
-
-    msg_lower = app.lower().strip()
-    comando = app_map.get(msg_lower)
-
-    if comando:
-        resultado = ejecutar_comando(comando)
-        # start command no suele dar salida, asi que verificamos
-        if not resultado or resultado == "(Comando ejecutado sin salida)":
-            return f"Aplicacion {app} abierta"
-        return resultado
-    else:
-        # Intentar abrir directamente con start
-        resultado = ejecutar_comando(f"start {app}")
-        if "ERROR" in resultado:
-            return f"No se pudo abrir '{app}'. Intenta con el nombre exacto del programa."
-        return f"Intentando abrir {app}..."
+    comando = app_map.get(app.lower().strip(), f"start {app}")
+    resultado = ejecutar_comando(comando)
+    if not resultado or resultado == "(sin salida)":
+        return f"Aplicacion {app} abierta"
+    return resultado
 
 
-# ============================================================
-# DETECCION DE INTENCION - Con aprendizaje integrado
-# ============================================================
+# Mapeo de todas las herramientas disponibles
+TOOL_FUNCTIONS = {
+    "ejecutar_comando": ejecutar_comando,
+    "clonar_repositorio": clonar_repositorio,
+    "instalar_dependencias": instalar_dependencias,
+    "leer_archivo": leer_archivo,
+    "listar_archivos": listar_archivos,
+    "analizar_proyecto": analizar_proyecto,
+    "escribir_archivo": escribir_archivo,
+    "abrir_aplicacion": abrir_aplicacion,
+}
 
-GITHUB_URL_PATTERN = re.compile(
-    r'https?://github\.com/[\w\-]+/[\w\-\.]+(?:\.git)?',
-    re.IGNORECASE
-)
-
-
-def detectar_intencion(mensaje: str) -> dict:
-    """
-    Detecta que quiere el usuario, CON aprendizaje previo.
-    Primero consulta correcciones y patrones aprendidos.
-    """
-    msg = mensaje.lower()
-    params = {}
-
-    # === PASO 0: Consultar patrones aprendidos ===
-    matched_patterns = learning.match_pattern(mensaje)
-    if matched_patterns:
-        best = matched_patterns[0]
-        # Actualizar uso del patron
-        best["last_used"] = datetime.now().isoformat()
-        best["use_count"] = best.get("use_count", 0) + 1
-        # Guardar patron actualizado
-        patterns = learning.get_patterns()
-        for p in patterns:
-            if p["trigger"] == best["trigger"]:
-                p["use_count"] = best["use_count"]
-                p["last_used"] = best["last_used"]
-        learning._save_json(PATTERNS_FILE, patterns)
-
-        # Retornar las acciones del patron
-        return {
-            "intencion": "patron_aprendido",
-            "params": {"actions": best["actions"], "pattern_name": best["trigger"]},
-            "confianza": 0.90
-        }
-
-    # === PRIORIDAD 1: URL de GitHub ===
-    urls = GITHUB_URL_PATTERN.findall(mensaje)
-    if urls:
-        url = urls[0].rstrip("/")
-        repo_name = url.split("/")[-1].replace(".git", "")
-        return {
-            "intencion": "clonar_y_analizar",
-            "params": {"url": url, "repo_name": repo_name},
-            "confianza": 0.95
-        }
-
-    # === PRIORIDAD 2: Patrones de intencion ===
-
-    # Instalar
-    if any(w in msg for w in ["instal", "npm install", "pip install", "dependencias", "dependencies"]):
-        for d in os.listdir(REPOS_DIR):
-            if d.lower() in msg:
-                params["repo_name"] = d
-                break
-        return {"intencion": "instalar", "params": params, "confianza": 0.85}
-
-    # Analizar
-    if any(w in msg for w in ["analiz", "revis", "examin", "que es", "que tiene", "estructura"]):
-        for d in os.listdir(REPOS_DIR):
-            if d.lower() in msg:
-                params["repo_name"] = d
-                break
-        return {"intencion": "analizar", "params": params, "confianza": 0.80}
-
-    # Leer archivo
-    if any(w in msg for w in ["leer", "mostrar", "ver archivo", "contenido de", "que hay en"]):
-        for d in os.listdir(REPOS_DIR):
-            if d.lower() in msg:
-                params["repo_name"] = d
-                break
-        file_match = re.search(r'[\w\-]+\.\w+', mensaje)
-        if file_match:
-            params["archivo"] = file_match.group(0)
-        return {"intencion": "leer", "params": params, "confianza": 0.75}
-
-    # Listar
-    if any(w in msg for w in ["listar", "que hay", "mostrar archivos", "que archivos"]):
-        return {"intencion": "listar", "params": params, "confianza": 0.75}
-
-    # Abrir aplicacion
-    if any(w in msg for w in ["abre", "abrir", "open", "inicia", "lanza", "ejecuta la app", "abreme"]):
-        # Extraer el nombre de la app
-        app_match = re.search(
-            r'(?:abre|abrir|open|inicia|lanza|abreme)\s+(?:la\s+|el\s+)?(.+?)(?:\s*$|\s+para|\s+y\s)',
-            msg, re.IGNORECASE
-        )
-        if app_match:
-            params["app"] = app_match.group(1).strip()
-        else:
-            # Intentar capturar todo despues de "abre"
-            simple_match = re.search(r'(?:abre|abrir|open)\s+(.+)', msg, re.IGNORECASE)
-            if simple_match:
-                params["app"] = simple_match.group(1).strip()
-
-        if params.get("app"):
-            return {"intencion": "abrir_app", "params": params, "confianza": 0.85}
-        else:
-            return {"intencion": "conversar", "params": {}, "confianza": 0.0}
-
-    # Ejecutar comando
-    if any(w in msg for w in ["ejecuta", "correr", "run ", "npm run", "npm start"]):
-        cmd_match = re.search(r'(?:ejecuta|correr|run)\s+(.+)', msg)
-        if cmd_match:
-            params["comando"] = cmd_match.group(1).strip()
-        return {"intencion": "comando", "params": params, "confianza": 0.70}
-
-    # No se detecto intencion clara
-    return {"intencion": "conversar", "params": {}, "confianza": 0.0}
-
-
-# ============================================================
-# EJECUCION DIRECTA - Con auto-reflexion
-# ============================================================
-
-def ejecutar_intencion(intencion_data: dict) -> list:
-    """
-    Ejecuta la intencion detectada DIRECTAMENTE.
-    Incluye auto-reflexion despues de cada accion.
-    """
-    pasos = []
-    intencion = intencion_data["intencion"]
-    params = intencion_data["params"]
-
-    if intencion == "patron_aprendido":
-        # Ejecutar secuencia de acciones aprendidas
-        actions = params.get("actions", [])
-        for action in actions:
-            action_type = action.get("type", "")
-            action_params = action.get("params", {})
-
-            if action_type == "clonar_repositorio":
-                result = clonar_repositorio(action_params.get("url", ""))
-            elif action_type == "analizar_proyecto":
-                result = analizar_proyecto(action_params.get("ruta", ""))
-            elif action_type == "instalar_dependencias":
-                result = instalar_dependencias(action_params.get("ruta", ""))
-            elif action_type == "leer_archivo":
-                result = leer_archivo(action_params.get("ruta", ""))
-            elif action_type == "listar_archivos":
-                result = listar_archivos(action_params.get("ruta"))
-            elif action_type == "ejecutar_comando":
-                result = ejecutar_comando(action_params.get("comando", ""))
-            elif action_type == "abrir_aplicacion":
-                result = abrir_aplicacion(action_params.get("app", ""))
-            else:
-                result = f"Accion desconocida: {action_type}"
-
-            # Auto-reflexion
-            reflection = learning.self_reflect(action_type, result, "")
-
-            pasos.append({
-                "accion": action_type,
-                "detalle": f"Patron aprendido: {params.get('pattern_name', '')}",
-                "resultado": result,
-                "reflection": reflection
-            })
-
-        return pasos
-
-    if intencion == "clonar_y_analizar":
-        url = params.get("url", "")
-        repo_name = params.get("repo_name", "")
-        repo_path = os.path.join(REPOS_DIR, repo_name)
-
-        # Paso 1: Clonar
-        result = clonar_repositorio(url)
-        reflection = learning.self_reflect("clonar_repositorio", result, url)
-        pasos.append({
-            "accion": "clonar_repositorio",
-            "detalle": f"git clone {url}",
-            "resultado": result,
-            "reflection": reflection
-        })
-
-        # Paso 2: Analizar (auto)
-        if os.path.exists(repo_path):
-            result = analizar_proyecto(repo_path)
-            reflection = learning.self_reflect("analizar_proyecto", result, repo_path)
-            pasos.append({
-                "accion": "analizar_proyecto",
-                "detalle": f"Analizando {repo_path}",
-                "resultado": result,
-                "reflection": reflection
-            })
-
-        # Paso 3: Si tiene package.json, sugerir instalar
-        if os.path.exists(os.path.join(repo_path, "package.json")):
-            pasos.append({
-                "accion": "sugerencia",
-                "detalle": "Dependencias Node.js detectadas",
-                "resultado": f"Se detecto package.json. Escribe 'instalar dependencias {repo_name}' para instalarlas."
-            })
-
-        # APRENDER: Guardar patron "clonar + analizar"
-        learning.save_pattern(
-            trigger=f"clona analiza {repo_name}",
-            actions=[
-                {"type": "clonar_repositorio", "params": {"url": url}},
-                {"type": "analizar_proyecto", "params": {"ruta": repo_path}}
-            ],
-            context=f"Usuario pidio clonar y analizar {repo_name}"
-        )
-
-    elif intencion == "instalar":
-        repo_name = params.get("repo_name", "")
-        if repo_name:
-            repo_path = os.path.join(REPOS_DIR, repo_name)
-        else:
-            for d in os.listdir(REPOS_DIR):
-                full = os.path.join(REPOS_DIR, d)
-                if os.path.isdir(full):
-                    if os.path.exists(os.path.join(full, "package.json")) or os.path.exists(os.path.join(full, "requirements.txt")):
-                        repo_name = d
-                        repo_path = full
-                        break
-            else:
-                repo_path = REPOS_DIR
-
-        result = instalar_dependencias(repo_path)
-        reflection = learning.self_reflect("instalar_dependencias", result, repo_path)
-        pasos.append({
-            "accion": "instalar_dependencias",
-            "detalle": f"Instalando en {repo_path}",
-            "resultado": result,
-            "reflection": reflection
-        })
-
-    elif intencion == "analizar":
-        repo_name = params.get("repo_name", "")
-        if repo_name:
-            repo_path = os.path.join(REPOS_DIR, repo_name)
-        else:
-            repo_path = REPOS_DIR
-        result = analizar_proyecto(repo_path)
-        reflection = learning.self_reflect("analizar_proyecto", result, repo_path)
-        pasos.append({
-            "accion": "analizar_proyecto",
-            "detalle": f"Analizando {repo_path}",
-            "resultado": result,
-            "reflection": reflection
-        })
-
-    elif intencion == "leer":
-        repo_name = params.get("repo_name", "")
-        archivo = params.get("archivo", "")
-        if repo_name and archivo:
-            ruta = os.path.join(REPOS_DIR, repo_name, archivo)
-        elif archivo:
-            ruta = archivo
-        else:
-            ruta = ""
-        if ruta:
-            result = leer_archivo(ruta)
-            reflection = learning.self_reflect("leer_archivo", result, ruta)
-            pasos.append({
-                "accion": "leer_archivo",
-                "detalle": f"Leyendo {ruta}",
-                "resultado": result,
-                "reflection": reflection
-            })
-        else:
-            pasos.append({
-                "accion": "error",
-                "detalle": "Falta archivo",
-                "resultado": "Especifica que archivo quieres leer, ej: 'leer README.md de signalTrade'"
-            })
-
-    elif intencion == "listar":
-        result = listar_archivos(REPOS_DIR)
-        pasos.append({
-            "accion": "listar_archivos",
-            "detalle": f"Listando {REPOS_DIR}",
-            "resultado": result
-        })
-
-    elif intencion == "abrir_app":
-        app = params.get("app", "")
-        if app:
-            result = abrir_aplicacion(app)
-            reflection = learning.self_reflect("abrir_aplicacion", result, app)
-            pasos.append({
-                "accion": "abrir_aplicacion",
-                "detalle": f"Abriendo {app}",
-                "resultado": result,
-                "reflection": reflection
-            })
-        else:
-            pasos.append({
-                "accion": "error",
-                "detalle": "Falta aplicacion",
-                "resultado": "Especifica que aplicacion abrir, ej: 'abre chrome' o 'abre vscode'"
-            })
-
-    elif intencion == "comando":
-        comando = params.get("comando", "")
-        if comando:
-            result = ejecutar_comando(comando)
-            reflection = learning.self_reflect("ejecutar_comando", result, comando)
-            pasos.append({
-                "accion": "ejecutar_comando",
-                "detalle": f"Ejecutando: {comando}",
-                "resultado": result,
-                "reflection": reflection
-            })
-        else:
-            pasos.append({
-                "accion": "error",
-                "detalle": "Falta comando",
-                "resultado": "Especifica el comando, ej: 'ejecuta git status'"
-            })
-
-    return pasos
-
-
-# ============================================================
-# DETECCION DE CORRECCIONES DEL USUARIO
-# ============================================================
-
-def detectar_correccion(mensaje: str, last_action: str = "") -> dict:
-    """
-    Detecta si el usuario esta corrigiendo al agente.
-    Ej: "no, clona el repo" o "eso esta mal, instala las deps"
-    """
-    msg = mensaje.lower()
-
-    correction_patterns = [
-        r'no[,!]\s*(.+)',           # "no, clona el repo"
-        r'eso esta mal[,]\s*(.+)',  # "eso esta mal, instala las deps"
-        r'no hiciste\s+(.+)',       # "no hiciste lo que pedi"
-        r'te equivocaste[,]\s*(.+)',# "te equivocaste, usa clonar"
-        r' Mejor\s+(.+)',           # "mejor clona el repo"
-        r'en vez de\s+.+\s+haz\s+(.+)', # "en vez de listar haz clonar"
-        r'queria\s+que\s+(.+)',     # "queria que clonaras"
-        r'sigue sin funcionar',     # "sigue sin funcionar"
-    ]
-
-    for pattern in correction_patterns:
-        match = re.search(pattern, msg)
-        if match:
-            return {
-                "is_correction": True,
-                "correction_text": match.group(1) if match.lastindex else mensaje,
-                "original_action": last_action,
-                "full_message": mensaje
-            }
-
-    return {"is_correction": False}
-
-
-# ============================================================
-# LLM - Solo para conversacion y analisis complejo
-# ============================================================
-
-SYSTEM_PROMPT = """Eres un agente autonomo que EJECUTA acciones reales.
-
-REGLAS:
-1. NUNCA des instrucciones. EJECUTA.
-2. NUNCA digas "puedes hacer..." o "ejecuta el comando..."
-3. Habla en español.
-4. Se conciso.
-5. Si ya se ejecuto una accion, reporta el resultado.
-6. Si el usuario corrige algo, aprende y no repitas el error.
-
-Herramientas disponibles:
-- ejecutar_comando(comando) - Ejecuta en terminal
-- clonar_repositorio(url) - Clona un repo de GitHub
-- instalar_dependencias(ruta) - Instala deps (npm, pip, etc.)
-- leer_archivo(ruta) - Lee un archivo
-- listar_archivos(ruta) - Lista directorio
-- analizar_proyecto(ruta) - Analiza un proyecto
-- escribir_archivo(ruta, contenido) - Crea/modifica archivo
+# Descripcion de herramientas para el LLM
+TOOL_DESCRIPTIONS = """
+- ejecutar_comando(comando) - Ejecuta CUALQUIER comando en la terminal. Use para todo lo que no tenga herramienta especifica.
+- clonar_repositorio(url) - Clona un repo de GitHub.
+- instalar_dependencias(ruta, gestor="auto") - Instala deps. Detecta npm/pip/poetry automaticamente.
+- leer_archivo(ruta) - Lee el contenido de un archivo de texto.
+- listar_archivos(ruta) - Lista archivos y carpetas de un directorio.
+- analizar_proyecto(ruta) - Analiza la estructura completa de un proyecto.
+- escribir_archivo(ruta, contenido) - Crea o modifica un archivo.
 - abrir_aplicacion(app) - Abre una aplicacion (chrome, vscode, notepad, etc.)
 """
 
 
-def preguntar_llm(mensaje: str, historial: list = None) -> str:
-    try:
-        import ollama
-
-        # Incluir lecciones aprendidas en el system prompt
-        knowledge = learning.get_knowledge()
-        lessons = [k for k in knowledge if k["topic"].startswith("leccion:")]
-        lessons_text = ""
-        if lessons:
-            lessons_text = "\n\nLecciones aprendidas:\n"
-            for l in lessons[-5:]:
-                lessons_text += f"- {l['content']}\n"
-
-        enhanced_prompt = SYSTEM_PROMPT + lessons_text
-
-        messages = [{"role": "system", "content": enhanced_prompt}]
-
-        if historial:
-            for h in historial[-4:]:
-                messages.append(h)
-
-        messages.append({"role": "user", "content": mensaje})
-
-        response = ollama.chat(model=AGENT_MODEL, messages=messages)
-        return response.get("message", {}).get("content", "Sin respuesta.")
-    except Exception as e:
-        return f"Error del modelo: {e}"
-
-
 # ============================================================
-# PROCESAMIENTO PRINCIPAL
+# SISTEMA DE APRENDIZAJE
 # ============================================================
 
-def procesar_mensaje(user_message: str) -> tuple:
-    """
-    Procesa un mensaje del usuario con auto-mejora.
-    Retorna: (respuesta_html, pasos_debug)
-    """
-    pasos_debug = []
-
-    # 0. Detectar si es una correccion
-    last_action = st.session_state.get("last_action", "")
-    correction = detectar_correccion(user_message, last_action)
-
-    if correction["is_correction"]:
-        pasos_debug.append(f">> CORRECCION detectada: {correction['correction_text']}")
-
-        # Guardar la correccion
-        learning.save_correction(
-            user_message=correction["full_message"],
-            wrong_action=last_action,
-            correct_action=correction["correction_text"],
-            reason=correction.get("full_message", "")
-        )
-        pasos_debug.append(f">> Correccion guardada para aprendizaje")
-
-        # Re-procesar con el mensaje corregido
-        intencion = detectar_intencion(correction["correction_text"])
-        pasos_debug.append(f"Intencion corregida: {intencion['intencion']} (confianza: {intencion['confianza']:.0%})")
-
-    else:
-        # 1. Detectar intencion normalmente
-        intencion = detectar_intencion(user_message)
-        pasos_debug.append(f"Intencion: {intencion['intencion']} (confianza: {intencion['confianza']:.0%})")
-        pasos_debug.append(f"Params: {intencion['params']}")
-
-    # 2. Si la intencion es clara, ejecutar directamente
-    if intencion["confianza"] >= 0.7 and intencion["intencion"] != "conversar":
-        pasos_debug.append(">> EJECUCION DIRECTA (sin LLM)")
-
-        pasos = ejecutar_intencion(intencion)
-
-        # Guardar ultima accion para correcciones
-        if pasos:
-            st.session_state["last_action"] = pasos[0].get("accion", "")
-
-        # Construir respuesta visual
-        respuesta = ""
-        for i, paso in enumerate(pasos, 1):
-            accion = paso["accion"]
-            detalle = paso["detalle"]
-            resultado = paso["resultado"]
-            reflection = paso.get("reflection", {})
-
-            pasos_debug.append(f"  Paso {i}: {accion} -> {detalle}")
-
-            # Mostrar auto-reflexion si hay leccion
-            if reflection and reflection.get("lesson"):
-                pasos_debug.append(f"  Reflexion: {reflection['lesson']}")
-
-            if accion == "sugerencia":
-                respuesta += f"💡 **{detalle}**\n\n{resultado}\n\n"
-            elif "ERROR" in resultado or "Error" in resultado:
-                respuesta += f"❌ **Paso {i}: {accion}** — {detalle}\n```\n{resultado}\n```\n\n"
-                # Si hay mejora sugerida, mostrarla
-                if reflection and reflection.get("improvement"):
-                    respuesta += f"🔧 Auto-mejora: {reflection['improvement']}\n\n"
-            else:
-                respuesta += f"✅ **Paso {i}: {accion}** — {detalle}\n```\n{resultado}\n```\n\n"
-
-        return respuesta, pasos_debug
-
-    # 3. Si no es clara, usar LLM con tool calling
-    else:
-        pasos_debug.append(">> Usando LLM (intencion no clara)")
-
+class LearningSystem:
+    @staticmethod
+    def _load(filepath, default=None):
+        if default is None: default = []
         try:
-            import ollama
-        except ImportError:
-            return "Error: ollama no esta instalado. Ejecuta: pip install ollama", pasos_debug
+            if os.path.exists(filepath):
+                with open(filepath, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except: pass
+        return default
 
-        ollama_tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "ejecutar_comando",
-                    "description": "Ejecuta un comando en la terminal del sistema.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "comando": {"type": "string", "description": "Comando a ejecutar"}
-                        },
-                        "required": ["comando"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "clonar_repositorio",
-                    "description": "Clona un repositorio de GitHub.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "url": {"type": "string", "description": "URL del repositorio"}
-                        },
-                        "required": ["url"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "instalar_dependencias",
-                    "description": "Instala dependencias de un proyecto.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "ruta": {"type": "string", "description": "Ruta del proyecto"},
-                            "gestor": {"type": "string", "description": "npm, pip, auto"}
-                        },
-                        "required": ["ruta"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "leer_archivo",
-                    "description": "Lee el contenido de un archivo.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "ruta": {"type": "string", "description": "Ruta del archivo"}
-                        },
-                        "required": ["ruta"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "listar_archivos",
-                    "description": "Lista archivos de un directorio.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "ruta": {"type": "string", "description": "Ruta del directorio"}
-                        }
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "analizar_proyecto",
-                    "description": "Analiza la estructura de un proyecto.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "ruta": {"type": "string", "description": "Ruta del proyecto"}
-                        }
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "escribir_archivo",
-                    "description": "Crea o modifica un archivo.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "ruta": {"type": "string", "description": "Ruta del archivo"},
-                            "contenido": {"type": "string", "description": "Contenido a escribir"}
-                        },
-                        "required": ["ruta", "contenido"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "abrir_aplicacion",
-                    "description": "Abre una aplicacion en el sistema (Chrome, Firefox, VSCode, etc.).",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "app": {"type": "string", "description": "Nombre de la aplicacion a abrir (chrome, firefox, vscode, notepad, etc.)"}
-                        },
-                        "required": ["app"]
-                    }
-                }
-            },
-        ]
+    @staticmethod
+    def _save(filepath, data):
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except: pass
 
-        function_map = {
-            "ejecutar_comando": ejecutar_comando,
-            "clonar_repositorio": clonar_repositorio,
-            "instalar_dependencias": lambda ruta, gestor="auto": instalar_dependencias(ruta, gestor),
-            "leer_archivo": leer_archivo,
-            "listar_archivos": listar_archivos,
-            "analizar_proyecto": analizar_proyecto,
-            "escribir_archivo": escribir_archivo,
-            "abrir_aplicacion": abrir_aplicacion,
+    def save_knowledge(self, topic, content, source="experience"):
+        knowledge = self._load(KNOWLEDGE_FILE, [])
+        for k in knowledge:
+            if k["topic"].lower() == topic.lower():
+                k["content"] = content
+                k["updated"] = datetime.now().isoformat()
+                self._save(KNOWLEDGE_FILE, knowledge)
+                return
+        knowledge.append({"topic": topic, "content": content, "source": source,
+                          "created": datetime.now().isoformat()})
+        self._save(KNOWLEDGE_FILE, knowledge)
+
+    def get_knowledge(self, topic=None):
+        knowledge = self._load(KNOWLEDGE_FILE, [])
+        if topic:
+            return [k for k in knowledge if topic.lower() in k["topic"].lower()]
+        return knowledge
+
+    def save_correction(self, user_msg, wrong_action, correct_action, reason=""):
+        corrections = self._load(CORRECTIONS_FILE, [])
+        corrections.append({
+            "timestamp": datetime.now().isoformat(),
+            "user_message": user_msg, "wrong_action": wrong_action,
+            "correct_action": correct_action, "reason": reason
+        })
+        self._save(CORRECTIONS_FILE, corrections)
+
+    def get_lessons(self):
+        knowledge = self._load(KNOWLEDGE_FILE, [])
+        return [k["content"] for k in knowledge if k["topic"].startswith("leccion:")]
+
+    def get_stats(self):
+        return {
+            "knowledge": len(self._load(KNOWLEDGE_FILE, [])),
+            "corrections": len(self._load(CORRECTIONS_FILE, [])),
+            "patterns": len(self._load(PATTERNS_FILE, [])),
+            "feedback": len(self._load(FEEDBACK_FILE, [])),
         }
 
-        # Incluir lecciones aprendidas en el prompt
-        knowledge = learning.get_knowledge()
-        lessons = [k for k in knowledge if k["topic"].startswith("leccion:")]
-        lessons_text = ""
-        if lessons:
-            lessons_text = "\n\nLecciones aprendidas de errores previos:\n"
-            for l in lessons[-5:]:
-                lessons_text += f"- {l['content']}\n"
+learning = LearningSystem()
+
+
+# ============================================================
+# CEREBRO DEL AGENTE - Piensa, Planifica, Decide
+# ============================================================
+
+THINKING_PROMPT = """Eres un agente autonomo que PIENSA antes de actuar.
+
+Tu trabajo es ANALIZAR la solicitud del usuario y crear un PLAN de ejecucion.
+
+CONTEXTO DEL SISTEMA:
+- SO: {so}
+- Directorio de trabajo: {repos_dir}
+- Repos disponibles: {repos}
+- Lecciones aprendidas: {lessons}
+
+HERRAMIENTAS DISPONIBLES:
+{tools}
+
+REGLAS DE PENSAMIENTO:
+1. ANALIZA: Que quiere realmente el usuario? Que necesita pasar?
+2. PLANIFICA: Cual es la mejor secuencia de acciones? Piensa paso a paso.
+3. ANTICIPA: Que puede salir mal? Que informacion necesitas primero?
+4. DECIDE: Es suficiente con ejecucion directa, o necesitas explorar primero?
+5. Si no estas seguro, INVESTIGA primero (lista archivos, lee configs, etc.)
+
+FORMATO DE RESPUESTA - Responde SOLO con JSON valido:
+{{
+    "analisis": "Que entiendo que quiere el usuario",
+    "plan": [
+        {{
+            "paso": 1,
+            "accion": "nombre_de_herramienta",
+            "params": {{"parametro": "valor"}},
+            "razon": "por que hago esto primero"
+        }}
+    ],
+    "riesgos": ["que puede salir mal"],
+    "siguiente_paso_sugerido": "que hacer despues de ejecutar el plan"
+}}
+
+EJEMPLOS:
+
+Usuario: "clona mi repo https://github.com/yecos/signalTrade"
+Respuesta:
+{{
+    "analisis": "El usuario quiere clonar un repositorio de GitHub y analizarlo. La URL es clara.",
+    "plan": [
+        {{"paso": 1, "accion": "clonar_repositorio", "params": {{"url": "https://github.com/yecos/signalTrade"}}, "razon": "Clonar el repo primero"}},
+        {{"paso": 2, "accion": "analizar_proyecto", "params": {{"ruta": "RUTA_DEL_REPO"}}, "razon": "Analizar estructura automaticamente"}},
+        {{"paso": 3, "accion": "leer_archivo", "params": {{"ruta": "RUTA_DEL_REPO/README.md"}}, "razon": "Leer documentacion para entender el proyecto"}}
+    ],
+    "riesgos": ["El repo ya puede existir", "Puede estar vacio"],
+    "siguiente_paso_sugerido": "Instalar dependencias si tiene package.json"
+}}
+
+Usuario: "abre chrome"
+Respuesta:
+{{
+    "analisis": "El usuario quiere abrir el navegador Chrome.",
+    "plan": [
+        {{"paso": 1, "accion": "abrir_aplicacion", "params": {{"app": "chrome"}}, "razon": "Abrir Chrome directamente"}}
+    ],
+    "riesgos": ["Chrome puede no estar instalado"],
+    "siguiente_paso_sugerido": "Si necesito abrir una URL especifica, usar chrome URL"
+}}
+
+Usuario: "ayudame con mi proyecto signalTrade"
+Respuesta:
+{{
+    "analisis": "El usuario quiere ayuda con su proyecto. Necesito entender primero de que trata.",
+    "plan": [
+        {{"paso": 1, "accion": "analizar_proyecto", "params": {{"ruta": "C:\\Users\\yecos\\Documents\\signalTrade"}}, "razon": "Entender la estructura del proyecto primero"}},
+        {{"paso": 2, "accion": "leer_archivo", "params": {{"ruta": "C:\\Users\\yecos\\Documents\\signalTrade/README.md"}}, "razon": "Leer documentacion para entender que hace"}}
+    ],
+    "riesgos": ["Puede no tener README", "Puede necesitar dependencias instaladas"],
+    "siguiente_paso_sugerido": "Preguntar al usuario que aspecto especifico necesita ayuda"
+}}
+
+Usuario: "no funciona, sigue sin hacer nada"
+Respuesta:
+{{
+    "analisis": "El usuario esta frustrado. Algo fallo antes. Necesito diagnosticar.",
+    "plan": [
+        {{"paso": 1, "accion": "listar_archivos", "params": {{"ruta": "C:\\Users\\yecos\\Documents"}}, "razon": "Verificar que existe el directorio y los archivos"}},
+        {{"paso": 2, "accion": "ejecutar_comando", "params": {{"comando": "ollama list"}}, "razon": "Verificar que Ollama esta corriendo y los modelos disponibles"}}
+    ],
+    "riesgos": ["Ollama puede no estar corriendo"],
+    "siguiente_paso_sugerido": "Diagnosticar el problema especifico y buscar solucion"
+}}
+"""
+
+EVALUATION_PROMPT = """Eres el evaluador de un agente autonomo. Analiza el resultado de una accion.
+
+ACCION EJECUTADA: {action}
+PARAMETROS: {params}
+RESULTADO: {result}
+
+Responde SOLO con JSON:
+{{
+    "exitoso": true/false,
+    "leccion": "que aprendimos de esto (si aplica)",
+    "problema": "que salio mal (si aplica)",
+    "solucion_alternativa": "que intentar si fallo (si aplica)",
+    "proximo_paso": "que hacer ahora"
+}}
+"""
+
+CLOUD_CONSULT_PROMPT = """Soy un agente local autonomo. Estoy trabajando en la computadora del usuario y me he atascado.
+
+CONTEXTO:
+- Tarea del usuario: {user_task}
+- Lo que he hecho hasta ahora: {actions_taken}
+- El problema: {problem}
+
+Por favor ayudame a encontrar una solucion. Se especifico y practico. Si sugieres comandos, que sean para Windows.
+"""
+
+
+class AgentBrain:
+    """El cerebro del agente - Piensa, planifica, evalua."""
+
+    def __init__(self):
+        self.thinking_log = []
+        self.actions_taken = []
+
+    def think(self, user_message: str, context: str = "") -> dict:
+        """
+        El agente PIENSA sobre el mensaje del usuario y genera un plan.
+        Este es el paso clave: razonar antes de ejecutar.
+        """
+        self.thinking_log = []
+        self._log("🧠 Pensando...", "thinking")
+
+        # Recopilar contexto
+        repos = self._get_repos()
+        lessons = learning.get_lessons()
+        lessons_text = "\n".join([f"- {l}" for l in lessons[-5:]]) if lessons else "Ninguna aun"
+
+        prompt = THINKING_PROMPT.format(
+            so=platform.system(),
+            repos_dir=REPOS_DIR,
+            repos=", ".join(repos) if repos else "Ninguno",
+            lessons=lessons_text,
+            tools=TOOL_DESCRIPTIONS
+        )
 
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT + lessons_text},
+            {"role": "system", "content": prompt},
             {"role": "user", "content": user_message}
         ]
 
-        respuesta_final = ""
-        tool_results = []
+        # Agregar contexto de acciones previas si hay
+        if context:
+            messages.append({"role": "user", "content": f"Contexto adicional: {context}"})
 
-        for iteration in range(MAX_ITERATIONS):
-            pasos_debug.append(f"  LLM iteracion {iteration + 1}")
+        # Pensar con el LLM
+        self._log("Enviando al modelo para planificar...", "thinking")
+        plan = self._ask_llm(messages)
 
-            try:
-                response = ollama.chat(
-                    model=AGENT_MODEL,
-                    messages=messages,
-                    tools=ollama_tools
+        if not plan:
+            self._log("El LLM no respondio, usando ejecucion directa", "warning")
+            return self._fallback_plan(user_message)
+
+        # Parsear la respuesta como JSON
+        parsed = self._parse_json(plan)
+        if parsed and "plan" in parsed:
+            self._log(f"Analisis: {parsed.get('analisis', 'N/A')}", "thinking")
+            self._log(f"Plan: {len(parsed['plan'])} pasos", "thinking")
+            for step in parsed["plan"]:
+                self._log(f"  Paso {step.get('paso', '?')}: {step.get('accion', '?')} - {step.get('razon', '')}", "plan")
+            return parsed
+
+        # Si no se pudo parsear, intentar ejecucion directa
+        self._log("No se pudo parsear el plan, usando ejecucion directa", "warning")
+        return self._fallback_plan(user_message)
+
+    def execute_plan(self, plan: dict) -> list:
+        """
+        Ejecuta el plan paso a paso, evaluando cada resultado.
+        Si algo falla, busca alternativas.
+        """
+        results = []
+        steps = plan.get("plan", [])
+
+        for step in steps:
+            action = step.get("accion", "")
+            params = step.get("params", {})
+            reason = step.get("razon", "")
+
+            self._log(f"▶ Ejecutando paso: {action}({params}) — {reason}", "execution")
+
+            # Resolver parametros dinamicos (como RUTA_DEL_REPO)
+            params = self._resolve_params(params)
+
+            # Ejecutar la herramienta
+            result = self._execute_tool(action, params)
+
+            # Evaluar el resultado
+            evaluation = self.evaluate(action, params, result)
+
+            results.append({
+                "action": action,
+                "params": params,
+                "reason": reason,
+                "result": result,
+                "evaluation": evaluation
+            })
+
+            self.actions_taken.append(f"{action}({params}) -> {result[:100]}")
+
+            # Si fallo, intentar solucion alternativa
+            if not evaluation.get("exitoso", True) and evaluation.get("solucion_alternativa"):
+                self._log(f"⚠ Fallo detectado, intentando alternativa...", "warning")
+                alt_result = self._try_alternative(evaluation["solucion_alternativa"], action, params)
+                if alt_result:
+                    results[-1]["result"] = alt_result
+                    results[-1]["evaluation"] = {"exitoso": True, "leccion": "Solucion alternativa funciono"}
+
+            # Si la evaluacion dice que hay que hacer algo mas, agregarlo
+            if evaluation.get("leccion"):
+                learning.save_knowledge(
+                    f"leccion:{action}",
+                    evaluation["leccion"],
+                    source="auto_evaluation"
                 )
+
+        return results
+
+    def evaluate(self, action: str, params: dict, result: str) -> dict:
+        """Evalua si una accion fue exitosa y que aprendemos de ella."""
+        # Evaluacion rapida basada en patrones (sin LLM para velocidad)
+        if "ERROR" in result or "Error" in result:
+            # Evaluar con LLM para entender el problema
+            prompt = EVALUATION_PROMPT.format(
+                action=action,
+                params=json.dumps(params),
+                result=result[:500]
+            )
+            eval_result = self._ask_llm([{"role": "user", "content": prompt}])
+            parsed = self._parse_json(eval_result)
+            if parsed:
+                self._log(f"🔍 Evaluacion: fallo - {parsed.get('problema', 'desconocido')}", "evaluation")
+                return parsed
+
+            return {"exitoso": False, "problema": result[:200], "solucion_alternativa": ""}
+
+        self._log(f"✅ Evaluacion: exitoso", "evaluation")
+        return {"exitoso": True, "leccion": "", "proximo_paso": "continuar"}
+
+    def consult_cloud(self, user_task: str, problem: str) -> str:
+        """
+        Consulta a una IA cloud cuando el agente local se atasca.
+        Usa APIs de Groq, OpenRouter, o DeepSeek.
+        """
+        self._log("☁ Consultando IA cloud para ayuda...", "cloud")
+
+        prompt = CLOUD_CONSULT_PROMPT.format(
+            user_task=user_task,
+            actions_taken="\n".join(self.actions_taken[-5:]),
+            problem=problem
+        )
+
+        # Intentar con ia_bridge.py si existe
+        bridge_path = os.path.join(os.path.dirname(__file__), "ia_bridge.py")
+        if os.path.exists(bridge_path):
+            try:
+                import importlib.util
+                spec = importlib.util.spec_from_file_location("ia_bridge", bridge_path)
+                bridge = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(bridge)
+                if hasattr(bridge, 'consultar_ia'):
+                    result = bridge.consultar_ia(prompt)
+                    self._log("☁ Respuesta cloud recibida", "cloud")
+                    return result
             except Exception as e:
-                pasos_debug.append(f"  ERROR LLM: {e}")
-                respuesta_final = f"Error del modelo: {e}"
-                break
+                self._log(f"☁ Error con ia_bridge: {e}", "warning")
 
-            msg = response.get("message", {})
+        # Intentar con API directa (Groq - gratis y rapido)
+        try:
+            import urllib.request
+            api_key = os.environ.get("GROQ_API_KEY", "")
+            if not api_key:
+                # Buscar en archivo de config
+                config_path = os.path.join(os.path.dirname(__file__), "..", "config", "api_keys.json")
+                if os.path.exists(config_path):
+                    with open(config_path, "r") as f:
+                        config = json.load(f)
+                        api_key = config.get("groq", "")
 
-            if not msg.get("tool_calls"):
-                respuesta_final = msg.get("content", "")
-                break
+            if api_key:
+                data = json.dumps({
+                    "messages": [
+                        {"role": "system", "content": "Eres un experto en desarrollo de software. Responde de forma concisa y practica."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "model": "llama-3.3-70b-versatile",
+                    "max_tokens": 500
+                }).encode("utf-8")
 
-            for tool_call in msg.get("tool_calls", []):
-                func_name = tool_call.get("function", {}).get("name")
-                func_args = tool_call.get("function", {}).get("arguments", {})
+                req = urllib.request.Request(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    data=data,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json"
+                    }
+                )
 
-                # Verificar correcciones antes de ejecutar
-                correction_check = learning.check_corrections(user_message, func_name)
-                if correction_check["corrected"]:
-                    pasos_debug.append(f"  CORRECCION APLICADA: {func_name} -> {correction_check['correct_action']}")
-                    func_name = correction_check["correct_action"]
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    response = json.loads(resp.read().decode("utf-8"))
+                    result = response["choices"][0]["message"]["content"]
+                    self._log("☁ Respuesta de Groq recibida", "cloud")
+                    return result
+        except Exception as e:
+            self._log(f"☁ Error con API cloud: {e}", "warning")
 
-                pasos_debug.append(f"  Tool call: {func_name}({func_args})")
+        return "No se pudo consultar IA cloud. Verifica la conexion o configura una API key."
 
-                if func_name in function_map:
-                    try:
-                        result = function_map[func_name](**func_args)
-                    except Exception as e:
-                        result = f"Error: {e}"
-                else:
-                    result = f"Funcion no encontrada: {func_name}"
+    # --- Metodos internos ---
 
-                # Auto-reflexion
-                reflection = learning.self_reflect(func_name, result, user_message)
-                if reflection.get("lesson"):
-                    pasos_debug.append(f"  Reflexion: {reflection['lesson']}")
+    def _log(self, message: str, category: str = "info"):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.thinking_log.append(f"[{timestamp}] [{category.upper()}] {message}")
 
-                tool_results.append({
-                    "tool": func_name,
-                    "args": func_args,
-                    "result": result
-                })
+    def _ask_llm(self, messages: list) -> str:
+        """Consulta al LLM local (Ollama)."""
+        try:
+            import ollama
+            response = ollama.chat(model=AGENT_MODEL, messages=messages)
+            return response.get("message", {}).get("content", "")
+        except Exception as e:
+            self._log(f"Error LLM: {e}", "error")
+            return ""
 
-                pasos_debug.append(f"  Resultado: {result[:100]}...")
+    def _parse_json(self, text: str) -> dict:
+        """Intenta extraer JSON de la respuesta del LLM."""
+        # Intentar parsear directamente
+        try:
+            return json.loads(text)
+        except:
+            pass
 
-                messages.append({"role": "assistant", "content": f"[Ejecutando {func_name}({func_args})]"})
-                messages.append({"role": "user", "content": f"Resultado de {func_name}:\n{result}\n\nContinua."})
+        # Buscar JSON en la respuesta (entre ``` o llaves)
+        json_patterns = [
+            r'```json\s*(.*?)\s*```',
+            r'```\s*(.*?)\s*```',
+            r'(\{[\s\S]*\})',
+        ]
+        for pattern in json_patterns:
+            match = re.search(pattern, text, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group(1))
+                except:
+                    continue
 
-        if tool_results and not respuesta_final:
-            respuesta_final = "**Acciones ejecutadas:**\n\n"
-            for tr in tool_results:
-                respuesta_final += f"- **{tr['tool']}**({tr['args']}):\n```\n{tr['result']}\n```\n\n"
+        return None
 
-        return respuesta_final, pasos_debug
+    def _resolve_params(self, params: dict) -> dict:
+        """Resuelve parametros dinamicos como RUTA_DEL_REPO."""
+        resolved = {}
+        for key, value in params.items():
+            if isinstance(value, str):
+                # Reemplazar marcadores
+                value = value.replace("RUTA_DEL_REPO", self._find_repo_path())
+                value = value.replace("REPOS_DIR", REPOS_DIR)
+            resolved[key] = value
+        return resolved
+
+    def _find_repo_path(self) -> str:
+        """Busca el path de un repositorio reciente."""
+        try:
+            dirs = [d for d in os.listdir(REPOS_DIR)
+                    if os.path.isdir(os.path.join(REPOS_DIR, d)) and not d.startswith(".")]
+            if dirs:
+                # Retornar el mas reciente
+                latest = max(dirs, key=lambda d: os.path.getmtime(os.path.join(REPOS_DIR, d)))
+                return os.path.join(REPOS_DIR, latest)
+        except:
+            pass
+        return REPOS_DIR
+
+    def _execute_tool(self, action: str, params: dict) -> str:
+        """Ejecuta una herramienta por nombre."""
+        if action in TOOL_FUNCTIONS:
+            try:
+                return TOOL_FUNCTIONS[action](**params)
+            except Exception as e:
+                return f"ERROR ejecutando {action}: {e}"
+        elif action == "ejecutar_comando" or action == "comando":
+            return ejecutar_comando(params.get("comando", ""))
+        else:
+            return f"Herramienta no encontrada: {action}"
+
+    def _try_alternative(self, alternative: str, original_action: str, params: dict) -> str:
+        """Intenta una solucion alternativa cuando algo falla."""
+        self._log(f"Intentando alternativa: {alternative}", "execution")
+
+        # Si la alternativa es un comando, ejecutarlo
+        if alternative and len(alternative) > 3:
+            # Intentar parsear como instruccion
+            alt_lower = alternative.lower()
+
+            # Si sugiere otro comando
+            if any(w in alt_lower for w in ["ejecuta", "corre", "run", "usa", "usa el comando"]):
+                cmd = re.sub(r'(?:ejecuta|corre|run|usa|usa el comando)\s+', '', alternative, flags=re.IGNORECASE)
+                return ejecutar_comando(cmd.strip())
+
+            # Si sugiere otra herramienta
+            for tool_name in TOOL_FUNCTIONS:
+                if tool_name in alt_lower:
+                    return self._execute_tool(tool_name, params)
+
+            # Si sugiere listar o investigar
+            if "lista" in alt_lower or "verifica" in alt_lower or "revisa" in alt_lower:
+                if "ruta" in params:
+                    return listar_archivos(params.get("ruta", REPOS_DIR))
+
+        return ""
+
+    def _fallback_plan(self, user_message: str) -> dict:
+        """Plan de emergencia cuando el LLM no responde."""
+        msg = user_message.lower()
+
+        # Deteccion rapida de intenciones comunes
+        github_urls = re.findall(r'https?://github\.com/[\w\-]+/[\w\-\.]+', user_message, re.IGNORECASE)
+        if github_urls:
+            url = github_urls[0].rstrip("/")
+            repo_name = url.split("/")[-1].replace(".git", "")
+            repo_path = os.path.join(REPOS_DIR, repo_name)
+            return {
+                "analisis": f"Clonar y analizar repo: {url}",
+                "plan": [
+                    {"paso": 1, "accion": "clonar_repositorio", "params": {"url": url}, "razon": "Clonar el repo"},
+                    {"paso": 2, "accion": "analizar_proyecto", "params": {"ruta": repo_path}, "razon": "Analizar estructura"},
+                ],
+                "riesgos": [],
+                "siguiente_paso_sugerido": "Instalar dependencias si necesita"
+            }
+
+        if any(w in msg for w in ["abre", "abrir", "open"]):
+            app_match = re.search(r'(?:abre|abrir|open)\s+(.+)', msg, re.IGNORECASE)
+            app = app_match.group(1).strip() if app_match else ""
+            if app:
+                return {
+                    "analisis": f"Abrir aplicacion: {app}",
+                    "plan": [{"paso": 1, "accion": "abrir_aplicacion", "params": {"app": app}, "razon": "Abrir la app"}],
+                    "riesgos": ["Puede no estar instalada"],
+                    "siguiente_paso_sugerido": ""
+                }
+
+        if any(w in msg for w in ["instal", "dependencias"]):
+            for d in os.listdir(REPOS_DIR):
+                if d.lower() in msg:
+                    return {
+                        "analisis": f"Instalar dependencias de {d}",
+                        "plan": [{"paso": 1, "accion": "instalar_dependencias", "params": {"ruta": os.path.join(REPOS_DIR, d)}, "razon": "Instalar deps"}],
+                        "riesgos": [],
+                        "siguiente_paso_sugerido": "Ejecutar el proyecto"
+                    }
+
+        # Plan generico: investigar primero
+        return {
+            "analisis": "Necesito investigar antes de actuar",
+            "plan": [
+                {"paso": 1, "accion": "listar_archivos", "params": {"ruta": REPOS_DIR}, "razon": "Ver que hay disponible"},
+            ],
+            "riesgos": [],
+            "siguiente_paso_sugerido": "Analizar lo que se encuentre"
+        }
+
+    def _get_repos(self) -> list:
+        try:
+            return [d for d in os.listdir(REPOS_DIR)
+                    if os.path.isdir(os.path.join(REPOS_DIR, d)) and not d.startswith(".")]
+        except:
+            return []
+
+
+# ============================================================
+# MOTOR PRINCIPAL - Orquesta el pensamiento y la ejecucion
+# ============================================================
+
+brain = AgentBrain()
+
+def procesar_mensaje(user_message: str) -> tuple:
+    """
+    Procesamiento principal: PIENSA → PLANIFICA → EJECUTA → EVALUA
+    """
+    brain.actions_taken = []
+
+    # === PASO 1: PENSAR ===
+    brain._log(f"📩 Mensaje del usuario: {user_message}", "input")
+    plan = brain.think(user_message)
+
+    # === PASO 2: EJECUTAR ===
+    results = brain.execute_plan(plan)
+
+    # === PASO 3: CONSTRUIR RESPUESTA ===
+    respuesta = ""
+    for i, r in enumerate(results, 1):
+        action = r["action"]
+        reason = r.get("reason", "")
+        result = r["result"]
+        evaluation = r.get("evaluation", {})
+
+        if evaluation.get("exitoso", True):
+            respuesta += f"✅ **Paso {i}: {action}** — {reason}\n```\n{result}\n```\n\n"
+        else:
+            respuesta += f"❌ **Paso {i}: {action}** — {reason}\n```\n{result}\n```\n"
+            if evaluation.get("solucion_alternativa"):
+                respuesta += f"🔧 Intentando: {evaluation['solucion_alternativa']}\n\n"
+
+    # Agregar sugerencia de siguiente paso
+    if plan.get("siguiente_paso_sugerido"):
+        respuesta += f"💡 **Siguiente paso sugerido:** {plan['siguiente_paso_sugerido']}"
+
+    # Si no hubo resultados utiles y Ollama no conecta, ofrecer consulta cloud
+    if not results or all(not r.get("evaluation", {}).get("exitoso", True) for r in results):
+        respuesta += "\n\n⚠ Tuve problemas. ¿Quieres que consulte una IA cloud para encontrar una solución?"
+
+    return respuesta, brain.thinking_log
 
 
 # ============================================================
@@ -1279,7 +890,7 @@ def procesar_mensaje(user_message: str) -> tuple:
 
 def main():
     st.set_page_config(
-        page_title="Agente Autonomo Local v6",
+        page_title="Agente Autonomo v7 - Piensa",
         page_icon="🧠",
         layout="wide"
     )
@@ -1287,113 +898,57 @@ def main():
     st.markdown("""
     <style>
     .stApp { max-width: 1200px; margin: 0 auto; }
-    .debug-box { background: #1a1a2e; color: #00ff88; padding: 10px; border-radius: 5px;
-                font-family: monospace; font-size: 11px; max-height: 300px; overflow-y: auto;
-                white-space: pre-wrap; word-break: break-all; }
-    .learning-box { background: #1a2e1a; color: #88ff88; padding: 10px; border-radius: 5px;
-                   font-family: monospace; font-size: 11px; max-height: 250px; overflow-y: auto; }
-    .feedback-positive { color: #00ff88; }
-    .feedback-negative { color: #ff4444; }
+    .thinking-box { background: #1a1a2e; color: #00ff88; padding: 12px; border-radius: 8px;
+                    font-family: monospace; font-size: 11px; max-height: 400px; overflow-y: auto;
+                    white-space: pre-wrap; word-break: break-all; border: 1px solid #333; }
+    .thinking-box .thinking { color: #88aaff; }
+    .thinking-box .plan { color: #ffaa44; }
+    .thinking-box .execution { color: #00ff88; }
+    .thinking-box .evaluation { color: #aa88ff; }
+    .thinking-box .warning { color: #ffaa00; }
+    .thinking-box .error { color: #ff4444; }
+    .thinking-box .cloud { color: #44aaff; }
+    .thinking-box .input { color: #88ff88; }
     </style>
     """, unsafe_allow_html=True)
 
-    # Inicializar session state
+    # Session state
     if "messages" not in st.session_state:
         st.session_state.messages = []
-    if "debug_log" not in st.session_state:
-        st.session_state.debug_log = []
-    if "last_action" not in st.session_state:
-        st.session_state["last_action"] = ""
-    if "feedback_pending" not in st.session_state:
-        st.session_state.feedback_pending = None
+    if "thinking_history" not in st.session_state:
+        st.session_state.thinking_history = []
 
-    st.title("🧠 Agente Autonomo Local v6")
-    st.caption("Auto-mejorable — Aprende de correcciones, feedback y auto-reflexion")
+    st.title("🧠 Agente Autonomo v7")
+    st.caption("Piensa → Planifica → Ejecuta → Evalua → Aprende — Consulta IA cloud si se atasca")
 
     # === SIDEBAR ===
     with st.sidebar:
         st.header("⚙️ Config")
         st.write(f"**Modelo:** {AGENT_MODEL}")
-        st.write(f"**Repos dir:** {REPOS_DIR}")
-        st.write(f"**Aprendizaje:** {LEARN_DIR}")
-        st.write(f"**SO:** {platform.system()}")
+        st.write(f"**Repos:** {REPOS_DIR}")
+
+        stats = learning.get_stats()
+        st.header("📊 Aprendizaje")
+        col1, col2 = st.columns(2)
+        col1.metric("Conocimiento", stats["knowledge"])
+        col2.metric("Correcciones", stats["corrections"])
+
+        st.header("☁️ IA Cloud")
+        groq_key = os.environ.get("GROQ_API_KEY", "")
+        if groq_key:
+            st.success("Groq API configurada")
+        else:
+            st.warning("Sin API key cloud")
+            groq_input = st.text_input("Groq API Key:", type="password", key="groq_key_input")
+            if groq_input:
+                os.environ["GROQ_API_KEY"] = groq_input
+                st.success("Key guardada para esta sesion")
 
         if st.button("🗑️ Limpiar historial", use_container_width=True):
             st.session_state.messages = []
-            st.session_state.debug_log = []
+            st.session_state.thinking_history = []
             st.rerun()
 
-        # === ESTADISTICAS DE APRENDIZAJE ===
-        st.header("📊 Aprendizaje")
-        stats = learning.get_stats()
-        st.metric("Correcciones", stats["corrections_count"])
-        st.metric("Patrones", stats["patterns_count"])
-        st.metric("Conocimiento", stats["knowledge_count"])
-        fb = stats["feedback"]
-        st.metric("Feedback", f"👍{fb['positive']} 👎{fb['negative']}")
-
-        # Ver datos de aprendizaje
-        with st.expander("📚 Ver datos de aprendizaje"):
-            tab1, tab2, tab3 = st.tabs(["Correcciones", "Patrones", "Conocimiento"])
-
-            with tab1:
-                corrections = learning.get_corrections()
-                if corrections:
-                    for c in corrections[-5:]:
-                        st.markdown(f"**❌ {c['wrong_action']}** → **✅ {c['correct_action']}**")
-                        st.caption(f"_{c['user_message']}_ — {c['timestamp'][:16]}")
-                        st.divider()
-                else:
-                    st.info("Sin correcciones aun")
-
-            with tab2:
-                patterns = learning.get_patterns()
-                if patterns:
-                    for p in patterns:
-                        st.markdown(f"**🔄 {p['trigger']}** (usado {p.get('use_count', 1)}x)")
-                        for a in p["actions"]:
-                            st.write(f"  → {a['type']}({a.get('params', {})})")
-                        st.divider()
-                else:
-                    st.info("Sin patrones aprendidos")
-
-            with tab3:
-                knowledge = learning.get_knowledge()
-                if knowledge:
-                    for k in knowledge[-10:]:
-                        st.markdown(f"**📖 {k['topic']}**")
-                        st.write(k['content'][:100])
-                        st.caption(f"Fuente: {k.get('source', 'N/A')} — {k['updated'][:16]}")
-                        st.divider()
-                else:
-                    st.info("Sin conocimiento guardado")
-
-        if st.button("🗑️ Borrar todo el aprendizaje", type="secondary", use_container_width=True):
-            for f in [CORRECTIONS_FILE, FEEDBACK_FILE, PATTERNS_FILE, KNOWLEDGE_FILE]:
-                if os.path.exists(f):
-                    os.remove(f)
-            st.success("Aprendizaje borrado")
-            st.rerun()
-
-        # === TESTS ===
-        st.header("🧪 Tests")
-        if st.button("Test: git clone", use_container_width=True):
-            resultado = clonar_repositorio("https://github.com/yecos/signalTrade")
-            st.code(resultado)
-
-        if st.button("Test: analizar signalTrade", use_container_width=True):
-            repo_path = os.path.join(REPOS_DIR, "signalTrade")
-            if os.path.exists(repo_path):
-                resultado = analizar_proyecto(repo_path)
-                st.code(resultado)
-
-        # === DEBUG LOG ===
-        st.header("🐛 Debug Log")
-        if st.session_state.debug_log:
-            log_text = "\n".join(st.session_state.debug_log[-30:])
-            st.markdown(f'<div class="debug-box">{log_text}</div>', unsafe_allow_html=True)
-
-        # === REPOS ===
         st.header("📁 Repos")
         try:
             repos = [d for d in os.listdir(REPOS_DIR)
@@ -1403,71 +958,43 @@ def main():
         except:
             st.write("Sin repos")
 
+        # Ver pensamiento historico
+        st.header("🧠 Historial de pensamiento")
+        if st.session_state.thinking_history:
+            for i, th in enumerate(st.session_state.thinking_history[-5:]):
+                with st.expander(f"Pensamiento #{i+1}", expanded=False):
+                    st.markdown(f'<div class="thinking-box">{th}</div>', unsafe_allow_html=True)
+
     # === MOSTRAR HISTORIAL ===
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # === FEEDBACK (si hay pendiente) ===
-    if st.session_state.feedback_pending:
-        with st.container():
-            st.markdown("---")
-            cols = st.columns([1, 1, 3])
-            with cols[0]:
-                if st.button("👍 Bueno", key="fb_pos"):
-                    learning.save_feedback(
-                        st.session_state.feedback_pending["user_message"],
-                        st.session_state.feedback_pending["response"],
-                        st.session_state.feedback_pending["action"],
-                        "positive"
-                    )
-                    st.session_state.feedback_pending = None
-                    st.rerun()
-            with cols[1]:
-                if st.button("👎 Malo", key="fb_neg"):
-                    learning.save_feedback(
-                        st.session_state.feedback_pending["user_message"],
-                        st.session_state.feedback_pending["response"],
-                        st.session_state.feedback_pending["action"],
-                        "negative"
-                    )
-                    st.session_state.feedback_pending = None
-                    st.rerun()
-            with cols[2]:
-                st.caption("Como estuvo la respuesta? Tu feedback ayuda al agente a mejorar.")
-
     # === INPUT ===
-    if prompt := st.chat_input("Escribe tu mensaje..."):
+    if prompt := st.chat_input("Dime que necesitas..."):
         with st.chat_message("user"):
             st.markdown(prompt)
         st.session_state.messages.append({"role": "user", "content": prompt})
 
         with st.chat_message("assistant"):
-            with st.spinner("Procesando..."):
+            with st.spinner("🧠 Pensando..."):
                 try:
-                    respuesta, pasos_debug = procesar_mensaje(prompt)
+                    respuesta, thinking_log = procesar_mensaje(prompt)
 
-                    if pasos_debug:
-                        debug_text = "\n".join(pasos_debug)
-                        st.session_state.debug_log.extend(pasos_debug)
-                        with st.expander("🔍 Debug", expanded=False):
-                            st.markdown(f'<div class="debug-box">{debug_text}</div>', unsafe_allow_html=True)
+                    # Mostrar proceso de pensamiento
+                    if thinking_log:
+                        thinking_text = "\n".join(thinking_log)
+                        st.session_state.thinking_history.append(thinking_text)
+
+                        with st.expander("🧠 Proceso de pensamiento (click para ver)", expanded=True):
+                            st.markdown(f'<div class="thinking-box">{thinking_text}</div>',
+                                       unsafe_allow_html=True)
 
                     st.markdown(respuesta)
 
-                    # Preparar feedback pendiente
-                    last_action = st.session_state.get("last_action", "")
-                    if last_action:
-                        st.session_state.feedback_pending = {
-                            "user_message": prompt,
-                            "response": respuesta[:200],
-                            "action": last_action
-                        }
-
                 except Exception as e:
-                    respuesta = f"**ERROR:** {e}\n\nRevisa la consola de Streamlit para mas detalles."
+                    respuesta = f"**ERROR:** {e}"
                     st.error(respuesta)
-                    st.session_state.debug_log.append(f"ERROR GLOBAL: {e}")
 
         st.session_state.messages.append({"role": "assistant", "content": respuesta})
 
