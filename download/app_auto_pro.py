@@ -56,7 +56,20 @@ def clonar_repositorio(url: str) -> str:
     target_dir = os.path.join(REPOS_DIR, repo_name)
 
     if os.path.exists(target_dir):
-        return f"Ya existe en: {target_dir}"
+        # Verificar si el repo esta completo (tiene .git y al menos algunos archivos)
+        git_dir = os.path.join(target_dir, ".git")
+        contenido = os.listdir(target_dir) if os.path.isdir(target_dir) else []
+        archivos_reales = [f for f in contenido if f != ".git"]
+
+        if os.path.exists(git_dir) and len(archivos_reales) > 1:
+            return f"Repositorio ya existe y esta completo en: {target_dir}\nCarpetas: {[f for f in contenido if os.path.isdir(os.path.join(target_dir, f))]}\nArchivos: {archivos_reales[:10]}..."
+        else:
+            # Carpeta vacia o incompleta - borrar y clonar de nuevo
+            import shutil
+            try:
+                shutil.rmtree(target_dir)
+            except Exception as e:
+                return f"La carpeta existe pero esta vacia/incompleta y no se pudo borrar: {e}\nBorrala manualmente: Remove-Item -Recurse -Force \"{target_dir}\""
 
     comando = f'git clone {url} "{target_dir}"'
     resultado = ejecutar_comando(comando)
@@ -65,7 +78,10 @@ def clonar_repositorio(url: str) -> str:
         contenido = os.listdir(target_dir)
         carpetas = [f for f in contenido if os.path.isdir(os.path.join(target_dir, f))]
         archivos = [f for f in contenido if os.path.isfile(os.path.join(target_dir, f))]
-        return f"CLONADO OK en: {target_dir}\nCarpetas: {carpetas}\nArchivos: {archivos}"
+        if len(carpetas) > 0 or len(archivos) > 1:
+            return f"CLONADO OK en: {target_dir}\nCarpetas: {carpetas}\nArchivos: {archivos[:10]}"
+        else:
+            return f"Clonado pero parece vacio. Salida de git:\n{resultado}"
     else:
         return f"ERROR al clonar:\n{resultado}"
 
