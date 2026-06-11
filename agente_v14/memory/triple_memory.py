@@ -88,16 +88,11 @@ class TripleMemory:
             fast: Si True, salta el calculo de embedding (mas rapido).
                   La entrada solo aparecera en busquedas por texto.
         """
-        # Soportar ambos backends: VectorStore (skip_embedding) y SimpleVectorStore/ChromaDB (sin skip_embedding)
-        try:
-            return self.long_term.add(text, metadata=metadata, skip_embedding=fast)
-        except TypeError:
-            # Backend sin soporte skip_embedding (SimpleVectorStore/ChromaDB)
-            if fast:
-                # Agregar sin embedding manualmente: poner has_vector=False via metadata
-                metadata = metadata or {}
-                metadata["no_embedding"] = True
-            return self.long_term.add(text, metadata=metadata)
+        # Todos los backends ahora soportan skip_embedding nativamente:
+        # - VectorStore (vectorstore.py)
+        # - ChromaVectorStore (chroma_store.py)
+        # - SimpleVectorStore (chroma_store.py fallback)
+        return self.long_term.add(text, metadata=metadata, skip_embedding=fast)
 
     def recall(self, query, limit=5):
         """Recupera recuerdos relevantes de la memoria a largo plazo."""

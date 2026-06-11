@@ -14,6 +14,7 @@ import shutil
 
 from config import REPOS_DIR, logger
 from utils.helpers import safe_read_file
+from utils.security import sanitize_input
 from tools.sistema import ejecutar_comando
 
 # Extensiones reconocidas por lenguaje
@@ -209,6 +210,13 @@ def analizar_proyecto(ruta: str) -> str:
 
 def clonar_repositorio(url: str) -> str:
     """Clona un repositorio de GitHub."""
+    # Validar que la URL sea un repo Git legitimo
+    url = url.strip()
+    if not re.match(r'^https?://github\.com/[\w\-\.]+/[\w\-\.]+(?:\.git)?$', url):
+        if not re.match(r'^git@github\.com:[\w\-\.]+/[\w\-\.]+(?:\.git)?$', url):
+            # Sanitizar si no es URL git estandar
+            url = sanitize_input(url)
+
     repo_name = url.rstrip("/").split("/")[-1].replace(".git", "")
     target_dir = os.path.join(REPOS_DIR, repo_name)
 

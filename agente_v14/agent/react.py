@@ -74,7 +74,18 @@ class ReactAgent:
 
             if action_result[0] == "respond":
                 final_response = action_result[1]
-                # Inyectar reflexion metacognitiva si el proceso tuvo problemas
+
+                # PRIMERO: Evaluar resultado para poblar _last_evaluation
+                reflection = self.metacognition.evaluate_result(
+                    user_message, final_response, iteration + 1
+                )
+                self._log(
+                    f"Evaluacion: {reflection['assessment']} "
+                    f"(confianza={reflection['confidence_final']})",
+                    "evaluation"
+                )
+
+                # SEGUNDO: Ahora get_final_reflection_prompt() tiene datos reales
                 reflection_prompt = self.metacognition.get_final_reflection_prompt()
                 if reflection_prompt:
                     self._log("Reflexion metacognitiva inyectada en respuesta final", "evaluation")
@@ -87,14 +98,6 @@ class ReactAgent:
                             final_response = improved
                             self._log("Respuesta mejorada via metacognicion", "success")
 
-                reflection = self.metacognition.evaluate_result(
-                    user_message, final_response, iteration + 1
-                )
-                self._log(
-                    f"Evaluacion: {reflection['assessment']} "
-                    f"(confianza={reflection['confidence_final']})",
-                    "evaluation"
-                )
                 for lesson in reflection.get("lessons", []):
                     learning.add_knowledge(lesson, source="metacognition")
                 self._log("Respuesta final generada", "success")
@@ -207,7 +210,16 @@ class ReactAgent:
 
             # Procesar resultado de esta iteracion
             if is_final_response and not tool_calls_found:
-                # Reflexion metacognitiva para respuestas problematicas
+                # PRIMERO: Evaluar resultado para poblar _last_evaluation
+                reflection = self.metacognition.evaluate_result(
+                    user_message, full_text, iteration + 1
+                )
+                self._log(
+                    f"Evaluacion: {reflection['assessment']} (confianza={reflection['confidence_final']})",
+                    "evaluation"
+                )
+
+                # SEGUNDO: Ahora get_final_reflection_prompt() tiene datos reales
                 reflection_prompt = self.metacognition.get_final_reflection_prompt()
                 if reflection_prompt and len(full_text) < 100 and self.metacognition.error_count > 0:
                     self._log("Reflexion metacognitiva: reintentando respuesta mejorada", "evaluation")
@@ -222,13 +234,6 @@ class ReactAgent:
                         pass
 
                 # Respuesta final - terminar
-                reflection = self.metacognition.evaluate_result(
-                    user_message, full_text, iteration + 1
-                )
-                self._log(
-                    f"Evaluacion: {reflection['assessment']} (confianza={reflection['confidence_final']})",
-                    "evaluation"
-                )
                 for lesson in reflection.get("lessons", []):
                     learning.add_knowledge(lesson, source="metacognition")
 

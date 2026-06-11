@@ -11,10 +11,12 @@ import json
 import logging
 
 from config import WEB_TIMEOUT, logger
+from utils.security import sanitize_input
 
 
 def buscar_web(consulta: str) -> str:
     """Busca en internet usando DuckDuckGo API. Retorna resultados con links."""
+    consulta = sanitize_input(consulta)
     results = []
     
     # 1. Intentar DuckDuckGo Instant Answer API (resumen + related)

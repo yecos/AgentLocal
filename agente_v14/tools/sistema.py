@@ -15,6 +15,20 @@ from config import (
 )
 from utils.security import is_dangerous_command, sanitize_input
 
+# Procesos del sistema que NUNCA se deben matar (pueden causar inestabilidad)
+PROCESOS_CRITICOS = {
+    # Windows
+    "system", "lsass", "csrss", "smss", "wininit", "winlogon",
+    "services", "svchost", "dwm", "explorer", "taskhostw",
+    "runtimebroker", "searchindexer", "securityhealthservice",
+    # Antivirus/seguridad
+    "msmpeng", "msascuil", "nissrv",
+    # Ollama (nuestro LLM)
+    "ollama", "ollama_llama_server",
+    # Linux
+    "systemd", "init", "kernel", "sshd", "dbus-daemon",
+}
+
 
 def ejecutar_comando(comando: str, cwd: str = None, confirmar_peligroso: bool = False) -> str:
     """Ejecuta un comando en la terminal con VALIDACION de seguridad."""
@@ -87,7 +101,20 @@ def procesos_activos(filtro: str = "") -> str:
 
 
 def matar_proceso(pid_o_nombre: str) -> str:
-    """Termina un proceso por PID o nombre."""
+    """Termina un proceso por PID o nombre. Protege procesos criticos del sistema."""
+    nombre_lower = pid_o_nombre.lower().strip()
+
+    # Proteger procesos criticos (por nombre)
+    for critico in PROCESOS_CRITICOS:
+        if critico in nombre_lower or nombre_lower in critico:
+            logger.warning(f"Intento de matar proceso critico bloqueado: {pid_o_nombre}")
+            return (f"PROCESO CRITICO: No puedo terminar '{pid_o_nombre}' "
+                    f"porque es un proceso del sistema esencial. "
+                    f"Matarlo podria causar inestabilidad o perdida de datos.")
+
+    # Sanitizar entrada
+    pid_o_nombre = sanitize_input(pid_o_nombre)
+
     if IS_WINDOWS:
         if pid_o_nombre.isdigit():
             return ejecutar_comando(f"taskkill /pid {pid_o_nombre} /f")

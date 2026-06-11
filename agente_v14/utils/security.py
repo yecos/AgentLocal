@@ -21,6 +21,10 @@ COMANDOS_PELIGROSOS = [
     "rd /s /q", "taskkill /f /pid system",
     "powershell -enc", "certutil", "bitsadmin", "mshta",
     "cipher /w", "diskpart", "reg add",
+    # Nuevos: ransomware/exfiltration patterns
+    "icacls /grant everyone", "net share c",
+    "vssadmin delete", "wbadmin delete",
+    "bcdedit /delete", "bootrec /fixmbr",
 ]
 
 # Comandos permitidos sin confirmacion (allowlist)
@@ -30,6 +34,11 @@ COMANDOS_SEGUROS = [
     "tasklist", "start", "open", "xdg-open",
     "pipenv", "poetry", "bun", "yarn", "cargo",
     "docker ps", "docker images", "docker compose",
+    # Nuevos: herramientas de desarrollo comunes
+    "ollama", "code", "nvim", "vim",
+    "pytest", "jest", "vitest",
+    "uvicorn", "flask", "gunicorn",
+    "npx", "pnpm",
 ]
 
 
@@ -60,6 +69,17 @@ def is_dangerous_command(comando: str) -> bool:
         r'chown\s+root',       # chown root
         r'sudo\s+rm\b',        # sudo rm
         r'sudo\s+dd\b',        # sudo dd
+        # Nuevos: patrones de inyeccion avanzados
+        r'\$\(',               # $(command substitution)
+        r'`[^`]+`',             # `command` backtick injection
+        r'\b\w+\s*=\s*\$\(',   # VAR=$(cmd) assignment injection
+        r'\bwget\b.*\|\s*\w',  # wget ... | something
+        r'\bcurl\b.*-o\s+/etc', # curl -o /etc/ (overwrite system files)
+        r'nc\s+-[el]',          # netcat listener (reverse shell)
+        r'/dev/tcp/',           # bash /dev/tcp (reverse shell)
+        r'base64\s+-d\s*\|',   # base64 -d | (encoded payload)
+        r'\beval\b',           # eval (code injection)
+        r'\bexec\b',           # exec (code injection)
     ]
     for pattern in sospechosos:
         if re.search(pattern, cmd_lower):

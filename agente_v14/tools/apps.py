@@ -16,6 +16,7 @@ from config import (
     REPOS_DIR, SITIOS_CONOCIDOS, APP_ALIASES, IS_WINDOWS, logger
 )
 from utils.helpers import strip_prefixes, open_in_browser
+from utils.security import sanitize_input
 from tools.sistema import ejecutar_comando
 
 # Cache para buscar_exe (evita escaneo de disco repetido)
@@ -224,6 +225,7 @@ def abrir_url(url: str) -> str:
 def abrir_aplicacion(app: str) -> str:
     """Abre una aplicacion de escritorio por nombre."""
     app_clean = strip_prefixes(app).lower()
+    app_clean = sanitize_input(app_clean)
 
     # Si parece URL, usar abrir_url
     indicadores_url = ["http://", "https://", "www.", ".com", ".org", ".net", ".io"]
@@ -262,7 +264,7 @@ def abrir_aplicacion(app: str) -> str:
 def buscar_youtube(consulta: str) -> str:
     """Busca un video en YouTube y lo abre en el navegador."""
     import urllib.parse
-    consulta_clean = strip_prefixes(consulta)
+    consulta_clean = sanitize_input(strip_prefixes(consulta))
     encoded = urllib.parse.quote(consulta_clean)
     url = f"https://www.youtube.com/results?search_query={encoded}"
 

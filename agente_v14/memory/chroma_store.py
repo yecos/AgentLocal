@@ -116,8 +116,13 @@ class ChromaVectorStore:
             pass
         return False
 
-    def add(self, text, metadata=None, entry_id=None):
-        """Agrega un texto al vector store con su embedding."""
+    def add(self, text, metadata=None, entry_id=None, skip_embedding=False):
+        """Agrega un texto al vector store con su embedding.
+        
+        Args:
+            skip_embedding: Si True, NO calcula embedding (mas rapido).
+                           La entrada solo aparecera en busquedas por texto.
+        """
         if not entry_id:
             entry_id = hashlib.md5(text.encode()).hexdigest()[:12]
 
@@ -129,19 +134,30 @@ class ChromaVectorStore:
         except Exception:
             pass
 
-        # Verificar duplicado semantico
-        if self._is_duplicate(text):
+        # Verificar duplicado semantico (solo si tenemos embedding)
+        if not skip_embedding and self._is_duplicate(text):
             logger.debug(f"Texto duplicado semantico, saltando: {text[:50]}...")
             return entry_id
 
-        # Obtener embedding
-        embedding = ollama.get_embedding(text)
         now = datetime.now().isoformat()
 
         # Metadatos con timestamp para decaimiento
         meta = metadata or {}
         meta["created"] = now
         meta["text_preview"] = text[:100]
+
+        # Si skip_embedding, guardar solo con metadatos (sin calculo de embedding)
+        if skip_embedding:
+            meta["no_embedding"] = True
+            self._collection.add(
+                ids=[entry_id],
+                documents=[text[:500]],
+                metadatas=[meta]
+            )
+            return entry_id
+
+        # Obtener embedding
+        embedding = ollama.get_embedding(text)
 
         if embedding:
             self._collection.add(
@@ -355,7 +371,13 @@ class SimpleVectorStore:
         except Exception:
             return 0.5
 
-    def add(self, text, metadata=None, entry_id=None):
+    def add(self, text, metadata=None, entry_id=None, skip_embedding=False):
+        """Agrega un texto al vector store con su embedding.
+        
+        Args:
+            skip_embedding: Si True, NO calcula embedding (mas rapido).
+                           La entrada solo aparecera en busquedas por texto.
+        """
         if not entry_id:
             entry_id = hashlib.md5(text.encode()).hexdigest()[:12]
 
@@ -370,8 +392,22 @@ class SimpleVectorStore:
             if entry["text"][:100].lower() == text_lower:
                 return entry["id"]
 
-        embedding = ollama.get_embedding(text)
         now = datetime.now().isoformat()
+
+        # Si skip_embedding, guardar sin vector (mas rapido)
+        if skip_embedding:
+            self.index.append({
+                "id": entry_id,
+                "text": text[:500],
+                "metadata": metadata or {},
+                "has_vector": False,
+                "created": now
+            })
+            self._dirty = True
+            self._flush()
+            return entry_id
+
+        embedding = ollama.get_embedding(text)
 
         if not embedding:
             self.index.append({
