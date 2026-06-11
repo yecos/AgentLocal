@@ -16,7 +16,8 @@ import logging
 from datetime import datetime
 
 from config import (
-    REPOS_DIR, MAX_REACT_ITERATIONS, MAX_CONVERSATION_MEMORY, logger
+    REPOS_DIR, MAX_REACT_ITERATIONS, MAX_CONVERSATION_MEMORY, logger,
+    USER_PROFILE_FILE
 )
 from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS
 from memory.triple_memory import TripleMemory, learning
@@ -28,12 +29,18 @@ from agent.metacognition import Metacognition
 class ReactAgent:
     """Motor ReAct: Piensa -> Actua -> Observa -> Piensa de nuevo."""
 
+    # Rate limiting: max llamadas a la misma herramienta por conversacion
+    MAX_SAME_TOOL_CALLS = 5
+    MAX_TOTAL_TOOL_CALLS = 12
+
     def __init__(self, memory=None):
         self.memory = memory or TripleMemory()
         self.thinking_log = []
         self.supports_tool_calling = None
         self.metacognition = Metacognition()
         self._models_cache = None  # Cache de modelos para no llamar API cada vez
+        self._tool_call_counts = {}  # Rate limiting por herramienta
+        self._total_tool_calls = 0   # Total de tool calls en esta conversacion
 
     def _log(self, message, category="info"):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -48,6 +55,8 @@ class ReactAgent:
         """
         self.thinking_log = []
         self.metacognition.reset()
+        self._tool_call_counts = {}
+        self._total_tool_calls = 0
         self._log(f"Mensaje del usuario: {user_message}", "input")
 
         messages = self._build_messages(user_message)
@@ -140,6 +149,8 @@ class ReactAgent:
         """
         self.thinking_log = []
         self.metacognition.reset()
+        self._tool_call_counts = {}
+        self._total_tool_calls = 0
         self._log(f"Mensaje del usuario: {user_message}", "input")
 
         messages = self._build_messages(user_message)
@@ -480,8 +491,27 @@ class ReactAgent:
     # EJECUCION DE TOOLS (paralelo + retry)
     # ----------------------------------------------------------
     def _execute_tool_calls(self, tool_calls, messages):
-        """Ejecuta multiples tool calls (paralelo cuando es seguro) y retorna lista de resultados."""
+        """Ejecuta multiples tool calls con rate limiting y paralelismo."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # Rate limiting: filtrar herramientas que se llamaron demasiadas veces
+        filtered_calls = []
+        for tc in tool_calls:
+            tool_name = tc["name"]
+            self._tool_call_counts[tool_name] = self._tool_call_counts.get(tool_name, 0) + 1
+            self._total_tool_calls += 1
+
+            if self._total_tool_calls > self.MAX_TOTAL_TOOL_CALLS:
+                self._log(f"Rate limit: max total tool calls alcanzado ({self.MAX_TOTAL_TOOL_CALLS})", "warning")
+                break
+
+            if self._tool_call_counts[tool_name] > self.MAX_SAME_TOOL_CALLS:
+                self._log(f"Rate limit: {tool_name} llamada {self._tool_call_counts[tool_name]} veces (max {self.MAX_SAME_TOOL_CALLS})", "warning")
+                continue
+
+            filtered_calls.append(tc)
+
+        tool_calls = filtered_calls
 
         # Validar parametros de todos los tool calls primero
         for tc in tool_calls:
@@ -636,6 +666,16 @@ class ReactAgent:
             corrections="Ver correcciones abajo"
         )
 
+        # Perfil de usuario (personalizacion)
+        user_profile = self._load_user_profile()
+        if user_profile:
+            profile_parts = []
+            for key, label in [("name", "Nombre"), ("role", "Rol"), ("interests", "Intereses"), ("language", "Idioma preferido"), ("style", "Estilo de respuesta")]:
+                if key in user_profile and user_profile[key]:
+                    profile_parts.append(f"{label}: {user_profile[key]}")
+            if profile_parts:
+                system_content += "\n\n--- PERFIL DEL USUARIO ---\n" + "\n".join(profile_parts)
+
         # Contexto enriquecido desde Triple Memoria (con cache de embedding)
         enriched_context = self.memory.get_context_for(new_message)
         if enriched_context:
@@ -658,6 +698,16 @@ class ReactAgent:
         messages.append({"role": "user", "content": new_message})
 
         return messages
+
+    def _load_user_profile(self):
+        """Carga el perfil de usuario desde archivo JSON."""
+        try:
+            if os.path.exists(USER_PROFILE_FILE):
+                with open(USER_PROFILE_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {}
 
     # ----------------------------------------------------------
     # HELPERS

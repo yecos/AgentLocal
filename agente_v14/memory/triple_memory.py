@@ -55,6 +55,8 @@ class TripleMemory:
         self._summary_last_update = None
         self._session_file = os.path.join(LEARN_DIR, "session.json")
         self._auto_save_counter = 0
+        # Auto-cleanup al iniciar: limpiar memoria si hay demasiadas entradas
+        self._auto_cleanup()
 
     def add_conversation(self, role, content):
         """Agrega un mensaje a la memoria a corto plazo."""
@@ -243,4 +245,34 @@ class TripleMemory:
         stats["vector_backend"] = backend_type
         if hasattr(self.long_term, "count_with_vectors"):
             stats["long_term_with_vectors"] = self.long_term.count_with_vectors()
+        # Info de ultima sesion
+        try:
+            if os.path.exists(self._session_file):
+                mtime = os.path.getmtime(self._session_file)
+                stats["last_session_age_hours"] = round(
+                    (datetime.now().timestamp() - mtime) / 3600, 1
+                )
+        except Exception:
+            pass
         return stats
+
+    def cleanup(self, max_entries=500):
+        """Limpia entradas viejas de la memoria a largo plazo."""
+        before = self.long_term.count()
+        if hasattr(self.long_term, 'cleanup'):
+            self.long_term.cleanup(max_entries=max_entries)
+        after = self.long_term.count()
+        removed = before - after
+        if removed > 0:
+            logger.info(f"Cleanup de memoria: eliminadas {removed} entradas viejas ({before} -> {after})")
+        return removed
+
+    def _auto_cleanup(self):
+        """Auto-cleanup al iniciar si la memoria esta llena."""
+        try:
+            count = self.long_term.count()
+            if count > 800:  # Si hay mas de 800 entradas, limpiar a 500
+                logger.info(f"Auto-cleanup: {count} entradas en memoria, limpiando...")
+                self.cleanup(max_entries=500)
+        except Exception as e:
+            logger.debug(f"Auto-cleanup fallo (no critico): {e}")

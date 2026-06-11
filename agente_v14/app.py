@@ -361,9 +361,18 @@ def _render_sidebar():
             st.session_state.agent = ReactAgent(memory=st.session_state.memory)
             st.rerun()
 
-        if st.button("Guardar Sesion"):
-            st.session_state.memory.save_session()
-            st.success("Sesion guardada!")
+        col_save, col_clean = st.columns(2)
+        with col_save:
+            if st.button("Guardar"):
+                st.session_state.memory.save_session()
+                st.success("Guardado!")
+        with col_clean:
+            if st.button("Limpiar Memoria"):
+                removed = st.session_state.memory.cleanup(max_entries=300)
+                if removed > 0:
+                    st.success(f"Eliminadas {removed} entradas viejas")
+                else:
+                    st.info("Memoria ya esta limpia")
 
         # Stats de memoria
         stats = st.session_state.memory.get_stats()
@@ -375,6 +384,20 @@ def _render_sidebar():
         with col2:
             st.metric("Correcciones", stats.get("corrections", 0))
             st.metric("Cache Embed", stats.get("embed_cache_size", 0))
+
+        # Backend info
+        backend = stats.get("vector_backend", "?")
+        with_vectors = stats.get("long_term_with_vectors", "?")
+        backend_emoji = "🟢" if "Chroma" in backend else "🟡"
+        st.caption(f"{backend_emoji} Backend: {backend} | Con vectores: {with_vectors}")
+
+        # Ultima sesion
+        last_age = stats.get("last_session_age_hours")
+        if last_age is not None:
+            if last_age < 1:
+                st.caption(f"Ultima sesion: hace {last_age*60:.0f} min")
+            else:
+                st.caption(f"Ultima sesion: hace {last_age:.1f} horas")
 
         # Modelo activo
         st.subheader("Modelo")

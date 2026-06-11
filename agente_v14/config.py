@@ -96,6 +96,7 @@ FEEDBACK_FILE = os.path.join(LEARN_DIR, "feedback.json")
 PATTERNS_FILE = os.path.join(LEARN_DIR, "patterns.json")
 KNOWLEDGE_FILE = os.path.join(LEARN_DIR, "knowledge.json")
 CONNECTION_CACHE_FILE = os.path.join(LEARN_DIR, "ollama_connection.json")
+USER_PROFILE_FILE = os.path.join(LEARN_DIR, "user_profile.json")
 
 # ============================================================
 # SITIOS WEB CONOCIDOS

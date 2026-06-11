@@ -56,6 +56,9 @@ HERRAMIENTAS DISPONIBLES:
 - procesos_activos(filtro?) - Lista procesos corriendo
 - matar_proceso(pid_o_nombre) - Termina un proceso
 - buscar_web(consulta) - Busca en internet
+- configurar_perfil(nombre?, rol?, intereses?, idioma?, estilo?) - Configura tu perfil personal
+- crear_nota(titulo, contenido) - Crea una nota rapida persistente
+- ver_notas() - Lista las notas guardadas
 
 REGLAS IMPORTANTES:
 - Si el usuario pide abrir un SITIO WEB (YouTube, Google, Netflix, etc.), usa abrir_url, NO abrir_aplicacion.

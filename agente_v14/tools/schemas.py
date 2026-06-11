@@ -238,4 +238,49 @@ TOOL_SCHEMAS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "configurar_perfil",
+            "description": "Configura el perfil del usuario para personalizar las respuestas del agente. Se guarda persistentemente entre sesiones. Ejemplo: nombre, rol profesional, intereses, idioma preferido, estilo de respuesta.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "nombre": {"type": "string", "description": "Nombre del usuario"},
+                    "rol": {"type": "string", "description": "Rol profesional (ej: desarrollador, arquitecto, estudiante)"},
+                    "intereses": {"type": "string", "description": "Intereses principales separados por coma"},
+                    "idioma": {"type": "string", "description": "Idioma preferido (ej: espanol, ingles)"},
+                    "estilo": {"type": "string", "description": "Estilo de respuesta: conciso, detallado, tecnico, simple"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "crear_nota",
+            "description": "Crea una nota rapida y la guarda persistentemente. Usar cuando el usuario pide anotar, recordar algo, o tomar nota de informacion importante.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "titulo": {"type": "string", "description": "Titulo corto de la nota"},
+                    "contenido": {"type": "string", "description": "Contenido de la nota"}
+                },
+                "required": ["titulo", "contenido"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ver_notas",
+            "description": "Lista las notas guardadas del usuario. Usar cuando el usuario pide ver sus notas o recordar lo que anoto.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
 ]
