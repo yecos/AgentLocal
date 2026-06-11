@@ -574,9 +574,13 @@ class ReactAgent:
         ollama.detect_models()
         if ollama.model:
             model_lower = ollama.model.lower()
+            # Modelos que SI soportan tool calling nativo
             if "qwen3" in model_lower:
                 return True
-            if any(x in model_lower for x in ["qwen2.5:14b", "qwen2.5:32b"]):
+            if "qwen2.5-coder" in model_lower:
+                return True
+            # Modelos que NO soportan tool calling
+            if any(x in model_lower for x in ["qwen2.5:14b", "qwen2.5:32b", "llama3.1"]):
                 return False
         # Test rapido
         try:

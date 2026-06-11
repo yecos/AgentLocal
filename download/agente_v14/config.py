@@ -54,9 +54,9 @@ os.makedirs(LEARN_DIR, exist_ok=True)
 # ============================================================
 # MODELOS
 # ============================================================
-PREFERRED_MODELS = ["qwen3:4b", "qwen3-coder", "qwen3:30b-a3b", "qwen2.5:14b", "llama3.1:8b"]
-CHAT_MODEL_PATTERNS = ["llama3.1:8b", "qwen3:4b", "mistral:7b"]  # Modelos rapidos para chat
-CODE_MODEL_PATTERNS = ["qwen2.5:14b", "qwen3-coder", "qwen3:30b-a3b"]  # Modelos potentes para codigo
+PREFERRED_MODELS = ["llama3.1:8b", "qwen2.5-coder:7b", "qwen2.5:14b", "qwen3:4b", "qwen3-coder", "qwen3:30b-a3b"]
+CHAT_MODEL_PATTERNS = ["llama3.1:8b", "qwen2.5-coder:7b", "qwen3:4b", "mistral:7b"]  # Modelos rapidos para chat
+CODE_MODEL_PATTERNS = ["qwen2.5:14b", "qwen2.5-coder:7b", "qwen3-coder", "qwen3:30b-a3b"]  # Modelos potentes para codigo
 EMBED_MODEL_CANDIDATES = ["nomic-embed-text", "mxbai-embed-large", "all-minilm"]
 
 # ============================================================
