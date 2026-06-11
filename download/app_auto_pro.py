@@ -1,41 +1,26 @@
 """
 =============================================================
-AGENTE LOCAL AUTONOMO v11 - ReAct + Function Calling
+AGENTE LOCAL AUTONOMO v12 - ReAct + Triple Memoria
 Piensa → Actua → Observa → Piensa de nuevo → Repite
 =============================================================
 
-FILOSOFIA v11:
-  Bucle ReAct real: el agente piensa, actua, observa el resultado,
-  y vuelve a pensar. No ejecuta ciegamente un plan fijo.
+FASE 2 - TRIPLE MEMORIA:
+  1. Memoria Corto Plazo: Conversacion actual (ventana deslizante)
+  2. Memoria Largo Plazo: Conocimiento persistente con busqueda semantica
+     Usa embeddings de Ollama (sin dependencias extras)
+  3. Memoria de Trabajo: Estado de la tarea actual, scratchpad
 
-CAMBIOS vs v10:
-  v10: Pensar → Ejecutar plan completo → Evaluar (ciego)
-  v11: ReAct loop (pensar→actuar→observar→repetir)
-       + Function Calling nativo (si el modelo lo soporta)
-       + Fallback inteligente a JSON parsing
-       + Memoria conversacional (ventana deslizante)
-       + Sin _conversar hardcodeado (todo por LLM)
-       + Seguridad en comandos
-       + Herramientas nuevas (grep, procesos, web)
+VENTAJAS vs v11:
+  - Busqueda semantica: encuentra conocimiento por significado, no por palabras
+  - Contexto enriquecido: inyecta conocimiento relevante automaticamente
+  - Scratchpad: el agente puede anotar cosas durante la tarea
+  - Resumen automatico: cuando la conversacion es larga, resume lo importante
+  - Aprendizaje real: cada interaccion alimenta la memoria a largo plazo
 
-MODELOS RECOMENDADOS:
-  - qwen3:4b          → 4GB VRAM, tool calling nativo, rapido
-  - qwen3-coder       → optimizado para codigo
-  - qwen2.5:14b       → fallback si no tienes qwen3
-  - qwen3:30b-a3b     → 3B activos de 30B, mejor razonamiento (12GB)
-
-ARQUITECTURA:
-  Usuario → Mensaje + Memoria → ReAct Loop
-                                    ↓
-                              LLM piensa con herramientas
-                                    ↓
-                         ¿Llama herramienta? → Ejecuta → Observa → Vuelve a pensar
-                         ¿Responde? → Devuelve al usuario
-                                    ↓
-                         Si falla → Reintenta con enfoque diferente
-                         Si se atasca → Consulta cloud
-                                    ↓
-                         Evaluación → Aprendizaje
+SIN DEPENDENCIAS EXTRAS:
+  - Embeddings via Ollama /api/embeddings (ya lo tienes)
+  - Vector store casero con numpy (o math puro si numpy no esta)
+  - Persistencia en JSON + archivos binarios
 =============================================================
 """
 
@@ -853,6 +838,321 @@ learning = LearningSystem()
 
 
 # ============================================================
+# TRIPLE MEMORIA - Fase 2
+# ============================================================
+# 1. Corto Plazo: Conversacion actual (ya en ReactAgent)
+# 2. Largo Plazo: Conocimiento con busqueda semantica (embeddings)
+# 3. Trabajo: Scratchpad para la tarea actual
+
+# --- Embeddings via Ollama (sin dependencias extras) ---
+
+def _get_embedding(text: str) -> list:
+    """Obtiene el embedding de un texto usando Ollama. Sin dependencias extras."""
+    try:
+        import urllib.request
+        _detect_best_model()
+        # Usar el modelo de embeddings de Ollama (nomic-embed-text viene con Ollama)
+        embed_model = "nomic-embed-text"
+        data = json.dumps({
+            "model": embed_model,
+            "prompt": text[:2000]  # Limitar texto
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "http://localhost:11434/api/embeddings",
+            data=data, headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            return result.get("embedding", [])
+    except Exception:
+        return []
+
+
+def _cosine_similarity(vec1: list, vec2: list) -> float:
+    """Calcula similitud coseno entre dos vectores. Sin numpy."""
+    if not vec1 or not vec2 or len(vec1) != len(vec2):
+        return 0.0
+    dot_product = sum(a * b for a, b in zip(vec1, vec2))
+    norm1 = sum(a * a for a in vec1) ** 0.5
+    norm2 = sum(b * b for b in vec2) ** 0.5
+    if norm1 == 0 or norm2 == 0:
+        return 0.0
+    return dot_product / (norm1 * norm2)
+
+
+class VectorStore:
+    """
+    Vector store ligero usando embeddings de Ollama.
+    Sin Qdrant, sin ChromaDB, sin dependencias extras.
+    Persiste en JSON + archivo de vectores.
+    """
+
+    def __init__(self, store_dir: str = None):
+        self.store_dir = store_dir or os.path.join(LEARN_DIR, "vectors")
+        os.makedirs(self.store_dir, exist_ok=True)
+        self.index_file = os.path.join(self.store_dir, "index.json")
+        self.vectors_file = os.path.join(self.store_dir, "vectors.json")
+        self.index = self._load_index()
+        self._embed_cache = {}  # Cache de embeddings
+
+    def _load_index(self) -> list:
+        """Carga el indice de entradas."""
+        try:
+            if os.path.exists(self.index_file):
+                with open(self.index_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except:
+            pass
+        return []
+
+    def _save_index(self):
+        """Guarda el indice."""
+        try:
+            with open(self.index_file, "w", encoding="utf-8") as f:
+                json.dump(self.index, f, ensure_ascii=False, indent=2)
+        except:
+            pass
+
+    def _load_vectors(self) -> dict:
+        """Carga los vectores almacenados."""
+        try:
+            if os.path.exists(self.vectors_file):
+                with open(self.vectors_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except:
+            pass
+        return {}
+
+    def _save_vectors(self, vectors: dict):
+        """Guarda los vectores."""
+        try:
+            with open(self.vectors_file, "w", encoding="utf-8") as f:
+                json.dump(vectors, f)
+        except:
+            pass
+
+    def add(self, text: str, metadata: dict = None, entry_id: str = None) -> str:
+        """Agrega un texto al vector store con su embedding."""
+        if not entry_id:
+            entry_id = hashlib.md5(text.encode()).hexdigest()[:12]
+
+        # Verificar si ya existe
+        for entry in self.index:
+            if entry["id"] == entry_id:
+                return entry_id
+
+        # Obtener embedding
+        embedding = _get_embedding(text)
+        if not embedding:
+            # Si no hay embeddings, guardar sin vector (busqueda por texto)
+            self.index.append({
+                "id": entry_id,
+                "text": text[:500],
+                "metadata": metadata or {},
+                "has_vector": False,
+                "created": datetime.now().isoformat()
+            })
+            self._save_index()
+            return entry_id
+
+        # Guardar vector por separado
+        vectors = self._load_vectors()
+        vectors[entry_id] = embedding
+        self._save_vectors(vectors)
+
+        self.index.append({
+            "id": entry_id,
+            "text": text[:500],
+            "metadata": metadata or {},
+            "has_vector": True,
+            "created": datetime.now().isoformat()
+        })
+        self._save_index()
+        return entry_id
+
+    def search(self, query: str, limit: int = 5, min_similarity: float = 0.3) -> list:
+        """Busca entradas semanticamente similares al query."""
+        if not self.index:
+            return []
+
+        query_embedding = _get_embedding(query)
+        if not query_embedding:
+            # Fallback: busqueda por texto si no hay embeddings
+            query_lower = query.lower()
+            results = []
+            for entry in self.index:
+                if query_lower in entry["text"].lower():
+                    results.append({**entry, "score": 0.5})
+            return results[:limit]
+
+        # Busqueda semantica
+        vectors = self._load_vectors()
+        scored = []
+        for entry in self.index:
+            if not entry.get("has_vector") or entry["id"] not in vectors:
+                continue
+            vec = vectors[entry["id"]]
+            score = _cosine_similarity(query_embedding, vec)
+            if score >= min_similarity:
+                scored.append({**entry, "score": round(score, 3)})
+
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        return scored[:limit]
+
+    def count(self) -> int:
+        return len(self.index)
+
+
+class TripleMemory:
+    """
+    Sistema de Triple Memoria:
+    1. Corto Plazo: Ultimos mensajes de conversacion
+    2. Largo Plazo: Conocimiento con busqueda semantica (VectorStore)
+    3. Trabajo: Scratchpad para la tarea actual
+    """
+
+    def __init__(self):
+        self.short_term = []  # Memoria a corto plazo (conversacion)
+        self.long_term = VectorStore()  # Memoria a largo plazo (semantica)
+        self.working = {  # Memoria de trabajo (scratchpad)
+            "current_task": "",
+            "task_steps": [],
+            "notes": [],
+            "context_files": [],
+            "last_error": "",
+            "last_success": "",
+        }
+        self._summary_cache = None
+
+    def add_conversation(self, role: str, content: str):
+        """Agrega un mensaje a la memoria a corto plazo."""
+        self.short_term.append({
+            "role": role,
+            "content": content,
+            "timestamp": datetime.now().isoformat()
+        })
+        # Mantener ventana deslizante
+        if len(self.short_term) > MAX_CONVERSATION_MEMORY * 2:
+            # Antes de recortar, guardar lo importante en largo plazo
+            removed = self.short_term[:len(self.short_term) - MAX_CONVERSATION_MEMORY * 2]
+            for msg in removed:
+                if msg["role"] == "assistant" and len(msg["content"]) > 50:
+                    # Las respuestas largas del asistente valen guardar
+                    self.long_term.add(
+                        msg["content"][:500],
+                        metadata={"type": "conversation", "role": msg["role"]}
+                    )
+            self.short_term = self.short_term[-(MAX_CONVERSATION_MEMORY * 2):]
+
+    def remember(self, text: str, metadata: dict = None):
+        """Guarda algo en la memoria a largo plazo."""
+        return self.long_term.add(text, metadata=metadata)
+
+    def recall(self, query: str, limit: int = 5) -> list:
+        """Recupera recuerdos relevantes de la memoria a largo plazo."""
+        return self.long_term.search(query, limit=limit)
+
+    def set_task(self, task: str):
+        """Establece la tarea actual en la memoria de trabajo."""
+        self.working["current_task"] = task
+        self.working["task_steps"] = []
+        self.working["notes"] = []
+
+    def add_step(self, step: str, result: str = ""):
+        """Agrega un paso a la memoria de trabajo."""
+        self.working["task_steps"].append({
+            "step": step,
+            "result": result[:200],
+            "timestamp": datetime.now().isoformat()
+        })
+
+    def add_note(self, note: str):
+        """Agrega una nota al scratchpad."""
+        self.working["notes"].append(note)
+
+    def set_error(self, error: str):
+        """Registra el ultimo error."""
+        self.working["last_error"] = error
+
+    def set_success(self, success: str):
+        """Registra el ultimo exito."""
+        self.working["last_success"] = success
+
+    def get_context_for(self, query: str) -> str:
+        """
+        Construye contexto enriquecido para una query.
+        Combina las 3 memorias en un texto coherente.
+        """
+        context_parts = []
+
+        # 1. Memoria de Trabajo (si hay tarea activa)
+        if self.working["current_task"]:
+            context_parts.append(f"TAREA ACTUAL: {self.working['current_task']}")
+            if self.working["task_steps"]:
+                steps_text = "\n".join([
+                    f"  - {s['step']}: {s['result']}"
+                    for s in self.working["task_steps"][-5:]
+                ])
+                context_parts.append(f"PASOS REALIZADOS:\n{steps_text}")
+            if self.working["last_error"]:
+                context_parts.append(f"ULTIMO ERROR: {self.working['last_error']}")
+            if self.working["notes"]:
+                context_parts.append(f"NOTAS: {'; '.join(self.working['notes'][-3:])}")
+
+        # 2. Memoria a Largo Plazo (busqueda semantica)
+        recall_results = self.recall(query, limit=3)
+        if recall_results:
+            knowledge_text = "\n".join([
+                f"  - [{r.get('score', 0):.2f}] {r['text'][:200]}"
+                for r in recall_results
+            ])
+            context_parts.append(f"CONOCIMIENTO RELEVANTE:\n{knowledge_text}")
+
+        # 3. Correcciones aprendidas
+        corrections = learning.get_corrections_for(query)
+        if corrections:
+            corr_text = "\n".join([
+                f"  - NO hagas '{c['wrong_action']}'. Haz '{c['correct_action']}'"
+                for c in corrections[-3:]
+            ])
+            context_parts.append(f"CORRECCIONES:\n{corr_text}")
+
+        # 4. Resumen de conversacion si es larga
+        if len(self.short_term) > 10:
+            summary = self._get_conversation_summary()
+            if summary:
+                context_parts.append(f"RESUMEN CONVERSACION: {summary}")
+
+        return "\n\n".join(context_parts) if context_parts else ""
+
+    def _get_conversation_summary(self) -> str:
+        """Genera un resumen de la conversacion si es larga."""
+        if self._summary_cache and len(self.short_term) < 20:
+            return self._summary_cache
+
+        # Resumen simple: ultimos temas tratados
+        user_msgs = [m["content"][:100] for m in self.short_term if m["role"] == "user"]
+        if not user_msgs:
+            return ""
+
+        summary = "Temas recientes: " + "; ".join(user_msgs[-5:])
+        self._summary_cache = summary
+        return summary
+
+    def get_stats(self) -> dict:
+        return {
+            "short_term_messages": len(self.short_term),
+            "long_term_entries": self.long_term.count(),
+            "working_task": bool(self.working["current_task"]),
+            "working_steps": len(self.working["task_steps"]),
+            "corrections": len(learning.get_corrections_for("")),
+        }
+
+
+memory = TripleMemory()
+
+
+# ============================================================
 # LLM - Conexion a Ollama con 4 metodos
 # ============================================================
 
@@ -1106,12 +1406,20 @@ class ReactAgent:
             if action_result[0] == "respond":
                 final_response = action_result[1]
                 self._log("Respuesta final generada", "success")
-                # Guardar en memoria
+                # Guardar en Triple Memoria
+                memory.add_conversation("user", user_message)
+                memory.add_conversation("assistant", final_response)
+                # Tambien guardar en conversation_history vieja (compatibilidad)
                 self.conversation_history.append({"role": "user", "content": user_message})
                 self.conversation_history.append({"role": "assistant", "content": final_response})
-                # Mantener ventana deslizante
                 if len(self.conversation_history) > MAX_CONVERSATION_MEMORY * 2:
                     self.conversation_history = self.conversation_history[-(MAX_CONVERSATION_MEMORY * 2):]
+                # Aprender de la interaccion (largo plazo)
+                memory.remember(
+                    f"Usuario pregunto: {user_message[:100]} → Respuesta: {final_response[:200]}",
+                    metadata={"type": "interaction", "user_msg": user_message[:50]}
+                )
+                memory.set_success(final_response[:100])
                 return final_response, self.thinking_log
 
             elif action_result[0] == "tool_call":
@@ -1122,6 +1430,17 @@ class ReactAgent:
                 self._log(f"Ejecutando: {tool_name}({tool_params})", "execution")
                 tool_result = self._execute_tool(tool_name, tool_params)
                 self._log(f"Resultado: {tool_result[:150]}...", "observation")
+
+                # Alimentar memoria de trabajo
+                memory.add_step(f"{tool_name}({tool_params})", tool_result[:200])
+                if "ERROR" in tool_result:
+                    memory.set_error(f"{tool_name}: {tool_result[:100]}")
+                # Guardar resultado importante en largo plazo
+                if len(tool_result) > 50 and "ERROR" not in tool_result:
+                    memory.remember(
+                        f"Resultado de {tool_name}: {tool_result[:300]}",
+                        metadata={"type": "tool_result", "tool": tool_name}
+                    )
 
                 # Alimentar el resultado de vuelta al agente
                 if self.supports_tool_calling:
@@ -1222,39 +1541,38 @@ class ReactAgent:
             return ("error", str(e))
 
     def _build_messages(self, new_message: str) -> list:
-        """Construye la lista de mensajes con memoria conversacional."""
-        # System prompt con contexto
+        """Construye la lista de mensajes con CONTEXTO ENRIQUECIDO (Triple Memoria)."""
+        # System prompt base
         models = self._get_available_models()
-        corrections = learning.get_corrections_for(new_message)
-        corrections_text = ""
-        if corrections:
-            corrections_text = "\n".join([
-                f"- NO hagas '{c['wrong_action']}' cuando el usuario dice '{c['user_message']}'. "
-                f"Haz '{c['correct_action']}' en su lugar."
-                for c in corrections
-            ])
-        else:
-            corrections_text = "Ninguna aun"
-
         system_content = SYSTEM_PROMPT.format(
             so=platform.system(),
             repos_dir=REPOS_DIR,
-            models=", ".join(models) if models else AGENT_MODEL,
-            corrections=corrections_text
+            models=", ".join(models) if models else (AGENT_MODEL or "desconocido"),
+            corrections="Ver correcciones abajo"
         )
 
-        # Inyectar conocimiento relevante
+        # CONTEXTO ENRIQUECIDO desde Triple Memoria
+        enriched_context = memory.get_context_for(new_message)
+        if enriched_context:
+            system_content += f"\n\n--- CONTEXTO DE MEMORIA ---\n{enriched_context}"
+
+        # Conocimiento relevante (sistema antiguo como backup)
         relevant_knowledge = learning.get_knowledge(new_message)
         if relevant_knowledge:
-            knowledge_text = "\n".join([f"- {k['content']}" for k in relevant_knowledge[:5]])
-            system_content += f"\n\nConocimiento relevante:\n{knowledge_text}"
+            knowledge_text = "\n".join([f"- {k['content']}" for k in relevant_knowledge[:3]])
+            system_content += f"\n\nConocimiento adicional:\n{knowledge_text}"
 
         messages = [{"role": "system", "content": system_content}]
 
-        # Agregar historial de conversacion (ventana deslizante)
-        recent_history = self.conversation_history[-MAX_CONVERSATION_MEMORY:]
+        # Historial de conversacion desde TripleMemory (fuente principal)
+        recent_history = memory.short_term[-MAX_CONVERSATION_MEMORY:]
         for msg in recent_history:
-            messages.append(msg)
+            messages.append({"role": msg["role"], "content": msg["content"]})
+
+        # Fallback: tambien usar conversation_history vieja si existe
+        if not recent_history and self.conversation_history:
+            for msg in self.conversation_history[-MAX_CONVERSATION_MEMORY:]:
+                messages.append(msg)
 
         # Mensaje actual
         messages.append({"role": "user", "content": new_message})
@@ -1361,7 +1679,7 @@ def procesar_mensaje(user_message: str) -> tuple:
 
 def main():
     st.set_page_config(
-        page_title="Agente Autonomo v11",
+        page_title="Agente Autonomo v12",
         page_icon="🧠",
         layout="wide"
     )
@@ -1415,8 +1733,8 @@ def main():
     if "thinking_history" not in st.session_state:
         st.session_state.thinking_history = []
 
-    st.markdown('<div class="main-title">Agente Autonomo v11</div>', unsafe_allow_html=True)
-    st.markdown('<div class="main-subtitle">ReAct: Piensa → Actua → Observa → Piensa de nuevo</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-title">Agente Autonomo v12</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-subtitle">ReAct + Triple Memoria: Piensa → Actua → Observa → Aprende</div>', unsafe_allow_html=True)
 
     # === SIDEBAR ===
     with st.sidebar:
@@ -1461,6 +1779,13 @@ def main():
             st.error("Ollama NO conecta")
 
         stats = learning.get_stats()
+        mem_stats = memory.get_stats()
+        st.header("Triple Memoria")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Corto plazo", mem_stats["short_term_messages"])
+        col2.metric("Largo plazo", mem_stats["long_term_entries"])
+        col3.metric("Pasos", mem_stats["working_steps"])
+
         st.header("Aprendizaje")
         col1, col2 = st.columns(2)
         col1.metric("Conocimiento", stats["knowledge"])
