@@ -1,6 +1,6 @@
 """
 =============================================================
-AGENTE LOCAL AUTONOMO v12 - ReAct + Triple Memoria
+AGENTE LOCAL AUTONOMO v13 - ReAct + Triple Memoria + URL Tools
 Piensa → Actua → Observa → Piensa de nuevo → Repite
 =============================================================
 
@@ -10,12 +10,14 @@ FASE 2 - TRIPLE MEMORIA:
      Usa embeddings de Ollama (sin dependencias extras)
   3. Memoria de Trabajo: Estado de la tarea actual, scratchpad
 
-VENTAJAS vs v11:
-  - Busqueda semantica: encuentra conocimiento por significado, no por palabras
-  - Contexto enriquecido: inyecta conocimiento relevante automaticamente
-  - Scratchpad: el agente puede anotar cosas durante la tarea
-  - Resumen automatico: cuando la conversacion es larga, resume lo importante
-  - Aprendizaje real: cada interaccion alimenta la memoria a largo plazo
+v13 MEJORAS vs v12:
+  - Herramienta abrir_url: abre paginas web y sitios conocidos
+  - Herramienta buscar_youtube: busca videos en YouTube
+  - abrir_aplicacion detecta sitios web y redirige a abrir_url
+  - _llm_generate con logging de errores y diagnostico
+  - _detect_tool_calling_support con heuristica rapida por nombre
+  - Timeout adaptativo para modelos grandes (14b+)
+  - 30+ sitios web reconocidos automaticamente
 
 SIN DEPENDENCIAS EXTRAS:
   - Embeddings via Ollama /api/embeddings (ya lo tienes)
@@ -545,6 +547,29 @@ def abrir_aplicacion(app: str) -> str:
     return resultado
 
 
+def buscar_youtube(consulta: str) -> str:
+    """Busca un video en YouTube y lo abre en el navegador."""
+    import urllib.parse
+    consulta_clean = consulta.strip()
+    for prefix in ["busca ", "buscar ", "pon ", "ponme ", "reproduce "]:
+        if consulta_clean.lower().startswith(prefix):
+            consulta_clean = consulta_clean[len(prefix):]
+
+    encoded = urllib.parse.quote(consulta_clean)
+    url = f"https://www.youtube.com/results?search_query={encoded}"
+
+    if platform.system() == "Windows":
+        resultado = ejecutar_comando(f'start "" "{url}"')
+    elif platform.system() == "Darwin":
+        resultado = ejecutar_comando(f'open "{url}"')
+    else:
+        resultado = ejecutar_comando(f'xdg-open "{url}"')
+
+    if not resultado or resultado == "(sin salida)" or "error" not in resultado.lower():
+        return f"Buscando '{consulta_clean}' en YouTube. Deberia abrirse en tu navegador."
+    return f"Abriendo YouTube con la busqueda: {consulta_clean}"
+
+
 def generar_codigo(descripcion: str, tipo: str, ruta: str) -> str:
     """Genera codigo/texto completo usando el LLM y lo guarda en un archivo."""
     if not ruta:
@@ -663,6 +688,20 @@ TOOL_SCHEMAS = [
                     "url": {"type": "string", "description": "URL o nombre del sitio web (ej: youtube, https://google.com, netflix)"}
                 },
                 "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "buscar_youtube",
+            "description": "Busca un video en YouTube y abre los resultados en el navegador. Usar cuando el usuario quiere BUSCAR o VER algo en YouTube (no solo abrir la pagina principal).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "consulta": {"type": "string", "description": "Que buscar en YouTube (ej: tutorial python, musica relax, receta pasta)"}
+                },
+                "required": ["consulta"]
             }
         }
     },
@@ -832,6 +871,7 @@ TOOL_FUNCTIONS = {
     "ejecutar_comando": ejecutar_comando,
     "abrir_aplicacion": abrir_aplicacion,
     "abrir_url": abrir_url,
+    "buscar_youtube": buscar_youtube,
     "generar_codigo": generar_codigo,
     "leer_archivo": leer_archivo,
     "escribir_archivo": escribir_archivo,
@@ -917,9 +957,10 @@ class LearningSystem:
         return relevant[-5:]
 
     def get_stats(self):
+        corrections = self._load(CORRECTIONS_FILE, [])
         return {
             "knowledge": len(self._load(KNOWLEDGE_FILE, [])),
-            "corrections": len(self._load(CORRECTIONS_FILE, [])),
+            "corrections": len(corrections),
             "patterns": len(self._load(PATTERNS_FILE, [])),
             "feedback": len(self._load(FEEDBACK_FILE, [])),
         }
@@ -1306,7 +1347,10 @@ def _detect_best_model() -> str:
 
 
 def _llm_generate(messages: list, tools: list = None) -> str:
-    """Consulta al LLM local. Prueba TODOS los modelos y TODOS los metodos."""
+    """Consulta al LLM local. Prueba TODOS los modelos y TODOS los metodos.
+    Retorna: str (texto del LLM) o dict (respuesta completa con tool_calls).
+    Retorna "" si todo falla.
+    """
     # Asegurar que tenemos modelo detectado
     _detect_best_model()
 
@@ -1315,8 +1359,19 @@ def _llm_generate(messages: list, tools: list = None) -> str:
     if FALLBACK_MODEL and FALLBACK_MODEL != AGENT_MODEL:
         models_to_try.append(FALLBACK_MODEL)
 
-    # Hosts a probar
-    hosts = ['http://localhost:11434', 'http://127.0.0.1:11434']
+    # Filtrar modelos None
+    models_to_try = [m for m in models_to_try if m]
+
+    if not models_to_try:
+        return ""
+
+    # Timeout adaptativo: modelos grandes necesitan mas tiempo
+    def _get_timeout(model_name: str) -> int:
+        if any(x in model_name.lower() for x in ["14b", "30b", "70b", "32b"]):
+            return 180
+        return 120
+
+    errors = []  # Recolectar errores para diagnostico
 
     try:
         import ollama
@@ -1324,77 +1379,85 @@ def _llm_generate(messages: list, tools: list = None) -> str:
         # Intentar con function calling nativo si hay tools
         if tools:
             for model in models_to_try:
-                for host in hosts:
+                for host in ['http://localhost:11434', 'http://127.0.0.1:11434']:
                     try:
                         client = ollama.Client(host=host)
                         response = client.chat(model=model, messages=messages, tools=tools)
-                        return response  # Retorna el objeto completo
-                    except Exception:
+                        # Verificar que la respuesta tiene contenido o tool_calls
+                        msg = response.get("message", response)
+                        has_content = msg.get("content", "")
+                        has_tools = msg.get("tool_calls", [])
+                        if has_content or has_tools:
+                            return response  # Retorna el objeto completo
+                        errors.append(f"{model}@{host}: respuesta vacia con tools")
+                    except Exception as e:
+                        errors.append(f"{model}@{host} tools: {str(e)[:80]}")
                         continue
 
-        # Sin tools (o si fallaron los tools)
+        # Sin tools (o si fallaron los tools) - Intentar con Client
         for model in models_to_try:
-            for host in hosts:
+            for host in ['http://localhost:11434', 'http://127.0.0.1:11434']:
                 try:
                     client = ollama.Client(host=host)
                     response = client.chat(model=model, messages=messages)
                     content = response.get("message", {}).get("content", "")
                     if content:
                         return content
-                except Exception:
-                        continue
+                    errors.append(f"{model}@{host}: respuesta vacia sin tools")
+                except Exception as e:
+                    errors.append(f"{model}@{host}: {str(e)[:80]}")
+                    continue
 
-        # ollama.chat() sin Client
+        # ollama.chat() sin Client (modulo global)
         for model in models_to_try:
             try:
                 response = ollama.chat(model=model, messages=messages)
                 content = response.get("message", {}).get("content", "")
                 if content:
                     return content
-            except Exception:
+                errors.append(f"{model} global: respuesta vacia")
+            except Exception as e:
+                errors.append(f"{model} global: {str(e)[:80]}")
                 continue
-
-        # HTTP directo como ultimo recurso
-        for model in models_to_try:
-            try:
-                import urllib.request
-                data = json.dumps({
-                    "model": model, "messages": messages, "stream": False
-                }).encode("utf-8")
-                req = urllib.request.Request(
-                    "http://localhost:11434/api/chat",
-                    data=data, headers={"Content-Type": "application/json"}
-                )
-                with urllib.request.urlopen(req, timeout=120) as resp:
-                    result = json.loads(resp.read().decode("utf-8"))
-                    content = result.get("message", {}).get("content", "")
-                    if content:
-                        return content
-            except Exception:
-                continue
-
-        return ""
 
     except ImportError:
-        # Sin ollama, solo HTTP directo
-        for model in models_to_try:
-            try:
-                import urllib.request
-                data = json.dumps({
-                    "model": model, "messages": messages, "stream": False
-                }).encode("utf-8")
-                req = urllib.request.Request(
-                    "http://localhost:11434/api/chat",
-                    data=data, headers={"Content-Type": "application/json"}
-                )
-                with urllib.request.urlopen(req, timeout=120) as resp:
-                    result = json.loads(resp.read().decode("utf-8"))
-                    content = result.get("message", {}).get("content", "")
-                    if content:
-                        return content
-            except Exception:
-                continue
-        return ""
+        errors.append("ollama no instalado, usando HTTP directo")
+
+    # HTTP directo como ultimo recurso (funciona sin lib ollama)
+    for model in models_to_try:
+        timeout = _get_timeout(model)
+        try:
+            import urllib.request
+            data = json.dumps({
+                "model": model, "messages": messages, "stream": False
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                "http://localhost:11434/api/chat",
+                data=data, headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+                content = result.get("message", {}).get("content", "")
+                if content:
+                    return content
+                errors.append(f"{model} HTTP: respuesta vacia")
+        except Exception as e:
+            errors.append(f"{model} HTTP: {str(e)[:80]}")
+            continue
+
+    # Si llegamos aqui, todo fallo - guardar diagnostico
+    if errors:
+        # Guardar en log para debug
+        try:
+            log_path = os.path.join(LEARN_DIR, "llm_errors.log")
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n--- {datetime.now().isoformat()} ---\n")
+                for err in errors[-5:]:
+                    f.write(f"  {err}\n")
+        except:
+            pass
+
+    return ""
 
 
 # ============================================================
@@ -1416,10 +1479,11 @@ REGLAS:
 2. Si pide CREAR algo (juego, pagina, script) → usa generar_codigo
 3. Si pide ABRIR un programa de escritorio → usa abrir_aplicacion
 4. Si pide ABRIR un sitio web o URL (YouTube, Google, etc.) → usa abrir_url
-5. Si algo falla → intenta un enfoque diferente
-6. Si no sabes algo → busca en internet
-7. NUNCA inventes rutas o comandos — usa las herramientas para verificar
-8. Habla en espanol, de forma natural y concisa
+5. Si pide BUSCAR o VER algo en YouTube → usa buscar_youtube
+6. Si algo falla → intenta un enfoque diferente
+7. Si no sabes algo → busca en internet
+8. NUNCA inventes rutas o comandos — usa las herramientas para verificar
+9. Habla en espanol, de forma natural y concisa
 
 CONTEXTO DEL SISTEMA:
 - SO: {so}
@@ -1437,6 +1501,7 @@ HERRAMIENTAS DISPONIBLES:
 - ejecutar_comando(comando, confirmar_peligroso=false) - Ejecuta un comando
 - abrir_aplicacion(app) - Abre una app de escritorio por nombre (NO para paginas web)
 - abrir_url(url) - Abre una pagina web o sitio en el navegador (YouTube, Google, etc.)
+- buscar_youtube(consulta) - Busca un video en YouTube y abre los resultados
 - generar_codigo(descripcion, tipo, ruta?) - Genera codigo completo y lo guarda
 - leer_archivo(ruta) - Lee un archivo
 - escribir_archivo(ruta, contenido) - Escribe un archivo
@@ -1449,8 +1514,11 @@ HERRAMIENTAS DISPONIBLES:
 - matar_proceso(pid_o_nombre) - Termina un proceso
 - buscar_web(consulta) - Busca en internet
 
-IMPORTANTE: Si el usuario pide abrir un SITIO WEB (YouTube, Google, Netflix, etc.), usa abrir_url, NO abrir_aplicacion.
-abrir_aplicacion es solo para programas de escritorio (Chrome, Word, WhatsApp, etc.).
+IMPORTANTE:
+- Si el usuario pide abrir un SITIO WEB (YouTube, Google, Netflix, etc.), usa abrir_url, NO abrir_aplicacion.
+- abrir_aplicacion es solo para programas de escritorio (Chrome, Word, WhatsApp, etc.).
+- Si pide BUSCAR algo en YouTube, usa buscar_youtube.
+- Si pide ABRIR YouTube (la pagina principal), usa abrir_url.
 
 Responde SOLO con JSON:
 {{"pensamiento": "que piensas", "accion": "nombre_herramienta", "params": {{...}}, "respuesta_final": ""}}
@@ -1726,17 +1794,33 @@ class ReactAgent:
         return None
 
     def _detect_tool_calling_support(self) -> bool:
-        """Detecta si el modelo soporta function calling nativo."""
+        """Detecta si el modelo soporta function calling nativo.
+        Metodo rapido: envia un mensaje minimo con tools para ver si el modelo
+        lo acepta sin error. Modelos qwen3 soportan, qwen2.5 no.
+        """
         _detect_best_model()  # Asegurar modelo detectado
+
+        # Heuristica rapida: qwen3 soporta tool calling, qwen2.5 no
+        if AGENT_MODEL:
+            model_lower = AGENT_MODEL.lower()
+            # Modelos que SI soportan tool calling nativo
+            if any(x in model_lower for x in ["qwen3", "qwen2.5:7b", "llama3.1", "llama3.2", "mistral", "command-r"]):
+                if "qwen3" in model_lower:
+                    return True
+            # Modelos que probablemente NO soportan tool calling
+            if any(x in model_lower for x in ["qwen2.5:14b", "qwen2.5:32b"]):
+                return False
+
+        # Si no podemos determinar por nombre, hacer test rapido
         try:
             import ollama
             for host in ['http://localhost:11434', 'http://127.0.0.1:11434']:
                 try:
                     client = ollama.Client(host=host)
-                    # Test simple con tools - usar modelo detectado
+                    # Test ultra-corto: 1 mensaje minimo, 1 tool simple
                     response = client.chat(
                         model=AGENT_MODEL,
-                        messages=[{"role": "user", "content": "test"}],
+                        messages=[{"role": "user", "content": "hi"}],
                         tools=[TOOL_SCHEMAS[0]]
                     )
                     # Si no crashea, soporta tool calling
@@ -1775,7 +1859,7 @@ def procesar_mensaje(user_message: str) -> tuple:
 
 def main():
     st.set_page_config(
-        page_title="Agente Autonomo v12",
+        page_title="Agente Autonomo v13",
         page_icon="🧠",
         layout="wide"
     )
@@ -1829,8 +1913,8 @@ def main():
     if "thinking_history" not in st.session_state:
         st.session_state.thinking_history = []
 
-    st.markdown('<div class="main-title">Agente Autonomo v12</div>', unsafe_allow_html=True)
-    st.markdown('<div class="main-subtitle">ReAct + Triple Memoria: Piensa → Actua → Observa → Aprende</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-title">Agente Autonomo v13</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-subtitle">ReAct + Triple Memoria + URL Tools: Piensa → Actua → Observa → Aprende</div>', unsafe_allow_html=True)
 
     # === SIDEBAR ===
     with st.sidebar:
