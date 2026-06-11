@@ -15,12 +15,16 @@ from pathlib import Path
 # ============================================================
 # LOGGING
 # ============================================================
+# Crear directorio de log antes de configurar logging
+_LOG_DIR = os.path.join(os.path.expanduser("~"), ".ia-local", "learning")
+os.makedirs(_LOG_DIR, exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     handlers=[
         logging.FileHandler(
-            os.path.join(os.path.expanduser("~"), ".ia-local", "learning", "agent.log"),
+            os.path.join(_LOG_DIR, "agent.log"),
             encoding="utf-8"
         ),
     ]
