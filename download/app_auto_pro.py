@@ -1,31 +1,41 @@
 """
 =============================================================
-AGENTE LOCAL AUTONOMO v10 - INTELIGENCIA CREATIVA
-Piensa → Planifica → Genera → Ejecuta → Evalua → Aprende
-Consulta IA cloud si necesita ayuda
+AGENTE LOCAL AUTONOMO v11 - ReAct + Function Calling
+Piensa → Actua → Observa → Piensa de nuevo → Repite
 =============================================================
 
-FILOSOFIA v10:
-  El agente no solo EJECUTA acciones, tambien GENERA contenido.
-  Cuando el usuario pide crear algo (juego, pagina, script),
-  el agente usa el LLM para GENERAR el contenido completo,
-  no solo decidir que herramienta usar.
+FILOSOFIA v11:
+  Bucle ReAct real: el agente piensa, actua, observa el resultado,
+  y vuelve a pensar. No ejecuta ciegamente un plan fijo.
 
-DIFERENCIA vs v9:
-  v9:  Elige acciones → ejecuta. Pero escribir_archivo recibe contenido vacio.
-  v10: Detecta solicitudes CREATIVAS → usa generar_contenido() para que
-       el LLM genere el codigo/texto completo → luego lo escribe al archivo.
-       El agente ahora puede CREAR, no solo EJECUTAR.
+CAMBIOS vs v10:
+  v10: Pensar → Ejecutar plan completo → Evaluar (ciego)
+  v11: ReAct loop (pensar→actuar→observar→repetir)
+       + Function Calling nativo (si el modelo lo soporta)
+       + Fallback inteligente a JSON parsing
+       + Memoria conversacional (ventana deslizante)
+       + Sin _conversar hardcodeado (todo por LLM)
+       + Seguridad en comandos
+       + Herramientas nuevas (grep, procesos, web)
 
-ARQUITECTURA v10:
-  Usuario → LLM piensa (SIEMPRE)
-                ↓
-         Es conversacion? → Responde natural
-         Es accion simple? → Planifica → Ejecuta → Evalua
-         Es solicitud CREATIVA? → generar_contenido() → escribir_archivo() → abrir
-                ↓
-         Si falla → Busca alternativas → Consulta cloud
-         Si acierta → Aprende el patron
+MODELOS RECOMENDADOS:
+  - qwen3:4b          → 4GB VRAM, tool calling nativo, rapido
+  - qwen3-coder       → optimizado para codigo
+  - qwen2.5:14b       → fallback si no tienes qwen3
+  - qwen3:30b-a3b     → 3B activos de 30B, mejor razonamiento (12GB)
+
+ARQUITECTURA:
+  Usuario → Mensaje + Memoria → ReAct Loop
+                                    ↓
+                              LLM piensa con herramientas
+                                    ↓
+                         ¿Llama herramienta? → Ejecuta → Observa → Vuelve a pensar
+                         ¿Responde? → Devuelve al usuario
+                                    ↓
+                         Si falla → Reintenta con enfoque diferente
+                         Si se atasca → Consulta cloud
+                                    ↓
+                         Evaluación → Aprendizaje
 =============================================================
 """
 
@@ -35,6 +45,7 @@ import os
 import re
 import json
 import platform
+import hashlib
 from datetime import datetime
 from pathlib import Path
 
@@ -42,10 +53,14 @@ from pathlib import Path
 # CONFIGURACION
 # ============================================================
 
-AGENT_MODEL = "qwen2.5:14b"
+# MODELO: qwen3 tiene tool calling nativo y es mas inteligente
+# Si no tienes qwen3, usa qwen2.5:14b como fallback
+AGENT_MODEL = "qwen3:4b"       # Cambiar a tu modelo disponible
+FALLBACK_MODEL = "qwen2.5:14b"  # Si el principal no esta
 CHAT_MODEL = "llama3.1:8b"
-MAX_THINKING_ROUNDS = 5
-MAX_EXECUTION_RETRIES = 3
+
+MAX_REACT_ITERATIONS = 8        # Max vueltas del bucle ReAct
+MAX_CONVERSATION_MEMORY = 20    # Mensajes de contexto que recuerda
 
 if platform.system() == "Windows":
     REPOS_DIR = os.path.join(os.path.expanduser("~"), "Documents")
@@ -57,22 +72,44 @@ else:
 os.makedirs(REPOS_DIR, exist_ok=True)
 os.makedirs(LEARN_DIR, exist_ok=True)
 
-# Archivos de aprendizaje
 CORRECTIONS_FILE = os.path.join(LEARN_DIR, "corrections.json")
 FEEDBACK_FILE = os.path.join(LEARN_DIR, "feedback.json")
 PATTERNS_FILE = os.path.join(LEARN_DIR, "patterns.json")
 KNOWLEDGE_FILE = os.path.join(LEARN_DIR, "knowledge.json")
+
+# Comandos que NUNCA se ejecutan sin confirmacion
+COMANDOS_PELIGROSOS = [
+    "rm -rf", "del /f /s /q", "format", "fdisk",
+    "reg delete", "net user", "shutdown", "rmdir /s /q",
+    "mkfs", "dd if=", "> /dev/sd", "curl | bash", "curl | sh",
+    "rd /s /q", "taskkill /f /pid system"
+]
 
 
 # ============================================================
 # HERRAMIENTAS - Funciones que EJECUTAN de verdad
 # ============================================================
 
-def ejecutar_comando(comando: str, cwd: str = None) -> str:
+def ejecutar_comando(comando: str, cwd: str = None, confirmar_peligroso: bool = False) -> str:
+    """Ejecuta un comando en la terminal con VALIDACION de seguridad."""
+    cmd_lower = comando.lower()
+
+    # Validar comandos peligrosos
+    for peligro in COMANDOS_PELIGROSOS:
+        if peligro in cmd_lower:
+            if not confirmar_peligroso:
+                return (f"COMANDO PELIGROSO detectado: '{peligro}'\n"
+                        f"Si estas seguro, dime: 'ejecuta confirmado: {comando}'")
+
+    # Timeout adaptativo
+    timeout = 120
+    if any(w in cmd_lower for w in ["install", "build", "compile", "docker", "pull"]):
+        timeout = 300
+
     try:
         result = subprocess.run(
             comando, shell=True, capture_output=True, text=True,
-            timeout=120, cwd=cwd or REPOS_DIR
+            timeout=timeout, cwd=cwd or REPOS_DIR
         )
         output = ""
         if result.stdout:
@@ -85,7 +122,7 @@ def ejecutar_comando(comando: str, cwd: str = None) -> str:
             output = "(sin salida)"
         return output
     except subprocess.TimeoutExpired:
-        return "ERROR_TIMEOUT: Comando cancelado (>120s)"
+        return f"ERROR_TIMEOUT: Comando cancelado (>{timeout}s)"
     except Exception as e:
         return f"ERROR: {e}"
 
@@ -98,7 +135,6 @@ def clonar_repositorio(url: str) -> str:
         git_dir = os.path.join(target_dir, ".git")
         contenido = os.listdir(target_dir) if os.path.isdir(target_dir) else []
         archivos_reales = [f for f in contenido if f != ".git"]
-
         if os.path.exists(git_dir) and len(archivos_reales) > 1:
             return f"Ya existe en: {target_dir}"
         else:
@@ -109,11 +145,9 @@ def clonar_repositorio(url: str) -> str:
                 return f"Carpeta vacia, no se pudo borrar: {e}"
 
     resultado = ejecutar_comando(f'git clone {url} "{target_dir}"')
-
     if os.path.exists(target_dir) and len(os.listdir(target_dir)) > 1:
         return f"CLONADO OK en: {target_dir}"
-    else:
-        return f"ERROR al clonar:\n{resultado}"
+    return f"ERROR al clonar:\n{resultado}"
 
 
 def instalar_dependencias(ruta: str, gestor: str = "auto") -> str:
@@ -186,6 +220,18 @@ def listar_archivos(ruta: str = None) -> str:
         return f"ERROR: {e}"
 
 
+def escribir_archivo(ruta: str, contenido: str) -> str:
+    try:
+        dir_name = os.path.dirname(ruta)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
+        with open(ruta, "w", encoding="utf-8") as f:
+            f.write(contenido)
+        return f"Archivo escrito: {ruta}"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
 def analizar_proyecto(ruta: str) -> str:
     if not os.path.exists(ruta):
         alt = os.path.join(REPOS_DIR, ruta) if not os.path.isabs(ruta) else ruta
@@ -220,73 +266,94 @@ def analizar_proyecto(ruta: str) -> str:
         if os.path.exists(os.path.join(ruta, fname)):
             resultado += f"  - {desc} ({fname})\n"
 
-    pkg_path = os.path.join(ruta, "package.json")
-    if os.path.exists(pkg_path):
-        try:
-            with open(pkg_path, "r", encoding="utf-8") as f:
-                pkg = json.load(f)
-            resultado += f"\npackage.json: {pkg.get('name', 'N/A')} v{pkg.get('version', 'N/A')}\n"
-            resultado += f"  Descripcion: {pkg.get('description', 'N/A')}\n"
-            deps = pkg.get("dependencies", {})
-            if deps:
-                resultado += f"  Deps: {', '.join(list(deps.keys())[:15])}\n"
-            scripts = pkg.get("scripts", {})
-            if scripts:
-                resultado += f"  Scripts: {', '.join(scripts.keys())}\n"
-        except:
-            pass
-
-    readme_path = os.path.join(ruta, "README.md")
-    if os.path.exists(readme_path):
-        try:
-            with open(readme_path, "r", encoding="utf-8") as f:
-                readme = f.read()
-            if len(readme) > 1500:
-                readme = readme[:1500] + "\n... [truncado]"
-            resultado += f"\nREADME.md:\n{readme}\n"
-        except:
-            pass
-
     return resultado
 
 
-def escribir_archivo(ruta: str, contenido: str) -> str:
+# ============================================================
+# HERRAMIENTAS NUEVAS v11
+# ============================================================
+
+def buscar_en_archivos(ruta: str, patron: str) -> str:
+    """Busca texto dentro de archivos (como grep/findstr)."""
+    if platform.system() == "Windows":
+        return ejecutar_comando(f'findstr /s /i /n "{patron}" "{ruta}\\*"')
+    else:
+        return ejecutar_comando(f'grep -rn "{patron}" "{ruta}" --include="*.py" --include="*.js" --include="*.html" --include="*.ts" --include="*.json" 2>/dev/null | head -50')
+
+
+def procesos_activos(filtro: str = "") -> str:
+    """Lista procesos corriendo. Opcionalmente filtra por nombre."""
+    if platform.system() == "Windows":
+        cmd = 'tasklist /fo csv'
+        if filtro:
+            cmd += f' | findstr /i "{filtro}"'
+    else:
+        cmd = 'ps aux'
+        if filtro:
+            cmd += f' | grep -i "{filtro}"'
+    result = ejecutar_comando(cmd)
+    if len(result) > 3000:
+        result = result[:3000] + "\n... [truncado]"
+    return result
+
+
+def matar_proceso(pid_o_nombre: str) -> str:
+    """Termina un proceso por PID o nombre."""
+    if platform.system() == "Windows":
+        # Intentar como PID primero
+        if pid_o_nombre.isdigit():
+            return ejecutar_comando(f"taskkill /pid {pid_o_nombre} /f")
+        else:
+            return ejecutar_comando(f'taskkill /f /im "{pid_o_nombre}"')
+    else:
+        if pid_o_nombre.isdigit():
+            return ejecutar_comando(f"kill -9 {pid_o_nombre}")
+        else:
+            return ejecutar_comando(f"pkill -f {pid_o_nombre}")
+
+
+def buscar_web(consulta: str) -> str:
+    """Busca en internet usando DuckDuckGo API."""
     try:
-        dir_name = os.path.dirname(ruta)
-        if dir_name:
-            os.makedirs(dir_name, exist_ok=True)
-        with open(ruta, "w", encoding="utf-8") as f:
-            f.write(contenido)
-        return f"Archivo escrito: {ruta}"
+        import urllib.request
+        import urllib.parse
+        encoded = urllib.parse.quote(consulta)
+        url = f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        results = []
+        if data.get("AbstractText"):
+            results.append(f"Resumen: {data['AbstractText']}")
+        if data.get("Answer"):
+            results.append(f"Respuesta: {data['Answer']}")
+        for r in data.get("RelatedTopics", [])[:5]:
+            if isinstance(r, dict) and r.get("Text"):
+                results.append(f"- {r['Text']}")
+
+        if results:
+            return "\n".join(results)
+        return "No se encontraron resultados. Intenta con otra consulta."
     except Exception as e:
-        return f"ERROR: {e}"
+        return f"ERROR en busqueda web: {e}"
 
 
 # ============================================================
 # BUSQUEDA INTELIGENTE DE APLICACIONES
-# Usa el Start Menu de Windows (la forma NATIVA como Windows busca apps)
 # ============================================================
 
 def buscar_en_start_menu(nombre: str) -> str:
-    """
-    Busca en los accesos directos del Start Menu de Windows.
-    Esta es la forma mas confiable de encontrar apps instaladas,
-    porque es exactamente como funciona el buscador de Windows.
-    """
     nombre_lower = nombre.lower().strip()
-    # Quitar "abre", "abrir", etc. si vienen en el nombre
     for prefix in ["abre ", "abrir ", "open ", "inicia ", "lanza ", "mi "]:
         if nombre_lower.startswith(prefix):
             nombre_lower = nombre_lower[len(prefix):]
             break
 
-    # Directorios del Start Menu donde Windows guarda los accesos directos
     start_menu_dirs = []
     if platform.system() == "Windows":
-        # Start Menu global (todas las apps instaladas para todos los usuarios)
         start_menu_dirs.append(os.path.join(os.environ.get("ProgramData", "C:\\ProgramData"),
                                             "Microsoft", "Windows", "Start Menu", "Programs"))
-        # Start Menu del usuario (apps instaladas solo para este usuario)
         start_menu_dirs.append(os.path.join(os.environ.get("AppData", ""),
                                             "Microsoft", "Windows", "Start Menu", "Programs"))
 
@@ -297,46 +364,31 @@ def buscar_en_start_menu(nombre: str) -> str:
         for root, dirs, files in os.walk(sm_dir):
             for f in files:
                 f_lower = f.lower()
-                # Los accesos directos son .lnk
                 if f_lower.endswith(".lnk"):
-                    # Quitar .lnk para comparar
                     name_no_ext = f_lower[:-4]
-                    # Buscar coincidencia parcial
                     if nombre_lower in name_no_ext or name_no_ext in nombre_lower:
                         matches.append((os.path.join(root, f), name_no_ext))
 
     if not matches:
         return ""
 
-    # Preferir la coincidencia mas exacta
     for path, name in matches:
         if nombre_lower == name:
             return path
-
-    # Si no hay exacta, la primera parcial
     return matches[0][0]
 
 
 def buscar_exe(nombre: str) -> str:
-    """
-    Busca un ejecutable de forma inteligente:
-    1. Start Menu (lo mas confiable en Windows)
-    2. Registro de desinstalacion (InstallLocation)
-    3. where /r en Program Files
-    4. Busqueda en directorios comunes
-    """
     nombre_lower = nombre.lower().strip()
     for prefix in ["abre ", "abrir ", "open ", "inicia ", "lanza ", "mi "]:
         if nombre_lower.startswith(prefix):
             nombre_lower = nombre_lower[len(prefix):]
             break
 
-    # 1. Start Menu (MEJOR METODO - funciona como Windows)
     shortcut = buscar_en_start_menu(nombre)
     if shortcut:
-        return shortcut  # Windows abre .lnk directamente con start
+        return shortcut
 
-    # 2. Registro de Windows (InstallLocation)
     if platform.system() == "Windows":
         try:
             reg_cmd = (
@@ -363,7 +415,6 @@ def buscar_exe(nombre: str) -> str:
         except:
             pass
 
-    # 3. where /r en directorios comunes
     if platform.system() == "Windows":
         search_dirs = [
             os.environ.get("ProgramFiles", "C:\\Program Files"),
@@ -384,20 +435,12 @@ def buscar_exe(nombre: str) -> str:
 
 
 def abrir_aplicacion(app: str) -> str:
-    """
-    Abre una aplicacion de forma inteligente:
-    1. Buscar en el Start Menu (como hace Windows)
-    2. Buscar el .exe en el sistema
-    3. Intentar con 'start nombre' como ultimo recurso
-    Si falla, sugerir al usuario que instale la app.
-    """
     app_clean = app.lower().strip()
     for prefix in ["abre ", "abrir ", "open ", "inicia ", "lanza ", "mi "]:
         if app_clean.startswith(prefix):
             app_clean = app_clean[len(prefix):]
             break
 
-    # Alias comunes para que el LLM no tenga que adivinar el comando exacto
     aliases = {
         "chrome": "google chrome", "vscode": "visual studio code",
         "autocad": "autocad", "revit": "revit",
@@ -405,10 +448,10 @@ def abrir_aplicacion(app: str) -> str:
         "word": "word", "excel": "excel", "powerpoint": "powerpoint",
         "photoshop": "adobe photoshop", "illustrator": "adobe illustrator",
         "figma": "figma", "blender": "blender", "sketchup": "sketchup",
+        "notepad": "notepad", "bloc de notas": "notepad",
     }
     search_name = aliases.get(app_clean, app_clean)
 
-    # 1. Buscar en Start Menu
     shortcut_path = buscar_en_start_menu(search_name)
     if shortcut_path:
         resultado = ejecutar_comando(f'start "" "{shortcut_path}"')
@@ -417,7 +460,6 @@ def abrir_aplicacion(app: str) -> str:
         if "error" not in resultado.lower():
             return f"Aplicacion {app} abierta (via Start Menu)"
 
-    # 2. Buscar .exe directamente
     exe_path = buscar_exe(search_name)
     if exe_path:
         resultado = ejecutar_comando(f'start "" "{exe_path}"')
@@ -426,47 +468,304 @@ def abrir_aplicacion(app: str) -> str:
         if "error" not in resultado.lower():
             return f"Aplicacion {app} abierta (encontrada en: {exe_path})"
 
-    # 3. Intento directo con start (Windows a veces resuelve el nombre)
     resultado = ejecutar_comando(f"start {app_clean}")
     if not resultado or resultado == "(sin salida)":
         return f"Aplicacion {app} abierta"
 
-    # 4. No se encontro
     if "no se puede" in resultado.lower() or "no encuentra" in resultado.lower():
         return (f"No encontre '{app}' en tu computadora. "
-                f"Puede que no este instalada o tenga otro nombre. "
-                f"Quieres que busque en los programas instalados?")
+                f"Puede que no este instalada o tenga otro nombre.")
     return resultado
 
 
-# Mapeo de todas las herramientas disponibles
-TOOL_FUNCTIONS = {
-    "ejecutar_comando": ejecutar_comando,
-    "clonar_repositorio": clonar_repositorio,
-    "instalar_dependencias": instalar_dependencias,
-    "leer_archivo": leer_archivo,
-    "listar_archivos": listar_archivos,
-    "analizar_proyecto": analizar_proyecto,
-    "escribir_archivo": escribir_archivo,
-    "abrir_aplicacion": abrir_aplicacion,
-}
+def generar_codigo(descripcion: str, tipo: str, ruta: str) -> str:
+    """Genera codigo/texto completo usando el LLM y lo guarda en un archivo."""
+    if not ruta:
+        ext_map = {
+            "html": ".html", "python": ".py", "javascript": ".js",
+            "css": ".css", "json": ".json", "markdown": ".md", "texto": ".txt"
+        }
+        ext = ext_map.get(tipo, ".txt")
+        safe_name = re.sub(r'[^a-z0-9]', '_', descripcion[:30].lower()).strip('_')
+        ruta = os.path.join(REPOS_DIR, f"{safe_name}{ext}")
+    else:
+        ruta = ruta.replace("REPOS_DIR", REPOS_DIR)
 
-TOOL_DESCRIPTIONS = """
-- conversar(mensaje) - Para SALUDOS, preguntas generales, charla. NUNCA para abrir apps.
-- generar_contenido(descripcion, tipo, ruta) - GENERA contenido creativo usando el LLM. Para cuando el usuario pide CREAR algo: juegos, paginas web, scripts, documentos, etc. El LLM genera el contenido COMPLETO y lo guarda en el archivo. tipo puede ser: "html", "python", "javascript", "css", "json", "markdown", "texto". descripcion es que quiere crear.
-- ejecutar_comando(comando) - Ejecuta CUALQUIER comando en la terminal.
-- clonar_repositorio(url) - Clona un repo de GitHub.
-- instalar_dependencias(ruta, gestor="auto") - Instala deps. Detecta npm/pip/poetry.
-- leer_archivo(ruta) - Lee el contenido de un archivo.
-- listar_archivos(ruta) - Lista archivos y carpetas de un directorio.
-- analizar_proyecto(ruta) - Analiza la estructura completa de un proyecto.
-- escribir_archivo(ruta, contenido) - Crea o modifica un archivo. SOLO usar cuando ya tienes el contenido exacto. Para generar contenido, usar generar_contenido.
-- abrir_aplicacion(app) - Abre CUALQUIER aplicacion por nombre. Busca automaticamente en el Start Menu, registro y disco. No necesita saber el .exe exacto.
-"""
+    tipo_prompts = {
+        "html": (
+            "Eres un desarrollador web EXPERTO. Genera una pagina web HTML COMPLETA y FUNCIONAL.\n"
+            "REGLAS:\n"
+            "- TODO debe estar en un SOLO archivo HTML (HTML + CSS inline + JavaScript inline)\n"
+            "- CSS moderno con gradientes, sombras, animaciones\n"
+            "- JavaScript funcional, no pseudocodigo\n"
+            "- Si es un juego: HTML5 Canvas, game loop, controles, colisiones, puntuacion\n"
+            "- Si es una pagina: responsive, secciones completas\n"
+            "- NO uses placeholders, TODO debe funcionar\n"
+            "- Responde SOLO con el codigo HTML, sin explicaciones, sin markdown"
+        ),
+        "python": (
+            "Eres un desarrollador Python EXPERTO. Genera un script COMPLETO y FUNCIONAL.\n"
+            "- Codigo ejecutable directamente\n"
+            "- Incluye imports, funciones, manejo de errores\n"
+            "- Responde SOLO con el codigo Python, sin explicaciones"
+        ),
+        "javascript": (
+            "Eres un desarrollador JavaScript EXPERTO. Genera codigo COMPLETO.\n"
+            "- Codigo funcional y ejecutable\n"
+            "- Responde SOLO con el codigo, sin explicaciones"
+        ),
+        "css": "Eres un disenador CSS EXPERTO. Responde SOLO con el codigo CSS.",
+        "json": "Genera un JSON valido y bien estructurado. Responde SOLO con el JSON.",
+        "markdown": "Genera un documento Markdown bien formateado. Responde SOLO con Markdown.",
+    }
+
+    system_prompt = tipo_prompts.get(tipo, "Genera contenido completo y funcional. Responde SOLO con el contenido.")
+
+    # Usar _ask_llm via una instancia temporal
+    contenido = _llm_generate([
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Crea: {descripcion}"}
+    ])
+
+    if not contenido:
+        return "ERROR: No se pudo generar contenido (Ollama no responde)"
+
+    # Limpiar markdown code blocks
+    contenido = contenido.strip()
+    if contenido.startswith("```"):
+        contenido = re.sub(r'^```[a-z]*\n?', '', contenido)
+        contenido = re.sub(r'\n?```$', '', contenido)
+        contenido = contenido.strip()
+
+    resultado = escribir_archivo(ruta, contenido)
+    if "ERROR" in resultado:
+        return resultado
+
+    # Si es HTML, abrir en navegador
+    if tipo == "html" and platform.system() == "Windows":
+        ejecutar_comando(f'start "" "{ruta}"')
+        return f"Contenido generado y guardado en: {ruta}\nAbierto en el navegador automaticamente!"
+
+    size_kb = len(contenido) / 1024
+    return f"Contenido generado ({size_kb:.1f}KB) y guardado en: {ruta}"
 
 
 # ============================================================
-# SISTEMA DE APRENDIZAJE - El agente aprende de sus errores
+# DEFINICION DE HERRAMIENTAS PARA FUNCTION CALLING
+# ============================================================
+
+# Esquemas para function calling nativo de Ollama/qwen3
+TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "ejecutar_comando",
+            "description": "Ejecuta un comando en la terminal. Peligrosos requieren confirmacion.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "comando": {"type": "string", "description": "Comando a ejecutar"},
+                    "confirmar_peligroso": {"type": "boolean", "description": "True si el usuario confirmo un comando peligroso"}
+                },
+                "required": ["comando"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "abrir_aplicacion",
+            "description": "Abre una aplicacion por nombre. Busca automaticamente en Start Menu, registro y disco. No necesitas saber el .exe exacto.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "app": {"type": "string", "description": "Nombre de la aplicacion (ej: whatsapp, chrome, autocad)"}
+                },
+                "required": ["app"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generar_codigo",
+            "description": "Genera codigo/texto COMPLETO usando el LLM y lo guarda en un archivo. Usar cuando el usuario pide CREAR algo: juegos, paginas web, scripts, etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "descripcion": {"type": "string", "description": "Que crear (detallado)"},
+                    "tipo": {"type": "string", "enum": ["html", "python", "javascript", "css", "json", "markdown", "texto"], "description": "Tipo de archivo"},
+                    "ruta": {"type": "string", "description": "Ruta donde guardar (opcional, se genera automaticamente)"}
+                },
+                "required": ["descripcion", "tipo"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "leer_archivo",
+            "description": "Lee el contenido de un archivo.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ruta": {"type": "string", "description": "Ruta del archivo"}
+                },
+                "required": ["ruta"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "escribir_archivo",
+            "description": "Crea o modifica un archivo con contenido especifico. Solo usar cuando ya tienes el contenido exacto.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ruta": {"type": "string", "description": "Ruta del archivo"},
+                    "contenido": {"type": "string", "description": "Contenido a escribir"}
+                },
+                "required": ["ruta", "contenido"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "listar_archivos",
+            "description": "Lista archivos y carpetas de un directorio.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ruta": {"type": "string", "description": "Ruta del directorio (por defecto el directorio de trabajo)"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analizar_proyecto",
+            "description": "Analiza la estructura completa de un proyecto.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ruta": {"type": "string", "description": "Ruta del proyecto"}
+                },
+                "required": ["ruta"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clonar_repositorio",
+            "description": "Clona un repositorio de GitHub.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL del repositorio"}
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "instalar_dependencias",
+            "description": "Instala dependencias de un proyecto. Detecta automaticamente npm/pip/poetry.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ruta": {"type": "string", "description": "Ruta del proyecto"},
+                    "gestor": {"type": "string", "description": "Gestor de paquetes (auto/npm/pip/poetry)"}
+                },
+                "required": ["ruta"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "buscar_en_archivos",
+            "description": "Busca texto dentro de archivos (como grep/findstr).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ruta": {"type": "string", "description": "Directorio donde buscar"},
+                    "patron": {"type": "string", "description": "Texto o patron a buscar"}
+                },
+                "required": ["ruta", "patron"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "procesos_activos",
+            "description": "Lista procesos corriendo. Opcionalmente filtra por nombre.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filtro": {"type": "string", "description": "Filtro por nombre de proceso (opcional)"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "matar_proceso",
+            "description": "Termina un proceso por PID o nombre.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pid_o_nombre": {"type": "string", "description": "PID numerico o nombre del proceso"}
+                },
+                "required": ["pid_o_nombre"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "buscar_web",
+            "description": "Busca en internet cuando no sabes algo.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "consulta": {"type": "string", "description": "Consulta de busqueda"}
+                },
+                "required": ["consulta"]
+            }
+        }
+    },
+]
+
+# Mapa de funciones para ejecucion rapida
+TOOL_FUNCTIONS = {
+    "ejecutar_comando": ejecutar_comando,
+    "abrir_aplicacion": abrir_aplicacion,
+    "generar_codigo": generar_codigo,
+    "leer_archivo": leer_archivo,
+    "escribir_archivo": escribir_archivo,
+    "listar_archivos": listar_archivos,
+    "analizar_proyecto": analizar_proyecto,
+    "clonar_repositorio": clonar_repositorio,
+    "instalar_dependencias": instalar_dependencias,
+    "buscar_en_archivos": buscar_en_archivos,
+    "procesos_activos": procesos_activos,
+    "matar_proceso": matar_proceso,
+    "buscar_web": buscar_web,
+}
+
+
+# ============================================================
+# SISTEMA DE APRENDIZAJE
 # ============================================================
 
 class LearningSystem:
@@ -477,7 +776,8 @@ class LearningSystem:
             if os.path.exists(filepath):
                 with open(filepath, "r", encoding="utf-8") as f:
                     return json.load(f)
-        except: pass
+        except:
+            pass
         return default
 
     @staticmethod
@@ -485,7 +785,8 @@ class LearningSystem:
         try:
             with open(filepath, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-        except: pass
+        except:
+            pass
 
     def save_knowledge(self, topic, content, source="experience"):
         knowledge = self._load(KNOWLEDGE_FILE, [])
@@ -506,7 +807,6 @@ class LearningSystem:
         return knowledge
 
     def save_correction(self, user_msg, wrong_action, correct_action, reason=""):
-        """Guarda una correccion del usuario. El agente NUNCA repetira este error."""
         corrections = self._load(CORRECTIONS_FILE, [])
         corrections.append({
             "timestamp": datetime.now().isoformat(),
@@ -514,7 +814,6 @@ class LearningSystem:
             "correct_action": correct_action, "reason": reason
         })
         self._save(CORRECTIONS_FILE, corrections)
-        # Tambien guardar como conocimiento para que el LLM lo use
         self.save_knowledge(
             f"correccion:{user_msg[:50]}",
             f"Cuando el usuario dice '{user_msg}', NO hacer '{wrong_action}'. "
@@ -527,14 +826,13 @@ class LearningSystem:
         return [k["content"] for k in knowledge if k["topic"].startswith("leccion:")]
 
     def get_corrections_for(self, user_msg: str) -> list:
-        """Busca correcciones previas relacionadas con un mensaje del usuario."""
         corrections = self._load(CORRECTIONS_FILE, [])
-        msg_lower = user_msg.lower()
+        msg_lower = user_message.lower() if False else user_msg.lower()
         relevant = []
         for c in corrections:
             if any(w in msg_lower for w in c["user_message"].lower().split() if len(w) > 3):
                 relevant.append(c)
-        return relevant[-5:]  # Ultimas 5 relevantes
+        return relevant[-5:]
 
     def get_stats(self):
         return {
@@ -548,182 +846,280 @@ learning = LearningSystem()
 
 
 # ============================================================
-# CEREBRO DEL AGENTE - Piensa, Planifica, Decide
+# LLM - Conexion a Ollama con 4 metodos
 # ============================================================
 
-THINKING_PROMPT = """Eres un agente autonomo INTELIGENTE que PIENSA antes de actuar.
+def _llm_generate(messages: list, tools: list = None) -> str:
+    """Consulta al LLM local. Funcion modular, usada por todo el agente."""
+    try:
+        import ollama
 
-Tu trabajo es ANALIZAR la solicitud del usuario y decidir que hacer.
+        # Intentar con function calling nativo si hay tools
+        if tools:
+            for host in ['http://localhost:11434', 'http://127.0.0.1:11434']:
+                try:
+                    client = ollama.Client(host=host)
+                    response = client.chat(model=AGENT_MODEL, messages=messages, tools=tools)
+                    return response  # Retorna el objeto completo (con tool_calls)
+                except Exception:
+                    continue
 
-REGLAS FUNDAMENTALES:
-1. Si el usuario SALUDA o HABLA contigo → usa "conversar"
-2. Si el usuario pide ABRIR algo → usa "abrir_aplicacion" (busca automaticamente, no necesitas saber el .exe)
-3. Si el usuario pide CREAR algo (juego, pagina, script, codigo, documento) → usa "generar_contenido" NUNCA escribir_archivo con contenido vacio
-4. Si el usuario pide HACER algo concreto → crea un plan con las herramientas necesarias
-5. NUNCA uses escribir_archivo para responder preguntas o saludos
-6. NUNCA uses escribir_archivo con contenido generico como "codigo HTML" — usa generar_contenido
-7. NUNCA digas que algo "no existe" solo por el nombre — deja que las herramientas lo busquen
+        # Sin tools, o fallback sin function calling
+        for host in ['http://localhost:11434', 'http://127.0.0.1:11434']:
+            try:
+                client = ollama.Client(host=host)
+                response = client.chat(model=AGENT_MODEL, messages=messages)
+                return response.get("message", {}).get("content", "")
+            except Exception:
+                continue
 
-PIENSA ASI:
-- "hola como estas?" → Es un saludo, usar conversar
-- "whatsapp" → Quiere abrir WhatsApp, usar abrir_aplicacion
-- "autocad 2025" → Quiere abrir AutoCAD, usar abrir_aplicacion
-- "haz un juego en html" → Quiere CREAR un juego, usar generar_contenido
-- "crea una pagina web" → Quiere CREAR una pagina, usar generar_contenido
-- "escribe un script de python" → Quiere CREAR un script, usar generar_contenido
-- "clona https://github.com/..." → Quiere clonar un repo, crear plan
-- "que es Python?" → Es una pregunta, usar conversar
-- "no funciona" → Algo fallo, diagnosticar con herramientas
+        try:
+            response = ollama.chat(model=AGENT_MODEL, messages=messages)
+            return response.get("message", {}).get("content", "")
+        except Exception:
+            pass
 
-CORRECCIONES APRENDIDAS (NO repitas estos errores):
-{corrections}
+        # HTTP directo como ultimo recurso
+        try:
+            import urllib.request
+            data = json.dumps({
+                "model": AGENT_MODEL, "messages": messages, "stream": False
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                "http://localhost:11434/api/chat",
+                data=data, headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+                return result.get("message", {}).get("content", "")
+        except Exception:
+            pass
+
+        return ""
+
+    except ImportError:
+        return ""
+
+
+# ============================================================
+# CEREBRO ReAct - El motor principal v11
+# ============================================================
+
+SYSTEM_PROMPT = """Eres un agente autonomo INTELIGENTE que vive en la computadora del usuario.
+
+Tu trabajo es ayudarlo con CUALQUIER cosa. Tienes herramientas para:
+- Abrir aplicaciones, ejecutar comandos, leer/escribir archivos
+- Generar codigo completo (juegos, paginas web, scripts)
+- Clonar repos, instalar dependencias, analizar proyectos
+- Buscar en archivos, ver procesos, buscar en internet
+- Matar procesos que se cuelgan
+
+REGLAS:
+1. PIENSA antes de actuar. Analiza que quiere el usuario.
+2. Si pide CREAR algo (juego, pagina, script) → usa generar_codigo
+3. Si pide ABRIR algo → usa abrir_aplicacion
+4. Si algo falla → intenta un enfoque diferente
+5. Si no sabes algo → busca en internet
+6. NUNCA inventes rutas o comandos — usa las herramientas para verificar
+7. Habla en espanol, de forma natural y concisa
 
 CONTEXTO DEL SISTEMA:
 - SO: {so}
 - Directorio de trabajo: {repos_dir}
-- Repos disponibles: {repos}
-- Lecciones aprendidas: {lessons}
+- Modelos disponibles: {models}
+
+CORRECCIONES APRENDIDAS (NO repitas estos errores):
+{corrections}
+"""
+
+# Prompt para cuando usamos JSON fallback (modelos sin tool calling)
+JSON_TOOLS_PROMPT = """
 
 HERRAMIENTAS DISPONIBLES:
-{tools}
-
-FORMATO DE RESPUESTA - Responde SOLO con JSON valido:
-{{
-    "analisis": "Que entiendo que quiere el usuario y por que",
-    "plan": [
-        {{
-            "paso": 1,
-            "accion": "nombre_de_herramienta",
-            "params": {{"parametro": "valor"}},
-            "razon": "por que hago esto"
-        }}
-    ],
-    "riesgos": ["que puede salir mal"],
-    "siguiente_paso_sugerido": "que hacer despues"
-}}
-
-EJEMPLOS:
-
-Usuario: "hola como estas?"
-Respuesta:
-{{
-    "analisis": "El usuario esta saludando. Es conversacion, no accion.",
-    "plan": [
-        {{"paso": 1, "accion": "conversar", "params": {{"mensaje": "hola como estas?"}}, "razon": "Es un saludo"}}
-    ],
-    "riesgos": [],
-    "siguiente_paso_sugerido": ""
-}}
-
-Usuario: "abre mi whatsapp"
-Respuesta:
-{{
-    "analisis": "El usuario quiere abrir WhatsApp. abrir_aplicacion lo buscara automaticamente.",
-    "plan": [
-        {{"paso": 1, "accion": "abrir_aplicacion", "params": {{"app": "whatsapp"}}, "razon": "Abrir WhatsApp"}}
-    ],
-    "riesgos": ["Puede no estar instalado como app desktop"],
-    "siguiente_paso_sugerido": ""
-}}
-
-Usuario: "vamos hacer un juego en html"
-Respuesta:
-{{
-    "analisis": "El usuario quiere CREAR un juego en HTML. Necesito GENERAR el contenido completo del juego, no solo abrir notepad.",
-    "plan": [
-        {{"paso": 1, "accion": "generar_contenido", "params": {{"descripcion": "un juego interactivo en HTML5 Canvas con naves espaciales, disparos, enemigos, puntuacion y efectos visuales", "tipo": "html", "ruta": "REPOS_DIR/juego_espacial.html"}}, "razon": "Generar el juego HTML completo con Canvas y JavaScript"}},
-        {{"paso": 2, "accion": "abrir_aplicacion", "params": {{"app": "chrome"}}, "razon": "Abrir el navegador para que el usuario vea el juego"}}
-    ],
-    "riesgos": ["El LLM puede generar codigo con errores"],
-    "siguiente_paso_sugerido": "Si el juego no funciona, puedo revisar y corregir el codigo"
-}}
-
-Usuario: "crea una pagina web para mi portafolio"
-Respuesta:
-{{
-    "analisis": "El usuario quiere CREAR una pagina web de portafolio. Necesito generar el HTML/CSS/JS completo.",
-    "plan": [
-        {{"paso": 1, "accion": "generar_contenido", "params": {{"descripcion": "pagina web de portafolio profesional con secciones: hero, sobre mi, proyectos, contacto. Diseño moderno con CSS gradientes, animaciones y responsive", "tipo": "html", "ruta": "REPOS_DIR/portafolio.html"}}, "razon": "Generar la pagina web completa"}},
-        {{"paso": 2, "accion": "abrir_aplicacion", "params": {{"app": "chrome"}}, "razon": "Abrir el navegador para ver el resultado"}}
-    ],
-    "riesgos": [],
-    "siguiente_paso_sugerido": "Puedo agregar mas secciones o modificar el diseno"
-}}
-
-Usuario: "escribe un script de python para automatizar backups"
-Respuesta:
-{{
-    "analisis": "El usuario quiere CREAR un script de Python. Necesito generar el codigo completo.",
-    "plan": [
-        {{"paso": 1, "accion": "generar_contenido", "params": {{"descripcion": "script de Python para automatizar backups de carpetas, con compresion zip, logging y programacion de tareas", "tipo": "python", "ruta": "REPOS_DIR/backup_auto.py"}}, "razon": "Generar el script completo"}}
-    ],
-    "riesgos": ["Las rutas de carpetas pueden necesitar ajuste"],
-    "siguiente_paso_sugerido": "Ejecutar el script para probarlo"
-}}
-
-Usuario: "clona mi repo https://github.com/yecos/signalTrade"
-Respuesta:
-{{
-    "analisis": "El usuario quiere clonar un repositorio y analizarlo.",
-    "plan": [
-        {{"paso": 1, "accion": "clonar_repositorio", "params": {{"url": "https://github.com/yecos/signalTrade"}}, "razon": "Clonar el repo primero"}},
-        {{"paso": 2, "accion": "analizar_proyecto", "params": {{"ruta": "RUTA_DEL_REPO"}}, "razon": "Analizar estructura"}},
-        {{"paso": 3, "accion": "leer_archivo", "params": {{"ruta": "RUTA_DEL_REPO/README.md"}}, "razon": "Leer documentacion"}}
-    ],
-    "riesgos": ["El repo ya puede existir"],
-    "siguiente_paso_sugerido": "Instalar dependencias si tiene package.json"
-}}
-"""
-
-EVALUATION_PROMPT = """Eres el evaluador de un agente autonomo. Analiza el resultado de una accion.
-
-ACCION EJECUTADA: {action}
-PARAMETROS: {params}
-RESULTADO: {result}
+- ejecutar_comando(comando, confirmar_peligroso=false) - Ejecuta un comando
+- abrir_aplicacion(app) - Abre una app por nombre
+- generar_codigo(descripcion, tipo, ruta?) - Genera codigo completo y lo guarda
+- leer_archivo(ruta) - Lee un archivo
+- escribir_archivo(ruta, contenido) - Escribe un archivo
+- listar_archivos(ruta?) - Lista archivos de un directorio
+- analizar_proyecto(ruta) - Analiza estructura de proyecto
+- clonar_repositorio(url) - Clona un repo de GitHub
+- instalar_dependencias(ruta, gestor?) - Instala dependencias
+- buscar_en_archivos(ruta, patron) - Busca texto en archivos
+- procesos_activos(filtro?) - Lista procesos corriendo
+- matar_proceso(pid_o_nombre) - Termina un proceso
+- buscar_web(consulta) - Busca en internet
 
 Responde SOLO con JSON:
-{{
-    "exitoso": true/false,
-    "leccion": "que aprendimos de esto (si aplica)",
-    "problema": "que salio mal (si aplica)",
-    "solucion_alternativa": "que intentar si fallo (si aplica)",
-    "proximo_paso": "que hacer ahora"
-}}
-"""
-
-CLOUD_CONSULT_PROMPT = """Soy un agente local autonomo. Estoy trabajando en la computadora del usuario y me he atascado.
-
-CONTEXTO:
-- Tarea del usuario: {user_task}
-- Lo que he hecho hasta ahora: {actions_taken}
-- El problema: {problem}
-
-Por favor ayudame a encontrar una solucion. Se especifico y practico. Si sugieres comandos, que sean para Windows.
+{{"pensamiento": "que piensas", "accion": "nombre_herramienta", "params": {{...}}, "respuesta_final": ""}}
+Si ya tienes la respuesta final (no necesitas herramientas), ponla en "respuesta_final" y deja accion vacio.
 """
 
 
-class AgentBrain:
-    """El cerebro del agente - Piensa, planifica, evalua, aprende."""
+class ReactAgent:
+    """Motor ReAct: Piensa → Actua → Observa → Piensa de nuevo."""
 
     def __init__(self):
         self.thinking_log = []
-        self.actions_taken = []
+        self.conversation_history = []
+        self.supports_tool_calling = None  # Se detecta automaticamente
 
-    def think(self, user_message: str, context: str = "") -> dict:
+    def _log(self, message: str, category: str = "info"):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.thinking_log.append(f"[{timestamp}] [{category.upper()}] {message}")
+
+    def run(self, user_message: str) -> tuple:
         """
-        El agente PIENSA sobre el mensaje del usuario y genera un plan.
-        v9: SIEMPRE usa el LLM cuando esta disponible. Sin pre-filtros hardcoded.
+        Bucle ReAct principal. Retorna (respuesta, thinking_log).
         """
         self.thinking_log = []
-        self._log("Pensando...", "thinking")
+        self._log(f"Mensaje del usuario: {user_message}", "input")
 
-        # Recopilar contexto
-        repos = self._get_repos()
-        lessons = learning.get_lessons()
-        lessons_text = "\n".join([f"- {l}" for l in lessons[-5:]]) if lessons else "Ninguna aun"
+        # Construir mensajes con memoria conversacional
+        messages = self._build_messages(user_message)
 
-        # Obtener correcciones relevantes para este mensaje
-        corrections = learning.get_corrections_for(user_message)
+        # Detectar si el modelo soporta tool calling (primera vez)
+        if self.supports_tool_calling is None:
+            self.supports_tool_calling = self._detect_tool_calling_support()
+            self._log(f"Tool calling nativo: {'SI' if self.supports_tool_calling else 'NO (usando JSON fallback)'}", "info")
+
+        # BUCLE ReAct
+        for iteration in range(MAX_REACT_ITERATIONS):
+            self._log(f"--- Iteracion {iteration + 1}/{MAX_REACT_ITERATIONS} ---", "react")
+
+            if self.supports_tool_calling:
+                action_result = self._react_with_tools(messages, iteration)
+            else:
+                action_result = self._react_with_json(messages, iteration)
+
+            # action_result puede ser:
+            # ("respond", final_response) → Terminar, responder al usuario
+            # ("tool_call", tool_name, tool_params) → Ejecutar herramienta
+            # ("error", error_msg) → Error, intentar de nuevo
+
+            if action_result[0] == "respond":
+                final_response = action_result[1]
+                self._log("Respuesta final generada", "success")
+                # Guardar en memoria
+                self.conversation_history.append({"role": "user", "content": user_message})
+                self.conversation_history.append({"role": "assistant", "content": final_response})
+                # Mantener ventana deslizante
+                if len(self.conversation_history) > MAX_CONVERSATION_MEMORY * 2:
+                    self.conversation_history = self.conversation_history[-(MAX_CONVERSATION_MEMORY * 2):]
+                return final_response, self.thinking_log
+
+            elif action_result[0] == "tool_call":
+                tool_name = action_result[1]
+                tool_params = action_result[2]
+
+                # Ejecutar la herramienta
+                self._log(f"Ejecutando: {tool_name}({tool_params})", "execution")
+                tool_result = self._execute_tool(tool_name, tool_params)
+                self._log(f"Resultado: {tool_result[:150]}...", "observation")
+
+                # Alimentar el resultado de vuelta al agente
+                if self.supports_tool_calling:
+                    # Formato tool calling nativo
+                    messages.append({"role": "tool", "content": tool_result})
+                else:
+                    # Formato JSON
+                    messages.append({"role": "assistant",
+                                     "content": json.dumps({"pensamiento": f"Ejecute {tool_name}", "accion": tool_name, "params": tool_params})})
+                    messages.append({"role": "user",
+                                     "content": f"Resultado de {tool_name}: {tool_result}\n\nQue hago ahora? Responde con JSON."})
+
+            elif action_result[0] == "error":
+                self._log(f"Error: {action_result[1]}", "error")
+                if iteration >= MAX_REACT_ITERATIONS - 1:
+                    return ("Tuve problemas para procesar tu solicitud. Puedes reformularla?", self.thinking_log)
+
+        self._log("Alcanzado limite de iteraciones", "warning")
+        return ("Alcance el limite de iteraciones. Puede que necesites ser mas especifico.", self.thinking_log)
+
+    def _react_with_tools(self, messages: list, iteration: int) -> tuple:
+        """ReAct usando function calling nativo."""
+        try:
+            response = _llm_generate(messages, tools=TOOL_SCHEMAS)
+
+            if isinstance(response, str):
+                # El modelo no soporto tools, devolver como respuesta
+                return ("respond", response)
+
+            # Ver si hay tool calls
+            message = response.get("message", response)
+            tool_calls = message.get("tool_calls", [])
+
+            if tool_calls:
+                # Hay tool calls - ejecutar el primero
+                tc = tool_calls[0]
+                tool_name = tc.get("function", {}).get("name", "")
+                tool_params = tc.get("function", {}).get("arguments", {})
+                self._log(f"Tool call: {tool_name}({tool_params})", "thinking")
+
+                # Agregar el mensaje del asistente al historial
+                messages.append({"role": "assistant", "content": message.get("content", ""),
+                                "tool_calls": tool_calls})
+                return ("tool_call", tool_name, tool_params)
+
+            # No hay tool calls - es la respuesta final
+            content = message.get("content", "")
+            if content:
+                return ("respond", content)
+
+            return ("error", "Respuesta vacia del modelo")
+
+        except Exception as e:
+            self._log(f"Error en tool calling: {e}", "error")
+            # Fallback a JSON
+            self.supports_tool_calling = False
+            return ("error", str(e))
+
+    def _react_with_json(self, messages: list, iteration: int) -> tuple:
+        """ReAct usando JSON parsing (fallback para modelos sin tool calling)."""
+        # Agregar el prompt de herramientas si no esta
+        if not any("HERRAMIENTAS DISPONIBLES" in str(m.get("content", "")) for m in messages):
+            # Insertar instrucciones de JSON antes del ultimo mensaje
+            system_msg_idx = next((i for i, m in enumerate(messages) if m["role"] == "system"), -1)
+            if system_msg_idx >= 0:
+                messages[system_msg_idx]["content"] += JSON_TOOLS_PROMPT
+
+        try:
+            response = _llm_generate(messages)
+            if not response:
+                return ("error", "El LLM no respondio")
+
+            # Intentar parsear como JSON
+            parsed = self._parse_json(response)
+            if not parsed:
+                # No es JSON, probablemente es una respuesta directa
+                return ("respond", response)
+
+            # Tiene respuesta final?
+            if parsed.get("respuesta_final"):
+                return ("respond", parsed["respuesta_final"])
+
+            # Tiene accion?
+            accion = parsed.get("accion", "")
+            params = parsed.get("params", {})
+            pensamiento = parsed.get("pensamiento", "")
+
+            if pensamiento:
+                self._log(f"Pensamiento: {pensamiento}", "thinking")
+
+            if accion and accion in TOOL_FUNCTIONS:
+                return ("tool_call", accion, params)
+
+            # No se que hacer con esto, responder como texto
+            return ("respond", response)
+
+        except Exception as e:
+            return ("error", str(e))
+
+    def _build_messages(self, new_message: str) -> list:
+        """Construye la lista de mensajes con memoria conversacional."""
+        # System prompt con contexto
+        models = self._get_available_models()
+        corrections = learning.get_corrections_for(new_message)
         corrections_text = ""
         if corrections:
             corrections_text = "\n".join([
@@ -734,243 +1130,48 @@ class AgentBrain:
         else:
             corrections_text = "Ninguna aun"
 
-        prompt = THINKING_PROMPT.format(
+        system_content = SYSTEM_PROMPT.format(
             so=platform.system(),
             repos_dir=REPOS_DIR,
-            repos=", ".join(repos) if repos else "Ninguno",
-            lessons=lessons_text,
-            tools=TOOL_DESCRIPTIONS,
+            models=", ".join(models) if models else AGENT_MODEL,
             corrections=corrections_text
         )
 
-        messages = [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": user_message}
-        ]
+        # Inyectar conocimiento relevante
+        relevant_knowledge = learning.get_knowledge(new_message)
+        if relevant_knowledge:
+            knowledge_text = "\n".join([f"- {k['content']}" for k in relevant_knowledge[:5]])
+            system_content += f"\n\nConocimiento relevante:\n{knowledge_text}"
 
-        if context:
-            messages.append({"role": "user", "content": f"Contexto adicional: {context}"})
+        messages = [{"role": "system", "content": system_content}]
 
-        # Pensar con el LLM
-        self._log("Enviando al modelo para planificar...", "thinking")
-        plan = self._ask_llm(messages)
+        # Agregar historial de conversacion (ventana deslizante)
+        recent_history = self.conversation_history[-MAX_CONVERSATION_MEMORY:]
+        for msg in recent_history:
+            messages.append(msg)
 
-        if not plan:
-            self._log("El LLM no respondio, usando fallback", "warning")
-            return self._fallback_plan(user_message)
+        # Mensaje actual
+        messages.append({"role": "user", "content": new_message})
 
-        # Parsear la respuesta como JSON
-        parsed = self._parse_json(plan)
-        if parsed and "plan" in parsed:
-            self._log(f"Analisis: {parsed.get('analisis', 'N/A')}", "thinking")
-            self._log(f"Plan: {len(parsed['plan'])} pasos", "thinking")
-            for step in parsed["plan"]:
-                self._log(f"  Paso {step.get('paso', '?')}: {step.get('accion', '?')} - {step.get('razon', '')}", "plan")
-            return parsed
+        return messages
 
-        # Si no se pudo parsear, usar fallback
-        self._log("No se pudo parsear el plan, usando fallback", "warning")
-        return self._fallback_plan(user_message)
-
-    def execute_plan(self, plan: dict) -> list:
-        """Ejecuta el plan paso a paso, evaluando cada resultado."""
-        results = []
-        steps = plan.get("plan", [])
-
-        if not steps:
-            analisis = plan.get("analisis", "")
-            self._log(f"Plan vacio — es conversacion: {analisis}", "thinking")
-            result = self._conversar(st.session_state.messages[-1]["content"] if st.session_state.messages else "hola")
-            results.append({
-                "action": "conversar", "params": {}, "reason": analisis,
-                "result": result, "evaluation": {"exitoso": True}
-            })
-            return results
-
-        for step in steps:
-            action = step.get("accion", "")
-            params = step.get("params", {})
-            reason = step.get("razon", "")
-
-            self._log(f"Ejecutando: {action}({params}) — {reason}", "execution")
-            params = self._resolve_params(params)
-            result = self._execute_tool(action, params)
-            evaluation = self.evaluate(action, params, result)
-
-            results.append({
-                "action": action, "params": params, "reason": reason,
-                "result": result, "evaluation": evaluation
-            })
-
-            self.actions_taken.append(f"{action}({params}) -> {result[:100]}")
-
-            # Si fallo, intentar alternativa
-            if not evaluation.get("exitoso", True) and evaluation.get("solucion_alternativa"):
-                self._log(f"Fallo detectado, intentando alternativa...", "warning")
-                alt_result = self._try_alternative(evaluation["solucion_alternativa"], action, params)
-                if alt_result:
-                    results[-1]["result"] = alt_result
-                    results[-1]["evaluation"] = {"exitoso": True, "leccion": "Alternativa funciono"}
-
-            # Aprender de la evaluacion
-            if evaluation.get("leccion"):
-                learning.save_knowledge(f"leccion:{action}", evaluation["leccion"], source="auto_evaluation")
-
-        return results
-
-    def evaluate(self, action: str, params: dict, result: str) -> dict:
-        """Evalua si una accion fue exitosa."""
-        if "ERROR" in result or "Error" in result:
-            prompt = EVALUATION_PROMPT.format(
-                action=action, params=json.dumps(params), result=result[:500]
-            )
-            eval_result = self._ask_llm([{"role": "user", "content": prompt}])
-            parsed = self._parse_json(eval_result)
-            if parsed:
-                self._log(f"Evaluacion: fallo - {parsed.get('problema', 'desconocido')}", "evaluation")
-                return parsed
-            return {"exitoso": False, "problema": result[:200], "solucion_alternativa": ""}
-
-        self._log(f"Evaluacion: exitoso", "evaluation")
-        return {"exitoso": True, "leccion": "", "proximo_paso": "continuar"}
-
-    def consult_cloud(self, user_task: str, problem: str) -> str:
-        """Consulta IA cloud cuando se atasca."""
-        self._log("Consultando IA cloud...", "cloud")
-
-        prompt = CLOUD_CONSULT_PROMPT.format(
-            user_task=user_task,
-            actions_taken="\n".join(self.actions_taken[-5:]),
-            problem=problem
-        )
-
-        bridge_path = os.path.join(os.path.dirname(__file__), "ia_bridge.py")
-        if os.path.exists(bridge_path):
+    def _execute_tool(self, tool_name: str, params: dict) -> str:
+        """Ejecuta una herramienta por nombre."""
+        if tool_name in TOOL_FUNCTIONS:
             try:
-                import importlib.util
-                spec = importlib.util.spec_from_file_location("ia_bridge", bridge_path)
-                bridge = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(bridge)
-                if hasattr(bridge, 'consultar_ia'):
-                    return bridge.consultar_ia(prompt)
+                # Resolver variables especiales
+                params = self._resolve_params(params)
+                return TOOL_FUNCTIONS[tool_name](**params)
             except Exception as e:
-                self._log(f"Error con ia_bridge: {e}", "warning")
-
-        try:
-            import urllib.request
-            api_key = os.environ.get("GROQ_API_KEY", "")
-            if not api_key:
-                config_path = os.path.join(os.path.dirname(__file__), "..", "config", "api_keys.json")
-                if os.path.exists(config_path):
-                    with open(config_path, "r") as f:
-                        config = json.load(f)
-                        api_key = config.get("groq", "")
-
-            if api_key:
-                data = json.dumps({
-                    "messages": [
-                        {"role": "system", "content": "Eres un experto en desarrollo de software. Responde de forma concisa y practica."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "model": "llama-3.3-70b-versatile",
-                    "max_tokens": 500
-                }).encode("utf-8")
-
-                req = urllib.request.Request(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    data=data,
-                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-                )
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    response = json.loads(resp.read().decode("utf-8"))
-                    return response["choices"][0]["message"]["content"]
-        except Exception as e:
-            self._log(f"Error con API cloud: {e}", "warning")
-
-        return "No se pudo consultar IA cloud. Verifica la conexion o configura una API key."
-
-    # --- Metodos internos ---
-
-    def _log(self, message: str, category: str = "info"):
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        self.thinking_log.append(f"[{timestamp}] [{category.upper()}] {message}")
-
-    def _ask_llm(self, messages: list) -> str:
-        """Consulta al LLM local (Ollama). 4 metodos de conexion."""
-        try:
-            import ollama
-
-            try:
-                client = ollama.Client(host='http://localhost:11434')
-                response = client.chat(model=AGENT_MODEL, messages=messages)
-                return response.get("message", {}).get("content", "")
-            except Exception as e:
-                self._log(f"Client(localhost) fallo: {e}", "warning")
-
-            try:
-                client = ollama.Client(host='http://127.0.0.1:11434')
-                response = client.chat(model=AGENT_MODEL, messages=messages)
-                return response.get("message", {}).get("content", "")
-            except Exception as e:
-                self._log(f"Client(127.0.0.1) fallo: {e}", "warning")
-
-            try:
-                response = ollama.chat(model=AGENT_MODEL, messages=messages)
-                return response.get("message", {}).get("content", "")
-            except Exception:
-                pass
-
-            try:
-                import urllib.request
-                data = json.dumps({
-                    "model": AGENT_MODEL, "messages": messages, "stream": False
-                }).encode("utf-8")
-                req = urllib.request.Request(
-                    "http://localhost:11434/api/chat",
-                    data=data, headers={"Content-Type": "application/json"}
-                )
-                with urllib.request.urlopen(req, timeout=120) as resp:
-                    result = json.loads(resp.read().decode("utf-8"))
-                    return result.get("message", {}).get("content", "")
-            except Exception as e2:
-                self._log(f"HTTP directo fallo: {e2}", "error")
-
-            self._log("Todos los metodos de conexion a Ollama fallaron", "error")
-            return ""
-
-        except ImportError:
-            self._log("Libreria ollama no instalada", "error")
-            return ""
-        except Exception as e:
-            self._log(f"Error LLM: {e}", "error")
-            return ""
-
-    def _parse_json(self, text: str) -> dict:
-        try:
-            return json.loads(text)
-        except:
-            pass
-
-        json_patterns = [
-            r'```json\s*(.*?)\s*```',
-            r'```\s*(.*?)\s*```',
-            r'(\{[\s\S]*\})',
-        ]
-        for pattern in json_patterns:
-            match = re.search(pattern, text, re.DOTALL)
-            if match:
-                try:
-                    return json.loads(match.group(1))
-                except:
-                    continue
-        return None
+                return f"ERROR ejecutando {tool_name}: {e}"
+        return f"Herramienta no encontrada: {tool_name}"
 
     def _resolve_params(self, params: dict) -> dict:
         resolved = {}
         for key, value in params.items():
             if isinstance(value, str):
-                value = value.replace("RUTA_DEL_REPO", self._find_repo_path())
                 value = value.replace("REPOS_DIR", REPOS_DIR)
+                value = value.replace("RUTA_DEL_REPO", self._find_repo_path())
             resolved[key] = value
         return resolved
 
@@ -985,345 +1186,48 @@ class AgentBrain:
             pass
         return REPOS_DIR
 
-    def _execute_tool(self, action: str, params: dict) -> str:
-        if action == "conversar":
-            return self._conversar(params.get("mensaje", ""))
-
-        if action == "generar_contenido":
-            return self._generar_contenido(
-                params.get("descripcion", ""),
-                params.get("tipo", "html"),
-                params.get("ruta", "")
-            )
-
-        if action in TOOL_FUNCTIONS:
-            try:
-                return TOOL_FUNCTIONS[action](**params)
-            except Exception as e:
-                return f"ERROR ejecutando {action}: {e}"
-        elif action == "ejecutar_comando" or action == "comando":
-            return ejecutar_comando(params.get("comando", ""))
-        else:
-            return f"Herramienta no encontrada: {action}"
-
-    def _generar_contenido(self, descripcion: str, tipo: str, ruta: str) -> str:
-        """
-        El superpoder del agente: GENERAR contenido usando el LLM.
-        Esto es lo que diferencia v10 de versiones anteriores.
-        El LLM genera codigo/texto completo, no solo decide que hacer.
-        """
-        self._log(f"Generando contenido: {descripcion} ({tipo})", "creative")
-
-        # Resolver ruta
-        if not ruta:
-            ext_map = {
-                "html": ".html", "python": ".py", "javascript": ".js",
-                "css": ".css", "json": ".json", "markdown": ".md", "texto": ".txt"
-            }
-            ext = ext_map.get(tipo, ".txt")
-            safe_name = re.sub(r'[^a-z0-9]', '_', descripcion[:30].lower()).strip('_')
-            ruta = os.path.join(REPOS_DIR, f"{safe_name}{ext}")
-        else:
-            ruta = ruta.replace("REPOS_DIR", REPOS_DIR)
-
-        # Crear el prompt especializado para generar contenido
-        tipo_prompts = {
-            "html": (
-                "Eres un desarrollador web EXPERTO. Genera una pagina web HTML COMPLETA y FUNCIONAL.\n"
-                "REGLAS:\n"
-                "- TODO debe estar en un SOLO archivo HTML (HTML + CSS inline en <style> + JavaScript en <script>)\n"
-                "- El CSS debe ser moderno, con gradientes, sombras, animaciones\n"
-                "- El JavaScript debe ser funcional, no pseudocodigo\n"
-                "- Si es un juego: usa HTML5 Canvas, con game loop, controles, colisiones, puntuacion\n"
-                "- Si es una pagina: responsive, con secciones completas, no vacias\n"
-                "- NO uses placeholder, TODO debe funcionar al abrir en el navegador\n"
-                "- Responde SOLO con el codigo HTML, sin explicaciones, sin markdown"
-            ),
-            "python": (
-                "Eres un desarrollador Python EXPERTO. Genera un script Python COMPLETO y FUNCIONAL.\n"
-                "REGLAS:\n"
-                "- El codigo debe ser ejecutable directamente\n"
-                "- Incluye imports, funciones, manejo de errores\n"
-                "- Si necesita dependencias, incluyelas en un comentario al inicio\n"
-                "- NO uses pseudocodigo ni placeholders\n"
-                "- Responde SOLO con el codigo Python, sin explicaciones"
-            ),
-            "javascript": (
-                "Eres un desarrollador JavaScript EXPERTO. Genera codigo JavaScript COMPLETO.\n"
-                "REGLAS:\n"
-                "- El codigo debe ser funcional y ejecutable\n"
-                "- Incluye manejo de errores\n"
-                "- Responde SOLO con el codigo, sin explicaciones"
-            ),
-            "css": (
-                "Eres un diseador CSS EXPERTO. Genera estilos CSS modernos y completos.\n"
-                "- Responde SOLO con el codigo CSS"
-            ),
-            "json": (
-                "Genera un JSON valido y bien estructurado.\n"
-                "- Responde SOLO con el JSON, sin explicaciones"
-            ),
-            "markdown": (
-                "Genera un documento Markdown bien formateado y completo.\n"
-                "- Responde SOLO con el Markdown"
-            ),
-        }
-
-        system_prompt = tipo_prompts.get(tipo, (
-            "Genera contenido completo y funcional. "
-            "Responde SOLO con el contenido, sin explicaciones ni markdown."
-        ))
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Crea: {descripcion}"}
-        ]
-
-        self._log(f"Llamando al LLM para generar {tipo}...", "creative")
-        contenido = self._ask_llm(messages)
-
-        if not contenido:
-            return "ERROR: No se pudo generar contenido (Ollama no responde)"
-
-        # Limpiar el contenido: quitar markdown code blocks si el LLM los puso
-        contenido = contenido.strip()
-        if contenido.startswith("```"):
-            # Quitar ```html, ```python, ```javascript, etc.
-            contenido = re.sub(r'^```[a-z]*\n?', '', contenido)
-            contenido = re.sub(r'\n?```$', '', contenido)
-            contenido = contenido.strip()
-
-        # Escribir el archivo
-        resultado = escribir_archivo(ruta, contenido)
-
-        if "ERROR" in resultado:
-            return resultado
-
-        # Si es HTML, abrir en el navegador automaticamente
-        if tipo == "html" and platform.system() == "Windows":
-            abrir_result = ejecutar_comando(f'start "" "{ruta}"')
-            if not abrir_result or abrir_result == "(sin salida)":
-                return f"Contenido generado y guardado en: {ruta}\nAbierto en el navegador automaticamente!"
-            return f"Contenido generado y guardado en: {ruta}\nAbrelo en tu navegador para verlo."
-
-        size_kb = len(contenido) / 1024
-        self._log(f"Contenido generado: {size_kb:.1f}KB", "creative")
-
-        return f"Contenido generado ({size_kb:.1f}KB) y guardado en: {ruta}"
-
-    def _conversar(self, mensaje: str) -> str:
-        """Responde de forma conversacional. Usa LLM para respuestas ricas."""
-        msg = mensaje.lower().strip()
-
-        # Respuestas rapidas para patrones obvios (sin LLM)
-        saludos = ["hola", "hi", "hello", "hey", "buenos dias", "buenas", "que tal", "que onda", "saludos"]
-        if any(msg.startswith(s) for s in saludos):
-            return ("Hola! Soy tu agente autonomo local. Puedo hacer cosas como:\n"
-                    "- **CREAR cosas**: juegos HTML, paginas web, scripts (genero el codigo completo!)\n"
-                    "- Abrir CUALQUIER aplicacion (busca automaticamente)\n"
-                    "- Clonar y analizar repos de GitHub\n"
-                    "- Ejecutar comandos en la terminal\n"
-                    "- Leer y escribir archivos\n"
-                    "- Consultar IA cloud si necesito ayuda\n\n"
-                    "Dime que necesitas!")
-
-        if any(w in msg for w in ["como estas", "como te va", "como andas", "todo bien"]):
-            return "Listo para trabajar! Tengo acceso a tu terminal. Dime que necesitas."
-
-        if any(w in msg for w in ["quien eres", "que eres", "que haces"]):
-            return ("Soy un agente autonomo que PIENSA antes de actuar y ahora tambien CREA.\n"
-                    "- Analizo tu solicitud y creo un plan\n"
-                    "- **Genero codigo completo** (juegos, paginas web, scripts)\n"
-                    "- Busco automaticamente apps y archivos\n"
-                    "- Si algo falla, busco alternativas\n"
-                    "- Si me equivoco, aprendo y no repito el error\n"
-                    "Todo corre localmente con Ollama (qwen2.5:14b).")
-
-        if any(w in msg for w in ["gracias", "thanks", "genial", "perfecto"]):
-            return "De nada! Aqui estoy para lo que necesites."
-
-        if any(w in msg for w in ["ayuda", "help", "que puedes hacer"]):
-            return ("Puedo hacer muchas cosas:\n\n"
-                    "**Crear cosas:** 'haz un juego en html', 'crea una pagina web', 'escribe un script'\n"
-                    "**Abrir apps:** 'abre whatsapp', 'autocad', 'chrome'\n"
-                    "**Repos:** 'clona https://github.com/usuario/repo'\n"
-                    "**Archivos:** 'leer README.md', 'listar archivos'\n"
-                    "**Terminal:** 'ejecuta git status', 'npm run dev'\n\n"
-                    "**Lo especial:** Genero codigo completo, busco apps automaticamente, aprendo de mis errores, y consulto IA cloud si me atasco.")
-
-        # Para todo lo demas, usar el LLM
-        respuesta_llm = self._ask_llm([
-            {"role": "system", "content": "Eres un asistente amigable que habla espanol. Responde de forma concisa y natural."},
-            {"role": "user", "content": mensaje}
-        ])
-        if respuesta_llm:
-            return respuesta_llm
-
-        return ("No puedo pensar bien ahora (Ollama no esta corriendo). "
-                "Pero puedo ejecutar acciones! Prueba: 'abre chrome', 'clona https://github.com/...'")
-
-    def _try_alternative(self, alternative: str, original_action: str, params: dict) -> str:
-        self._log(f"Intentando alternativa: {alternative}", "execution")
-
-        if alternative and len(alternative) > 3:
-            alt_lower = alternative.lower()
-
-            if any(w in alt_lower for w in ["ejecuta", "corre", "run", "usa", "usa el comando"]):
-                cmd = re.sub(r'(?:ejecuta|corre|run|usa|usa el comando)\s+', '', alternative, flags=re.IGNORECASE)
-                return ejecutar_comando(cmd.strip())
-
-            for tool_name in TOOL_FUNCTIONS:
-                if tool_name in alt_lower:
-                    return self._execute_tool(tool_name, params)
-
-            if "lista" in alt_lower or "verifica" in alt_lower or "revisa" in alt_lower:
-                if "ruta" in params:
-                    return listar_archivos(params.get("ruta", REPOS_DIR))
-
-        return ""
-
-    def _fallback_plan(self, user_message: str) -> dict:
-        """Plan de emergencia cuando el LLM no responde. Usa heuristicas simples."""
-        msg = user_message.lower().strip()
-
-        # Saludos obvios
-        saludos = ["hola", "hi", "hello", "hey", "buenos dias", "buenas", "que tal", "que onda", "saludos"]
-        if any(msg.startswith(s) for s in saludos) and len(msg.split()) <= 4:
-            return {
-                "analisis": "El usuario esta saludando",
-                "plan": [{"paso": 1, "accion": "conversar", "params": {"mensaje": user_message}, "razon": "Es un saludo"}],
-                "riesgos": [], "siguiente_paso_sugerido": ""
-            }
-
-        # ========================================
-        # DETECCION DE SOLICITUDES CREATIVAS (v10)
-        # ========================================
-        creative_keywords = [
-            "juego", "game", "crear", "crea", "haz", "hacer", "genera", "generar",
-            "pagina web", "webpage", "website", "sitio web", "portafolio", "portfolio",
-            "script", "programa", "aplicacion", "app", "calculator", "calculadora",
-            "formulario", "form", "dashboard", "landing", "blog", "tienda",
-            "escribir codigo", "escribe un", "code ", "programar", "desarrollar",
-            "dise\u00f1ar", "dise\u00f1o", "animacion", "canvas", "jugar"
-        ]
-        is_creative = any(kw in msg for kw in creative_keywords)
-
-        # Detectar tipo de archivo por extension o contexto
-        tipo_detectado = "texto"
-        ext_detectada = ".txt"
-        if "html" in msg or "web" in msg or "pagina" in msg or "juego" in msg or "game" in msg:
-            tipo_detectado = "html"
-            ext_detectada = ".html"
-        elif "python" in msg or ".py" in msg:
-            tipo_detectado = "python"
-            ext_detectada = ".py"
-        elif "javascript" in msg or ".js" in msg or "js " in msg:
-            tipo_detectado = "javascript"
-            ext_detectada = ".js"
-        elif "css" in msg or "estilo" in msg:
-            tipo_detectado = "css"
-            ext_detectada = ".css"
-        elif "json" in msg:
-            tipo_detectado = "json"
-            ext_detectada = ".json"
-
-        if is_creative:
-            safe_name = re.sub(r'[^a-z0-9]', '_', msg[:30].lower()).strip('_')
-            ruta = os.path.join(REPOS_DIR, f"{safe_name}{ext_detectada}")
-            plan_steps = [
-                {"paso": 1, "accion": "generar_contenido",
-                 "params": {"descripcion": user_message, "tipo": tipo_detectado, "ruta": ruta},
-                 "razon": "El usuario quiere crear algo - generar contenido completo"}
-            ]
-            # Si es HTML, abrir navegador despues
-            if tipo_detectado == "html":
-                plan_steps.append(
-                    {"paso": 2, "accion": "abrir_aplicacion",
-                     "params": {"app": "chrome"},
-                     "razon": "Abrir navegador para ver el resultado"}
-                )
-            return {
-                "analisis": f"Solicitud creativa detectada: {user_message}",
-                "plan": plan_steps,
-                "riesgos": ["El contenido generado puede necesitar ajustes"],
-                "siguiente_paso_sugerido": "Revisar y ajustar el contenido si es necesario"
-            }
-
-        # URLs de GitHub
-        github_urls = re.findall(r'https?://github\.com/[\w\-]+/[\w\-\.]+', user_message, re.IGNORECASE)
-        if github_urls:
-            url = github_urls[0].rstrip("/")
-            repo_name = url.split("/")[-1].replace(".git", "")
-            repo_path = os.path.join(REPOS_DIR, repo_name)
-            return {
-                "analisis": f"Clonar y analizar repo: {url}",
-                "plan": [
-                    {"paso": 1, "accion": "clonar_repositorio", "params": {"url": url}, "razon": "Clonar el repo"},
-                    {"paso": 2, "accion": "analizar_proyecto", "params": {"ruta": repo_path}, "razon": "Analizar estructura"},
-                ],
-                "riesgos": [], "siguiente_paso_sugerido": "Instalar dependencias si necesita"
-            }
-
-        # Acciones con verbos
-        if any(w in msg for w in ["abre", "abrir", "open", "inicia", "lanza"]):
-            app_match = re.search(r'(?:abre|abrir|open|inicia|lanza)\s+(.+)', msg, re.IGNORECASE)
-            app = app_match.group(1).strip() if app_match else ""
-            if app:
-                return {
-                    "analisis": f"Abrir aplicacion: {app}",
-                    "plan": [{"paso": 1, "accion": "abrir_aplicacion", "params": {"app": app}, "razon": "Abrir la app"}],
-                    "riesgos": ["Puede no estar instalada"], "siguiente_paso_sugerido": ""
-                }
-
-        if any(w in msg for w in ["instal", "dependencias"]):
-            for d in os.listdir(REPOS_DIR):
-                if d.lower() in msg:
-                    return {
-                        "analisis": f"Instalar dependencias de {d}",
-                        "plan": [{"paso": 1, "accion": "instalar_dependencias", "params": {"ruta": os.path.join(REPOS_DIR, d)}, "razon": "Instalar deps"}],
-                        "riesgos": [], "siguiente_paso_sugerido": ""
-                    }
-
-        if any(w in msg for w in ["analiz", "analiza"]):
-            for d in os.listdir(REPOS_DIR):
-                if d.lower() in msg:
-                    return {
-                        "analisis": f"Analizar proyecto {d}",
-                        "plan": [{"paso": 1, "accion": "analizar_proyecto", "params": {"ruta": os.path.join(REPOS_DIR, d)}, "razon": "Analizar"}],
-                        "riesgos": [], "siguiente_paso_sugerido": ""
-                    }
-
-        if any(w in msg for w in ["ejecuta", "corre", "run", "comando"]):
-            cmd_match = re.search(r'(?:ejecuta|corre|run|comando)\s+(.+)', msg, re.IGNORECASE)
-            cmd = cmd_match.group(1).strip() if cmd_match else ""
-            if cmd:
-                return {
-                    "analisis": f"Ejecutar: {cmd}",
-                    "plan": [{"paso": 1, "accion": "ejecutar_comando", "params": {"comando": cmd}, "razon": "Ejecutar comando"}],
-                    "riesgos": ["Puede fallar"], "siguiente_paso_sugerido": ""
-                }
-
-        # Si contiene algo que podria ser un nombre de app, intentar abrirlo
-        words = msg.split()
-        has_version = any(re.match(r'\d{4}', w) for w in words)
-        if has_version or (len(words) <= 3 and len(words[0]) > 2):
-            return {
-                "analisis": f"Posible solicitud de abrir app: {user_message}",
-                "plan": [{"paso": 1, "accion": "abrir_aplicacion", "params": {"app": user_message.strip()}, "razon": "Parece una app, intentar abrirla"}],
-                "riesgos": ["Puede no ser una app"], "siguiente_paso_sugerido": ""
-            }
-
-        # Default: conversar
-        return {
-            "analisis": "No se detecto una accion clara",
-            "plan": [{"paso": 1, "accion": "conversar", "params": {"mensaje": user_message}, "razon": "Responder conversacionalmente"}],
-            "riesgos": [], "siguiente_paso_sugerido": ""
-        }
-
-    def _get_repos(self) -> list:
+    def _parse_json(self, text: str) -> dict:
         try:
-            return [d for d in os.listdir(REPOS_DIR)
-                    if os.path.isdir(os.path.join(REPOS_DIR, d)) and not d.startswith(".")]
+            return json.loads(text)
+        except:
+            pass
+        patterns = [
+            r'```json\s*(.*?)\s*```',
+            r'```\s*(.*?)\s*```',
+            r'(\{[\s\S]*\})',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group(1))
+                except:
+                    continue
+        return None
+
+    def _detect_tool_calling_support(self) -> bool:
+        """Detecta si el modelo soporta function calling nativo."""
+        try:
+            import ollama
+            client = ollama.Client(host='http://localhost:11434')
+            # Test simple con tools
+            response = client.chat(
+                model=AGENT_MODEL,
+                messages=[{"role": "user", "content": "test"}],
+                tools=[TOOL_SCHEMAS[0]]  # Solo 1 tool para test
+            )
+            # Si no crashea, soporta tool calling
+            return True
+        except Exception:
+            return False
+
+    def _get_available_models(self) -> list:
+        try:
+            import urllib.request
+            req = urllib.request.Request("http://localhost:11434/api/tags")
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return [m["name"] for m in data.get("models", [])]
         except:
             return []
 
@@ -1332,39 +1236,11 @@ class AgentBrain:
 # MOTOR PRINCIPAL
 # ============================================================
 
-brain = AgentBrain()
+agent = ReactAgent()
 
 def procesar_mensaje(user_message: str) -> tuple:
-    brain.actions_taken = []
-    brain._log(f"Mensaje del usuario: {user_message}", "input")
-    plan = brain.think(user_message)
-    results = brain.execute_plan(plan)
-
-    respuesta = ""
-    for i, r in enumerate(results, 1):
-        action = r["action"]
-        reason = r.get("reason", "")
-        result = r["result"]
-        evaluation = r.get("evaluation", {})
-
-        if evaluation.get("exitoso", True):
-            if action == "conversar":
-                respuesta += f"{result}\n\n"
-            else:
-                respuesta += f"**Paso {i}: {action}** — {reason}\n```\n{result}\n```\n\n"
-        else:
-            respuesta += f"**Paso {i}: {action}** — {reason}\n```\n{result}\n```\n"
-            if evaluation.get("solucion_alternativa"):
-                respuesta += f"Intentando: {evaluation['solucion_alternativa']}\n\n"
-
-    is_conversation = any(r.get("action") == "conversar" for r in results)
-    if plan.get("siguiente_paso_sugerido") and not is_conversation:
-        respuesta += f"**Siguiente paso sugerido:** {plan['siguiente_paso_sugerido']}"
-
-    if not is_conversation and (not results or all(not r.get("evaluation", {}).get("exitoso", True) for r in results)):
-        respuesta += "\n\nTuve problemas. Quieres que consulte una IA cloud?"
-
-    return respuesta, brain.thinking_log
+    respuesta, thinking_log = agent.run(user_message)
+    return respuesta, thinking_log
 
 
 # ============================================================
@@ -1373,7 +1249,7 @@ def procesar_mensaje(user_message: str) -> tuple:
 
 def main():
     st.set_page_config(
-        page_title="Agente Autonomo v10",
+        page_title="Agente Autonomo v11",
         page_icon="🧠",
         layout="wide"
     )
@@ -1402,12 +1278,14 @@ def main():
     .thinking-box .thinking { color: #88aaff; }
     .thinking-box .plan { color: #ffaa44; }
     .thinking-box .execution { color: #00ff88; }
+    .thinking-box .observation { color: #44ddaa; }
     .thinking-box .evaluation { color: #aa88ff; }
     .thinking-box .warning { color: #ffaa00; }
     .thinking-box .error { color: #ff4444; }
     .thinking-box .cloud { color: #44aaff; }
     .thinking-box .input { color: #88ff88; }
-    .thinking-box .creative { color: #ff88ff; font-weight: bold; }
+    .thinking-box .react { color: #ff88ff; font-weight: bold; }
+    .thinking-box .success { color: #44ff88; font-weight: bold; }
 
     [data-testid="stChatMessage"] { border-radius: 12px; padding: 12px 16px; margin: 4px 0; }
 
@@ -1425,49 +1303,33 @@ def main():
     if "thinking_history" not in st.session_state:
         st.session_state.thinking_history = []
 
-    st.markdown('<div class="main-title">Agente Autonomo v10</div>', unsafe_allow_html=True)
-    st.markdown('<div class="main-subtitle">Piensa → Planifica → Genera → Ejecuta → Evalua → Aprende</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-title">Agente Autonomo v11</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-subtitle">ReAct: Piensa → Actua → Observa → Piensa de nuevo</div>', unsafe_allow_html=True)
 
     # === SIDEBAR ===
     with st.sidebar:
         st.header("Config")
-        st.write(f"**Modelo:** {AGENT_MODEL}")
-        st.write(f"**Repos:** {REPOS_DIR}")
+        st.write(f"**Modelo agente:** {AGENT_MODEL}")
+        st.write(f"**Modelo fallback:** {FALLBACK_MODEL}")
+        st.write(f"**Directorio:** {REPOS_DIR}")
+        st.write(f"**Tool calling:** {'Nativo' if agent.supports_tool_calling else 'JSON fallback' if agent.supports_tool_calling is False else 'Sin detectar'}")
 
         st.header("Ollama Status")
         if st.button("Test conexion Ollama", use_container_width=True):
             with st.spinner("Probando..."):
-                try:
-                    import ollama
-                    try:
-                        r = ollama.list()
-                        st.success("ollama.chat() - CONECTA")
-                    except:
-                        st.error("ollama.chat() - FALLA")
-                    try:
-                        client = ollama.Client(host='http://localhost:11434')
-                        r = client.list()
-                        st.success("Client(localhost) - CONECTA")
-                    except Exception as e:
-                        st.error(f"Client(localhost) - FALLA")
-                    try:
-                        client = ollama.Client(host='http://127.0.0.1:11434')
-                        r = client.list()
-                        st.success("Client(127.0.0.1) - CONECTA")
-                    except:
-                        st.error("Client(127.0.0.1) - FALLA")
-                except ImportError:
-                    st.error("Libreria ollama no instalada")
                 try:
                     import urllib.request
                     req = urllib.request.Request("http://localhost:11434/api/tags")
                     with urllib.request.urlopen(req, timeout=5) as resp:
                         data = json.loads(resp.read().decode("utf-8"))
                         models = [m["name"] for m in data.get("models", [])]
-                        st.success(f"HTTP directo - Modelos: {models}")
+                        st.success(f"Ollama OK - {len(models)} modelos")
+                        for m in models:
+                            st.write(f"  - {m}")
                 except Exception as e:
-                    st.error(f"HTTP directo - FALLA")
+                    st.error(f"Ollama NO conecta: {e}")
 
+        # Status rapido
         try:
             import urllib.request
             req = urllib.request.Request("http://localhost:11434/api/tags")
@@ -1475,6 +1337,9 @@ def main():
                 data = json.loads(resp.read().decode("utf-8"))
                 models = [m["name"] for m in data.get("models", [])]
                 st.success(f"Ollama OK - {len(models)} modelos")
+                # Verificar si el modelo configurado esta disponible
+                if AGENT_MODEL not in models and not any(AGENT_MODEL in m for m in models):
+                    st.warning(f"Modelo '{AGENT_MODEL}' no encontrado. Disponibles: {', '.join(models[:5])}")
         except:
             st.error("Ollama NO conecta")
 
@@ -1484,7 +1349,6 @@ def main():
         col1.metric("Conocimiento", stats["knowledge"])
         col2.metric("Correcciones", stats["corrections"])
 
-        # === CORRECCIONES ===
         st.header("Corregir agente")
         st.caption("Si se equivoco, ensenale para que no repita el error")
         correction_msg = st.text_input("Que dijiste?", key="corr_msg")
@@ -1511,6 +1375,7 @@ def main():
         if st.button("Limpiar historial", use_container_width=True):
             st.session_state.messages = []
             st.session_state.thinking_history = []
+            agent.conversation_history = []
             st.rerun()
 
         st.header("Repos")
@@ -1518,7 +1383,7 @@ def main():
             repos = [d for d in os.listdir(REPOS_DIR)
                      if os.path.isdir(os.path.join(REPOS_DIR, d)) and not d.startswith(".")]
             for repo in repos:
-                st.write(f" {repo}")
+                st.write(f" 📁 {repo}")
         except:
             st.write("Sin repos")
 
@@ -1547,7 +1412,7 @@ def main():
                     if thinking_log:
                         thinking_text = "\n".join(thinking_log)
                         st.session_state.thinking_history.append(thinking_text)
-                        with st.expander("Proceso de pensamiento (click para ver)", expanded=False):
+                        with st.expander("Proceso de pensamiento ReAct (click para ver)", expanded=False):
                             st.markdown(f'<div class="thinking-box">{thinking_text}</div>',
                                        unsafe_allow_html=True)
 
