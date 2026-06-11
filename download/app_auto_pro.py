@@ -1,23 +1,31 @@
 """
 =============================================================
-AGENTE LOCAL AUTONOMO v8.1 - AGENTE QUE PIENSA DE VERDAD
-Piensa → Planifica → Ejecuta → Evalua → Ajusta
+AGENTE LOCAL AUTONOMO v9 - INTELIGENCIA REAL
+Piensa → Planifica → Ejecuta → Evalua → Aprende → Se corrige
 Consulta IA cloud si necesita ayuda
 =============================================================
 
-ARQUITECTURA:
-  Usuario → Pre-filtro (conversacion?) → Si: responder directamente
-                                  → No: Agente PIENSA (LLM) → Plan → Ejecuta → Evalua
-                ↑                                                              |
-                └── Si falla, ajusta y reintenta ←────────────────────────────┘
-                └── Si se atasca, consulta IA cloud ←─────────────────────────┘
+FILOSOFIA v9:
+  NO mas listas hardcodeadas de apps, patrones, ni parches.
+  El LLM PIENSA y decide. Las funciones BUSCAN inteligentemente.
+  Cuando se equivoca, APRENDE y no repite el error.
 
-CAMBIOS v8.1 vs v8:
-  - buscar_exe(): Busca .exe en Program Files, AppData y registro de Windows
-  - abrir_aplicacion(): 40+ apps en mapa + busqueda inteligente de .exe
-  - es_conversacion(): Lista de apps conocidas que NUNCA se tratan como charla
-  - _fallback_plan(): Detecta nombres de app en mensajes cortos
-  - THINKING_PROMPT: Ejemplos de "whatsapp" y "autocad 2025" como ACCION
+ARQUITECTURA:
+  Usuario → LLM piensa (SIEMPRE, cuando esta disponible)
+                ↓
+         Es conversacion? → Responde natural
+         Es accion?       → Planifica → Ejecuta → Evalua
+         No esta seguro?  → Pregunta al usuario
+                ↓
+         Si falla → Busca alternativas → Si se atasca → Consulta cloud
+         Si acierta → Aprende el patron para la proxima
+                ↓
+         Si el usuario corrige → Guarda la correccion para siempre
+
+DIFERENCIA vs v8.1:
+  v8.1: Listas de apps hardcodeadas, es_conversacion con 40+ nombres
+  v9:   LLM decide todo, buscar_exe usa Start Menu de Windows (como lo hace Windows),
+        sistema de correcciones persistente, aprende de sus errores
 =============================================================
 """
 
@@ -71,7 +79,6 @@ def ejecutar_comando(comando: str, cwd: str = None) -> str:
             output += result.stdout.strip()
         if result.stderr:
             stderr = result.stderr.strip()
-            # Algunos stderr son solo warnings, no errores reales
             if stderr and "npm notice" not in stderr.lower():
                 output += ("\n[STDERR] " + stderr) if output else stderr
         if not output:
@@ -255,155 +262,180 @@ def escribir_archivo(ruta: str, contenido: str) -> str:
         return f"ERROR: {e}"
 
 
-def buscar_exe(nombre: str) -> str:
-    """Busca un archivo .exe en el sistema cuando no esta en el mapa de apps."""
+# ============================================================
+# BUSQUEDA INTELIGENTE DE APLICACIONES
+# Usa el Start Menu de Windows (la forma NATIVA como Windows busca apps)
+# ============================================================
+
+def buscar_en_start_menu(nombre: str) -> str:
+    """
+    Busca en los accesos directos del Start Menu de Windows.
+    Esta es la forma mas confiable de encontrar apps instaladas,
+    porque es exactamente como funciona el buscador de Windows.
+    """
     nombre_lower = nombre.lower().strip()
+    # Quitar "abre", "abrir", etc. si vienen en el nombre
+    for prefix in ["abre ", "abrir ", "open ", "inicia ", "lanza ", "mi "]:
+        if nombre_lower.startswith(prefix):
+            nombre_lower = nombre_lower[len(prefix):]
+            break
 
-    # Directorios comunes donde estan las aplicaciones en Windows
-    search_dirs = [
-        os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files")),
-        os.path.join(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")),
-        os.path.join(os.environ.get("LocalAppData", ""), "Programs"),
-        os.path.join(os.path.expanduser("~"), "AppData", "Local", "Programs"),
-        os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Autodesk"),
-        os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Adobe"),
-    ]
+    # Directorios del Start Menu donde Windows guarda los accesos directos
+    start_menu_dirs = []
+    if platform.system() == "Windows":
+        # Start Menu global (todas las apps instaladas para todos los usuarios)
+        start_menu_dirs.append(os.path.join(os.environ.get("ProgramData", "C:\\ProgramData"),
+                                            "Microsoft", "Windows", "Start Menu", "Programs"))
+        # Start Menu del usuario (apps instaladas solo para este usuario)
+        start_menu_dirs.append(os.path.join(os.environ.get("AppData", ""),
+                                            "Microsoft", "Windows", "Start Menu", "Programs"))
 
-    # Buscar en el registro de desinstalacion para encontrar el path exacto
-    try:
-        reg_cmd = (
-            f'powershell -Command "'
-            f'Get-ItemProperty \'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*\', '
-            f'\'HKLM:\\SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*\', '
-            f'\'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*\' '
-            f'| Where-Object {{$_.DisplayName -like \'*{nombre}*\'}} '
-            f'| Select-Object -ExpandProperty InstallLocation '
-            f'| Select-Object -First 1"'
-        )
-        reg_result = ejecutar_comando(reg_cmd)
-        if reg_result and reg_result != "(sin salida)" and "ERROR" not in reg_result:
-            install_path = reg_result.strip().split('\n')[0].strip()
-            if install_path and os.path.exists(install_path):
-                # Buscar .exe dentro del path de instalacion
-                for root, dirs, files in os.walk(install_path):
-                    level = root.replace(install_path, "").count(os.sep)
-                    if level > 2:
-                        dirs.clear()
-                        continue
-                    for f in files:
-                        if f.lower().endswith(".exe") and nombre_lower in f.lower():
-                            return os.path.join(root, f)
-    except:
-        pass
-
-    # Busqueda directa en directorios comunes
-    for base_dir in search_dirs:
-        if not os.path.exists(base_dir):
+    matches = []
+    for sm_dir in start_menu_dirs:
+        if not os.path.exists(sm_dir):
             continue
+        for root, dirs, files in os.walk(sm_dir):
+            for f in files:
+                f_lower = f.lower()
+                # Los accesos directos son .lnk
+                if f_lower.endswith(".lnk"):
+                    # Quitar .lnk para comparar
+                    name_no_ext = f_lower[:-4]
+                    # Buscar coincidencia parcial
+                    if nombre_lower in name_no_ext or name_no_ext in nombre_lower:
+                        matches.append((os.path.join(root, f), name_no_ext))
+
+    if not matches:
+        return ""
+
+    # Preferir la coincidencia mas exacta
+    for path, name in matches:
+        if nombre_lower == name:
+            return path
+
+    # Si no hay exacta, la primera parcial
+    return matches[0][0]
+
+
+def buscar_exe(nombre: str) -> str:
+    """
+    Busca un ejecutable de forma inteligente:
+    1. Start Menu (lo mas confiable en Windows)
+    2. Registro de desinstalacion (InstallLocation)
+    3. where /r en Program Files
+    4. Busqueda en directorios comunes
+    """
+    nombre_lower = nombre.lower().strip()
+    for prefix in ["abre ", "abrir ", "open ", "inicia ", "lanza ", "mi "]:
+        if nombre_lower.startswith(prefix):
+            nombre_lower = nombre_lower[len(prefix):]
+            break
+
+    # 1. Start Menu (MEJOR METODO - funciona como Windows)
+    shortcut = buscar_en_start_menu(nombre)
+    if shortcut:
+        return shortcut  # Windows abre .lnk directamente con start
+
+    # 2. Registro de Windows (InstallLocation)
+    if platform.system() == "Windows":
         try:
-            for item in os.listdir(base_dir):
-                item_lower = item.lower()
-                if nombre_lower in item_lower or item_lower in nombre_lower:
-                    full_path = os.path.join(base_dir, item)
-                    if os.path.isdir(full_path):
-                        # Buscar .exe adentro (solo 2 niveles de profundidad)
-                        for root, dirs, files in os.walk(full_path):
-                            level = root.replace(full_path, "").count(os.sep)
-                            if level > 2:
-                                dirs.clear()
-                                continue
-                            for f in files:
-                                if f.lower().endswith(".exe") and nombre_lower in f.lower():
-                                    return os.path.join(root, f)
-            # Busqueda mas profunda con where /r
+            reg_cmd = (
+                f'powershell -Command "'
+                f'Get-ItemProperty \'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*\', '
+                f'\'HKLM:\\SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*\', '
+                f'\'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*\' '
+                f'| Where-Object {{$_.DisplayName -like \'*{nombre}*\'}} '
+                f'| Select-Object -ExpandProperty InstallLocation '
+                f'| Select-Object -First 1"'
+            )
+            reg_result = ejecutar_comando(reg_cmd)
+            if reg_result and reg_result != "(sin salida)" and "ERROR" not in reg_result:
+                install_path = reg_result.strip().split('\n')[0].strip()
+                if install_path and os.path.exists(install_path):
+                    for root, dirs, files in os.walk(install_path):
+                        level = root.replace(install_path, "").count(os.sep)
+                        if level > 2:
+                            dirs.clear()
+                            continue
+                        for f in files:
+                            if f.lower().endswith(".exe") and nombre_lower in f.lower():
+                                return os.path.join(root, f)
+        except:
+            pass
+
+    # 3. where /r en directorios comunes
+    if platform.system() == "Windows":
+        search_dirs = [
+            os.environ.get("ProgramFiles", "C:\\Program Files"),
+            os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"),
+        ]
+        for base_dir in search_dirs:
+            if not os.path.exists(base_dir):
+                continue
             where_cmd = f'where /r "{base_dir}" *{nombre_lower}*.exe'
             where_result = ejecutar_comando(where_cmd)
             if where_result and where_result != "(sin salida)" and "ERROR" not in where_result:
-                exes = [line.strip() for line in where_result.split('\n') if line.strip() and line.strip().endswith(".exe")]
+                exes = [line.strip() for line in where_result.split('\n')
+                        if line.strip() and line.strip().endswith(".exe")]
                 if exes:
                     return exes[0]
-        except:
-            continue
 
     return ""
 
 
 def abrir_aplicacion(app: str) -> str:
-    app_map = {
-        # Navegadores
-        "chrome": "start chrome", "google chrome": "start chrome",
-        "firefox": "start firefox", "edge": "start msedge",
-        # Explorador
-        "explorador": "start explorer", "file explorer": "start explorer",
-        # Editores / IDE
-        "vscode": "start code", "visual studio code": "start code",
-        "notepad": "start notepad", "bloc de notas": "start notepad",
-        # Office
-        "word": "start winword", "excel": "start excel", "powerpoint": "start powerpnt",
-        # Utilidades
-        "calculadora": "start calc", "calculator": "start calc",
-        "paint": "start mspaint",
-        "terminal": "start cmd", "cmd": "start cmd",
-        "powershell": "start powershell",
-        "configuracion": "start ms-settings:",
-        # Multimedia / Social
-        "spotify": "start spotify",
-        "discord": "start discord",
-        "whatsapp": "start whatsapp",
-        "telegram": "start telegram",
-        "zoom": "start zoom",
-        "teams": "start msteams", "microsoft teams": "start msteams",
-        "skype": "start skype",
-        "vlc": "start vlc",
-        # Diseño / Arquitectura
-        "autocad": "start acad",
-        "revit": "start revit",
-        "photoshop": "start photoshop",
-        "illustrator": "start illustrator",
-        "figma": "start figma",
-        "blender": "start blender",
-        "sketchup": "start sketchup",
-        "3ds max": "start 3dsmax",
-        "rhino": "start rhino",
-        # Desarrollo
-        "github desktop": "start github",
-        "postman": "start postman",
-        "docker": "start docker desktop",
-        "fiddler": "start fiddler",
+    """
+    Abre una aplicacion de forma inteligente:
+    1. Buscar en el Start Menu (como hace Windows)
+    2. Buscar el .exe en el sistema
+    3. Intentar con 'start nombre' como ultimo recurso
+    Si falla, sugerir al usuario que instale la app.
+    """
+    app_clean = app.lower().strip()
+    for prefix in ["abre ", "abrir ", "open ", "inicia ", "lanza ", "mi "]:
+        if app_clean.startswith(prefix):
+            app_clean = app_clean[len(prefix):]
+            break
+
+    # Alias comunes para que el LLM no tenga que adivinar el comando exacto
+    aliases = {
+        "chrome": "google chrome", "vscode": "visual studio code",
+        "autocad": "autocad", "revit": "revit",
+        "whatsapp": "whatsapp", "telegram": "telegram desktop",
+        "word": "word", "excel": "excel", "powerpoint": "powerpoint",
+        "photoshop": "adobe photoshop", "illustrator": "adobe illustrator",
+        "figma": "figma", "blender": "blender", "sketchup": "sketchup",
     }
+    search_name = aliases.get(app_clean, app_clean)
 
-    app_lower = app.lower().strip()
-    comando = app_map.get(app_lower, None)
-
-    # Si esta en el mapa, usar el comando directo
-    if comando:
-        resultado = ejecutar_comando(comando)
+    # 1. Buscar en Start Menu
+    shortcut_path = buscar_en_start_menu(search_name)
+    if shortcut_path:
+        resultado = ejecutar_comando(f'start "" "{shortcut_path}"')
         if not resultado or resultado == "(sin salida)":
-            return f"Aplicacion {app} abierta"
-        # Si el comando falla, intentar busqueda inteligente
-        if "no se puede" in resultado.lower() or "no encuentra" in resultado.lower() or "error" in resultado.lower():
-            exe_path = buscar_exe(app)
-            if exe_path:
-                resultado2 = ejecutar_comando(f'start "" "{exe_path}"')
-                if not resultado2 or resultado2 == "(sin salida)":
-                    return f"Aplicacion {app} abierta (encontrada en: {exe_path})"
-                return resultado2
-        return resultado
+            return f"Aplicacion {app} abierta (via Start Menu)"
+        if "error" not in resultado.lower():
+            return f"Aplicacion {app} abierta (via Start Menu)"
 
-    # Si NO esta en el mapa, buscar el .exe inteligentemente
-    exe_path = buscar_exe(app)
+    # 2. Buscar .exe directamente
+    exe_path = buscar_exe(search_name)
     if exe_path:
         resultado = ejecutar_comando(f'start "" "{exe_path}"')
         if not resultado or resultado == "(sin salida)":
             return f"Aplicacion {app} abierta (encontrada en: {exe_path})"
-        return resultado
+        if "error" not in resultado.lower():
+            return f"Aplicacion {app} abierta (encontrada en: {exe_path})"
 
-    # Ultimo intento: start nombre (Windows intenta resolverlo)
-    resultado = ejecutar_comando(f"start {app}")
+    # 3. Intento directo con start (Windows a veces resuelve el nombre)
+    resultado = ejecutar_comando(f"start {app_clean}")
     if not resultado or resultado == "(sin salida)":
         return f"Aplicacion {app} abierta"
+
+    # 4. No se encontro
     if "no se puede" in resultado.lower() or "no encuentra" in resultado.lower():
-        return f"No encontre la aplicacion '{app}'. Probaste con el nombre exacto?"
+        return (f"No encontre '{app}' en tu computadora. "
+                f"Puede que no este instalada o tenga otro nombre. "
+                f"Quieres que busque en los programas instalados?")
     return resultado
 
 
@@ -419,22 +451,21 @@ TOOL_FUNCTIONS = {
     "abrir_aplicacion": abrir_aplicacion,
 }
 
-# Descripcion de herramientas para el LLM
 TOOL_DESCRIPTIONS = """
-- conversar(mensaje) - Para SALUDOS, preguntas generales, charla. Usa esta cuando NO necesitas ejecutar nada. NUNCA para abrir apps.
-- ejecutar_comando(comando) - Ejecuta CUALQUIER comando en la terminal. Use para todo lo que no tenga herramienta especifica.
+- conversar(mensaje) - Para SALUDOS, preguntas generales, charla. NUNCA para abrir apps.
+- ejecutar_comando(comando) - Ejecuta CUALQUIER comando en la terminal.
 - clonar_repositorio(url) - Clona un repo de GitHub.
-- instalar_dependencias(ruta, gestor="auto") - Instala deps. Detecta npm/pip/poetry automaticamente.
-- leer_archivo(ruta) - Lee el contenido de un archivo de texto.
+- instalar_dependencias(ruta, gestor="auto") - Instala deps. Detecta npm/pip/poetry.
+- leer_archivo(ruta) - Lee el contenido de un archivo.
 - listar_archivos(ruta) - Lista archivos y carpetas de un directorio.
 - analizar_proyecto(ruta) - Analiza la estructura completa de un proyecto.
 - escribir_archivo(ruta, contenido) - Crea o modifica un archivo.
-- abrir_aplicacion(app) - Abre una aplicacion por nombre (autocad, whatsapp, chrome, revit, vscode, etc.). Busca el .exe automaticamente si no esta en el mapa.
+- abrir_aplicacion(app) - Abre CUALQUIER aplicacion por nombre. Busca automaticamente en el Start Menu, registro y disco. No necesita saber el .exe exacto.
 """
 
 
 # ============================================================
-# SISTEMA DE APRENDIZAJE
+# SISTEMA DE APRENDIZAJE - El agente aprende de sus errores
 # ============================================================
 
 class LearningSystem:
@@ -474,6 +505,7 @@ class LearningSystem:
         return knowledge
 
     def save_correction(self, user_msg, wrong_action, correct_action, reason=""):
+        """Guarda una correccion del usuario. El agente NUNCA repetira este error."""
         corrections = self._load(CORRECTIONS_FILE, [])
         corrections.append({
             "timestamp": datetime.now().isoformat(),
@@ -481,10 +513,27 @@ class LearningSystem:
             "correct_action": correct_action, "reason": reason
         })
         self._save(CORRECTIONS_FILE, corrections)
+        # Tambien guardar como conocimiento para que el LLM lo use
+        self.save_knowledge(
+            f"correccion:{user_msg[:50]}",
+            f"Cuando el usuario dice '{user_msg}', NO hacer '{wrong_action}'. "
+            f"Hacer '{correct_action}'. Razon: {reason}",
+            source="user_correction"
+        )
 
     def get_lessons(self):
         knowledge = self._load(KNOWLEDGE_FILE, [])
         return [k["content"] for k in knowledge if k["topic"].startswith("leccion:")]
+
+    def get_corrections_for(self, user_msg: str) -> list:
+        """Busca correcciones previas relacionadas con un mensaje del usuario."""
+        corrections = self._load(CORRECTIONS_FILE, [])
+        msg_lower = user_msg.lower()
+        relevant = []
+        for c in corrections:
+            if any(w in msg_lower for w in c["user_message"].lower().split() if len(w) > 3):
+                relevant.append(c)
+        return relevant[-5:]  # Ultimas 5 relevantes
 
     def get_stats(self):
         return {
@@ -498,80 +547,30 @@ learning = LearningSystem()
 
 
 # ============================================================
-# DETECTOR DE CONVERSACION (pre-filtro rapido, SIN LLM)
-# ============================================================
-
-def es_conversacion(mensaje: str) -> bool:
-    """
-    Detecta rapidamente si un mensaje es conversacional (saludos, preguntas genericas, etc.)
-    ANTES de enviar al LLM. Esto ahorra tokens y evita planes absurdos como
-    escribir_archivo para un simple 'hola'.
-    """
-    msg = mensaje.lower().strip()
-
-    # Patrones de saludo
-    saludos = ["hola", "hi", "hello", "hey", "buenos dias", "buenas", "que tal",
-               "que onda", "saludos", "buen dia", "buenas noches", "buenas tardes"]
-    if any(msg.startswith(s) for s in saludos):
-        return True
-
-    # Preguntas personales / estado
-    estado = ["como estas", "como te va", "como andas", "todo bien", "que haces",
-              "que tal tu", "como estas tu", "como te encuentras"]
-    if any(e in msg for e in estado):
-        return True
-
-    # Identidad
-    identidad = ["quien eres", "que eres", "que haces", "para que sirves",
-                 "que puedes hacer", "como funcionas", "que sabes hacer"]
-    if any(i in msg for i in identidad):
-        return True
-
-    # Agradecimientos
-    gracias = ["gracias", "thanks", "genial", "perfecto", "excelente", "muy bien", "cool"]
-    if any(msg.startswith(g) for g in gracias):
-        return True
-
-    # Confirmaciones cortas sin contexto de accion
-    confirmaciones = ["si", "no", "ok", "vale", "bien", "ya", "ahora", "enterado", "entendido"]
-    if msg in confirmaciones:
-        return True
-
-    # Nombres de aplicaciones conocidas - NUNCA tratar como conversacion
-    apps_conocidas = [
-        "whatsapp", "telegram", "zoom", "teams", "skype", "discord", "spotify",
-        "chrome", "firefox", "edge", "vscode", "notepad", "word", "excel", "powerpoint",
-        "autocad", "revit", "photoshop", "illustrator", "figma", "blender", "sketchup",
-        "3ds max", "rhino", "vlc", "paint", "calculadora", "explorador",
-        "github", "postman", "docker", "terminal", "cmd", "powershell",
-        "outlook", "mail", "calendar", "onenote",
-    ]
-    if any(a in msg for a in apps_conocidas):
-        return False  # Es una app, NO es conversacion
-
-    # Mensajes muy cortos sin verbos de accion y sin nombres de app
-    verbos_accion = ["clona", "abre", "instal", "ejecuta", "analiz", "leer", "listar",
-                     "busca", "crea", "borra", "elimina", "modifica", "escribe", "corre",
-                     "compila", "despliega", "descarga", "sube", "mueve"]
-    if len(msg.split()) <= 3 and not any(v in msg for v in verbos_accion) and not any(a in msg for a in apps_conocidas):
-        return True
-
-    return False
-
-
-# ============================================================
 # CEREBRO DEL AGENTE - Piensa, Planifica, Decide
 # ============================================================
 
-THINKING_PROMPT = """Eres un agente autonomo que PIENSA antes de actuar.
+THINKING_PROMPT = """Eres un agente autonomo INTELIGENTE que PIENSA antes de actuar.
 
 Tu trabajo es ANALIZAR la solicitud del usuario y decidir que hacer.
 
-REGLA MAS IMPORTANTE:
-- Si el usuario esta SALUDANDO, PREGUNTANDO algo general, o CONVERSANDO, usa la accion "conversar".
-- NUNCA uses escribir_archivo para responder a un saludo o pregunta.
-- NUNCA uses herramientas de accion para mensajes conversacionales.
-- Solo usa herramientas de accion (clonar, ejecutar, abrir, etc.) cuando el usuario pide HACER algo concreto.
+REGLAS FUNDAMENTALES:
+1. Si el usuario SALUDA o HABLA contigo → usa "conversar"
+2. Si el usuario pide ABRIR algo → usa "abrir_aplicacion" (busca automaticamente, no necesitas saber el .exe)
+3. Si el usuario pide HACER algo concreto → crea un plan con las herramientas necesarias
+4. NUNCA uses escribir_archivo para responder preguntas o saludos
+5. NUNCA digas que algo "no existe" solo por el nombre — deja que las herramientas lo busquen
+
+PIENSA ASI:
+- "hola como estas?" → Es un saludo, usar conversar
+- "whatsapp" → Quiere abrir WhatsApp, usar abrir_aplicacion
+- "autocad 2025" → Quiere abrir AutoCAD, usar abrir_aplicacion
+- "clona https://github.com/..." → Quiere clonar un repo, crear plan
+- "que es Python?" → Es una pregunta, usar conversar
+- "no funciona" → Algo fallo, diagnosticar con herramientas
+
+CORRECCIONES APRENDIDAS (NO repitas estos errores):
+{corrections}
 
 CONTEXTO DEL SISTEMA:
 - SO: {so}
@@ -582,27 +581,19 @@ CONTEXTO DEL SISTEMA:
 HERRAMIENTAS DISPONIBLES:
 {tools}
 
-REGLAS DE PENSAMIENTO:
-1. ANALIZA: Que quiere realmente el usuario? Es una ACCION o una CONVERSACION?
-2. Si es CONVERSACION (saludo, pregunta, charla) → usar "conversar"
-3. Si es ACCION (clonar, abrir, ejecutar) → crear un plan con las herramientas necesarias
-4. PLANIFICA: Cual es la mejor secuencia de acciones? Piensa paso a paso.
-5. ANTICIPA: Que puede salir mal? Que informacion necesitas primero?
-6. Si no estas seguro, INVESTIGA primero (lista archivos, lee configs, etc.)
-
 FORMATO DE RESPUESTA - Responde SOLO con JSON valido:
 {{
-    "analisis": "Que entiendo que quiere el usuario",
+    "analisis": "Que entiendo que quiere el usuario y por que",
     "plan": [
         {{
             "paso": 1,
             "accion": "nombre_de_herramienta",
             "params": {{"parametro": "valor"}},
-            "razon": "por que hago esto primero"
+            "razon": "por que hago esto"
         }}
     ],
     "riesgos": ["que puede salir mal"],
-    "siguiente_paso_sugerido": "que hacer despues de ejecutar el plan"
+    "siguiente_paso_sugerido": "que hacer despues"
 }}
 
 EJEMPLOS:
@@ -610,69 +601,22 @@ EJEMPLOS:
 Usuario: "hola como estas?"
 Respuesta:
 {{
-    "analisis": "El usuario esta saludando y preguntando como estoy. Es una conversacion, no una accion.",
+    "analisis": "El usuario esta saludando. Es conversacion, no accion.",
     "plan": [
-        {{"paso": 1, "accion": "conversar", "params": {{"mensaje": "hola como estas?"}}, "razon": "Es un saludo, responder de forma natural"}}
+        {{"paso": 1, "accion": "conversar", "params": {{"mensaje": "hola como estas?"}}, "razon": "Es un saludo"}}
     ],
     "riesgos": [],
     "siguiente_paso_sugerido": ""
-}}
-
-Usuario: "que puedes hacer?"
-Respuesta:
-{{
-    "analisis": "El usuario pregunta por mis capacidades. Es una conversacion.",
-    "plan": [
-        {{"paso": 1, "accion": "conversar", "params": {{"mensaje": "que puedes hacer?"}}, "razon": "Pregunta sobre capacidades, responder directamente"}}
-    ],
-    "riesgos": [],
-    "siguiente_paso_sugerido": ""
-}}
-
-Usuario: "clona mi repo https://github.com/yecos/signalTrade"
-Respuesta:
-{{
-    "analisis": "El usuario quiere clonar un repositorio de GitHub y analizarlo. La URL es clara.",
-    "plan": [
-        {{"paso": 1, "accion": "clonar_repositorio", "params": {{"url": "https://github.com/yecos/signalTrade"}}, "razon": "Clonar el repo primero"}},
-        {{"paso": 2, "accion": "analizar_proyecto", "params": {{"ruta": "RUTA_DEL_REPO"}}, "razon": "Analizar estructura automaticamente"}},
-        {{"paso": 3, "accion": "leer_archivo", "params": {{"ruta": "RUTA_DEL_REPO/README.md"}}, "razon": "Leer documentacion para entender el proyecto"}}
-    ],
-    "riesgos": ["El repo ya puede existir", "Puede estar vacio"],
-    "siguiente_paso_sugerido": "Instalar dependencias si tiene package.json"
-}}
-
-Usuario: "abre chrome"
-Respuesta:
-{{
-    "analisis": "El usuario quiere abrir el navegador Chrome.",
-    "plan": [
-        {{"paso": 1, "accion": "abrir_aplicacion", "params": {{"app": "chrome"}}, "razon": "Abrir Chrome directamente"}}
-    ],
-    "riesgos": ["Chrome puede no estar instalado"],
-    "siguiente_paso_sugerido": "Si necesito abrir una URL especifica, usar chrome URL"
-}}
-
-Usuario: "ayudame con mi proyecto signalTrade"
-Respuesta:
-{{
-    "analisis": "El usuario quiere ayuda con su proyecto. Necesito entender primero de que trata.",
-    "plan": [
-        {{"paso": 1, "accion": "analizar_proyecto", "params": {{"ruta": "C:\\Users\\yecos\\Documents\\signalTrade"}}, "razon": "Entender la estructura del proyecto primero"}},
-        {{"paso": 2, "accion": "leer_archivo", "params": {{"ruta": "C:\\Users\\yecos\\Documents\\signalTrade/README.md"}}, "razon": "Leer documentacion para entender que hace"}}
-    ],
-    "riesgos": ["Puede no tener README", "Puede necesitar dependencias instaladas"],
-    "siguiente_paso_sugerido": "Preguntar al usuario que aspecto especifico necesita ayuda"
 }}
 
 Usuario: "abre mi whatsapp"
 Respuesta:
 {{
-    "analisis": "El usuario quiere abrir WhatsApp. Es una accion clara.",
+    "analisis": "El usuario quiere abrir WhatsApp. abrir_aplicacion lo buscara automaticamente.",
     "plan": [
-        {{"paso": 1, "accion": "abrir_aplicacion", "params": {{"app": "whatsapp"}}, "razon": "Abrir la aplicacion WhatsApp"}}
+        {{"paso": 1, "accion": "abrir_aplicacion", "params": {{"app": "whatsapp"}}, "razon": "Abrir WhatsApp"}}
     ],
-    "riesgos": ["WhatsApp puede no estar instalado como app desktop"],
+    "riesgos": ["Puede no estar instalado como app desktop"],
     "siguiente_paso_sugerido": ""
 }}
 
@@ -681,22 +625,23 @@ Respuesta:
 {{
     "analisis": "El usuario quiere abrir AutoCAD 2025. Es una accion, no una conversacion.",
     "plan": [
-        {{"paso": 1, "accion": "abrir_aplicacion", "params": {{"app": "autocad"}}, "razon": "Abrir AutoCAD, la funcion buscara el .exe automaticamente"}}
+        {{"paso": 1, "accion": "abrir_aplicacion", "params": {{"app": "autocad"}}, "razon": "Abrir AutoCAD, la funcion buscara el ejecutable automaticamente"}}
     ],
     "riesgos": ["AutoCAD puede no estar instalado"],
     "siguiente_paso_sugerido": ""
 }}
 
-Usuario: "no funciona, sigue sin hacer nada"
+Usuario: "clona mi repo https://github.com/yecos/signalTrade"
 Respuesta:
 {{
-    "analisis": "El usuario esta frustrado. Algo fallo antes. Necesito diagnosticar.",
+    "analisis": "El usuario quiere clonar un repositorio y analizarlo.",
     "plan": [
-        {{"paso": 1, "accion": "listar_archivos", "params": {{"ruta": "C:\\Users\\yecos\\Documents"}}, "razon": "Verificar que existe el directorio y los archivos"}},
-        {{"paso": 2, "accion": "ejecutar_comando", "params": {{"comando": "ollama list"}}, "razon": "Verificar que Ollama esta corriendo y los modelos disponibles"}}
+        {{"paso": 1, "accion": "clonar_repositorio", "params": {{"url": "https://github.com/yecos/signalTrade"}}, "razon": "Clonar el repo primero"}},
+        {{"paso": 2, "accion": "analizar_proyecto", "params": {{"ruta": "RUTA_DEL_REPO"}}, "razon": "Analizar estructura"}},
+        {{"paso": 3, "accion": "leer_archivo", "params": {{"ruta": "RUTA_DEL_REPO/README.md"}}, "razon": "Leer documentacion"}}
     ],
-    "riesgos": ["Ollama puede no estar corriendo"],
-    "siguiente_paso_sugerido": "Diagnosticar el problema especifico y buscar solucion"
+    "riesgos": ["El repo ya puede existir"],
+    "siguiente_paso_sugerido": "Instalar dependencias si tiene package.json"
 }}
 """
 
@@ -728,7 +673,7 @@ Por favor ayudame a encontrar una solucion. Se especifico y practico. Si sugiere
 
 
 class AgentBrain:
-    """El cerebro del agente - Piensa, planifica, evalua."""
+    """El cerebro del agente - Piensa, planifica, evalua, aprende."""
 
     def __init__(self):
         self.thinking_log = []
@@ -737,38 +682,35 @@ class AgentBrain:
     def think(self, user_message: str, context: str = "") -> dict:
         """
         El agente PIENSA sobre el mensaje del usuario y genera un plan.
-
-        FLUJO v8:
-        1. Pre-filtro: Si es conversacion, responder directamente (SIN LLM)
-        2. Si es accion: enviar al LLM para planificar
-        3. Si el LLM no responde: usar fallback
+        v9: SIEMPRE usa el LLM cuando esta disponible. Sin pre-filtros hardcoded.
         """
         self.thinking_log = []
         self._log("Pensando...", "thinking")
-
-        # === PRE-FILTRO v8: Detectar conversacion ANTES del LLM ===
-        if es_conversacion(user_message):
-            self._log("Detectado como CONVERSACION (pre-filtro)", "thinking")
-            respuesta = self._conversar(user_message)
-            return {
-                "analisis": "Conversacion detectada por pre-filtro",
-                "plan": [{"paso": 1, "accion": "conversar", "params": {"mensaje": user_message}, "razon": "Responder al usuario"}],
-                "riesgos": [],
-                "siguiente_paso_sugerido": "",
-                "_respuesta_directa": respuesta  # Ya tenemos la respuesta, no ejecutar de nuevo
-            }
 
         # Recopilar contexto
         repos = self._get_repos()
         lessons = learning.get_lessons()
         lessons_text = "\n".join([f"- {l}" for l in lessons[-5:]]) if lessons else "Ninguna aun"
 
+        # Obtener correcciones relevantes para este mensaje
+        corrections = learning.get_corrections_for(user_message)
+        corrections_text = ""
+        if corrections:
+            corrections_text = "\n".join([
+                f"- NO hagas '{c['wrong_action']}' cuando el usuario dice '{c['user_message']}'. "
+                f"Haz '{c['correct_action']}' en su lugar."
+                for c in corrections
+            ])
+        else:
+            corrections_text = "Ninguna aun"
+
         prompt = THINKING_PROMPT.format(
             so=platform.system(),
             repos_dir=REPOS_DIR,
             repos=", ".join(repos) if repos else "Ninguno",
             lessons=lessons_text,
-            tools=TOOL_DESCRIPTIONS
+            tools=TOOL_DESCRIPTIONS,
+            corrections=corrections_text
         )
 
         messages = [
@@ -776,7 +718,6 @@ class AgentBrain:
             {"role": "user", "content": user_message}
         ]
 
-        # Agregar contexto de acciones previas si hay
         if context:
             messages.append({"role": "user", "content": f"Contexto adicional: {context}"})
 
@@ -785,7 +726,7 @@ class AgentBrain:
         plan = self._ask_llm(messages)
 
         if not plan:
-            self._log("El LLM no respondio, usando ejecucion directa", "warning")
+            self._log("El LLM no respondio, usando fallback", "warning")
             return self._fallback_plan(user_message)
 
         # Parsear la respuesta como JSON
@@ -797,43 +738,22 @@ class AgentBrain:
                 self._log(f"  Paso {step.get('paso', '?')}: {step.get('accion', '?')} - {step.get('razon', '')}", "plan")
             return parsed
 
-        # Si no se pudo parsear, intentar ejecucion directa
-        self._log("No se pudo parsear el plan, usando ejecucion directa", "warning")
+        # Si no se pudo parsear, usar fallback
+        self._log("No se pudo parsear el plan, usando fallback", "warning")
         return self._fallback_plan(user_message)
 
     def execute_plan(self, plan: dict) -> list:
-        """
-        Ejecuta el plan paso a paso, evaluando cada resultado.
-        Si algo falla, busca alternativas.
-        Si el plan esta vacio (conversacion), responde directamente.
-        """
+        """Ejecuta el plan paso a paso, evaluando cada resultado."""
         results = []
-
-        # === v8: Si ya tenemos respuesta directa del pre-filtro, usarla ===
-        if "_respuesta_directa" in plan:
-            respuesta = plan["_respuesta_directa"]
-            results.append({
-                "action": "conversar",
-                "params": {"mensaje": plan.get("plan", [{}])[0].get("params", {}).get("mensaje", "")},
-                "reason": "Conversacion (pre-filtro)",
-                "result": respuesta,
-                "evaluation": {"exitoso": True}
-            })
-            return results
-
         steps = plan.get("plan", [])
 
-        # Si el plan esta vacio, es una conversacion — responder directamente
         if not steps:
             analisis = plan.get("analisis", "")
             self._log(f"Plan vacio — es conversacion: {analisis}", "thinking")
             result = self._conversar(st.session_state.messages[-1]["content"] if st.session_state.messages else "hola")
             results.append({
-                "action": "conversar",
-                "params": {},
-                "reason": analisis,
-                "result": result,
-                "evaluation": {"exitoso": True}
+                "action": "conversar", "params": {}, "reason": analisis,
+                "result": result, "evaluation": {"exitoso": True}
             })
             return results
 
@@ -842,72 +762,51 @@ class AgentBrain:
             params = step.get("params", {})
             reason = step.get("razon", "")
 
-            self._log(f"Ejecutando paso: {action}({params}) — {reason}", "execution")
-
-            # Resolver parametros dinamicos (como RUTA_DEL_REPO)
+            self._log(f"Ejecutando: {action}({params}) — {reason}", "execution")
             params = self._resolve_params(params)
-
-            # Ejecutar la herramienta
             result = self._execute_tool(action, params)
-
-            # Evaluar el resultado
             evaluation = self.evaluate(action, params, result)
 
             results.append({
-                "action": action,
-                "params": params,
-                "reason": reason,
-                "result": result,
-                "evaluation": evaluation
+                "action": action, "params": params, "reason": reason,
+                "result": result, "evaluation": evaluation
             })
 
             self.actions_taken.append(f"{action}({params}) -> {result[:100]}")
 
-            # Si fallo, intentar solucion alternativa
+            # Si fallo, intentar alternativa
             if not evaluation.get("exitoso", True) and evaluation.get("solucion_alternativa"):
                 self._log(f"Fallo detectado, intentando alternativa...", "warning")
                 alt_result = self._try_alternative(evaluation["solucion_alternativa"], action, params)
                 if alt_result:
                     results[-1]["result"] = alt_result
-                    results[-1]["evaluation"] = {"exitoso": True, "leccion": "Solucion alternativa funciono"}
+                    results[-1]["evaluation"] = {"exitoso": True, "leccion": "Alternativa funciono"}
 
-            # Si la evaluacion dice que hay que hacer algo mas, agregarlo
+            # Aprender de la evaluacion
             if evaluation.get("leccion"):
-                learning.save_knowledge(
-                    f"leccion:{action}",
-                    evaluation["leccion"],
-                    source="auto_evaluation"
-                )
+                learning.save_knowledge(f"leccion:{action}", evaluation["leccion"], source="auto_evaluation")
 
         return results
 
     def evaluate(self, action: str, params: dict, result: str) -> dict:
-        """Evalua si una accion fue exitosa y que aprendemos de ella."""
-        # Evaluacion rapida basada en patrones (sin LLM para velocidad)
+        """Evalua si una accion fue exitosa."""
         if "ERROR" in result or "Error" in result:
-            # Evaluar con LLM para entender el problema
             prompt = EVALUATION_PROMPT.format(
-                action=action,
-                params=json.dumps(params),
-                result=result[:500]
+                action=action, params=json.dumps(params), result=result[:500]
             )
             eval_result = self._ask_llm([{"role": "user", "content": prompt}])
             parsed = self._parse_json(eval_result)
             if parsed:
                 self._log(f"Evaluacion: fallo - {parsed.get('problema', 'desconocido')}", "evaluation")
                 return parsed
-
             return {"exitoso": False, "problema": result[:200], "solucion_alternativa": ""}
 
         self._log(f"Evaluacion: exitoso", "evaluation")
         return {"exitoso": True, "leccion": "", "proximo_paso": "continuar"}
 
     def consult_cloud(self, user_task: str, problem: str) -> str:
-        """
-        Consulta a una IA cloud cuando el agente local se atasca.
-        Usa APIs de Groq, OpenRouter, o DeepSeek.
-        """
-        self._log("Consultando IA cloud para ayuda...", "cloud")
+        """Consulta IA cloud cuando se atasca."""
+        self._log("Consultando IA cloud...", "cloud")
 
         prompt = CLOUD_CONSULT_PROMPT.format(
             user_task=user_task,
@@ -915,7 +814,6 @@ class AgentBrain:
             problem=problem
         )
 
-        # Intentar con ia_bridge.py si existe
         bridge_path = os.path.join(os.path.dirname(__file__), "ia_bridge.py")
         if os.path.exists(bridge_path):
             try:
@@ -924,18 +822,14 @@ class AgentBrain:
                 bridge = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(bridge)
                 if hasattr(bridge, 'consultar_ia'):
-                    result = bridge.consultar_ia(prompt)
-                    self._log("Respuesta cloud recibida", "cloud")
-                    return result
+                    return bridge.consultar_ia(prompt)
             except Exception as e:
                 self._log(f"Error con ia_bridge: {e}", "warning")
 
-        # Intentar con API directa (Groq - gratis y rapido)
         try:
             import urllib.request
             api_key = os.environ.get("GROQ_API_KEY", "")
             if not api_key:
-                # Buscar en archivo de config
                 config_path = os.path.join(os.path.dirname(__file__), "..", "config", "api_keys.json")
                 if os.path.exists(config_path):
                     with open(config_path, "r") as f:
@@ -955,17 +849,11 @@ class AgentBrain:
                 req = urllib.request.Request(
                     "https://api.groq.com/openai/v1/chat/completions",
                     data=data,
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json"
-                    }
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
                 )
-
                 with urllib.request.urlopen(req, timeout=15) as resp:
                     response = json.loads(resp.read().decode("utf-8"))
-                    result = response["choices"][0]["message"]["content"]
-                    self._log("Respuesta de Groq recibida", "cloud")
-                    return result
+                    return response["choices"][0]["message"]["content"]
         except Exception as e:
             self._log(f"Error con API cloud: {e}", "warning")
 
@@ -978,11 +866,10 @@ class AgentBrain:
         self.thinking_log.append(f"[{timestamp}] [{category.upper()}] {message}")
 
     def _ask_llm(self, messages: list) -> str:
-        """Consulta al LLM local (Ollama). Usa Client explicito que SI conecta."""
+        """Consulta al LLM local (Ollama). 4 metodos de conexion."""
         try:
             import ollama
 
-            # Metodo principal: Client explicito con localhost (EL QUE FUNCIONA)
             try:
                 client = ollama.Client(host='http://localhost:11434')
                 response = client.chat(model=AGENT_MODEL, messages=messages)
@@ -990,7 +877,6 @@ class AgentBrain:
             except Exception as e:
                 self._log(f"Client(localhost) fallo: {e}", "warning")
 
-            # Metodo alternativo: Client con 127.0.0.1
             try:
                 client = ollama.Client(host='http://127.0.0.1:11434')
                 response = client.chat(model=AGENT_MODEL, messages=messages)
@@ -998,26 +884,20 @@ class AgentBrain:
             except Exception as e:
                 self._log(f"Client(127.0.0.1) fallo: {e}", "warning")
 
-            # Metodo 3: Default (a veces funciona)
             try:
                 response = ollama.chat(model=AGENT_MODEL, messages=messages)
                 return response.get("message", {}).get("content", "")
             except Exception:
                 pass
 
-            # Metodo 4: HTTP directo con urllib (sin depender de la lib ollama)
             try:
                 import urllib.request
                 data = json.dumps({
-                    "model": AGENT_MODEL,
-                    "messages": messages,
-                    "stream": False
+                    "model": AGENT_MODEL, "messages": messages, "stream": False
                 }).encode("utf-8")
-
                 req = urllib.request.Request(
                     "http://localhost:11434/api/chat",
-                    data=data,
-                    headers={"Content-Type": "application/json"}
+                    data=data, headers={"Content-Type": "application/json"}
                 )
                 with urllib.request.urlopen(req, timeout=120) as resp:
                     result = json.loads(resp.read().decode("utf-8"))
@@ -1036,14 +916,11 @@ class AgentBrain:
             return ""
 
     def _parse_json(self, text: str) -> dict:
-        """Intenta extraer JSON de la respuesta del LLM."""
-        # Intentar parsear directamente
         try:
             return json.loads(text)
         except:
             pass
 
-        # Buscar JSON en la respuesta (entre ``` o llaves)
         json_patterns = [
             r'```json\s*(.*?)\s*```',
             r'```\s*(.*?)\s*```',
@@ -1056,27 +933,22 @@ class AgentBrain:
                     return json.loads(match.group(1))
                 except:
                     continue
-
         return None
 
     def _resolve_params(self, params: dict) -> dict:
-        """Resuelve parametros dinamicos como RUTA_DEL_REPO."""
         resolved = {}
         for key, value in params.items():
             if isinstance(value, str):
-                # Reemplazar marcadores
                 value = value.replace("RUTA_DEL_REPO", self._find_repo_path())
                 value = value.replace("REPOS_DIR", REPOS_DIR)
             resolved[key] = value
         return resolved
 
     def _find_repo_path(self) -> str:
-        """Busca el path de un repositorio reciente."""
         try:
             dirs = [d for d in os.listdir(REPOS_DIR)
                     if os.path.isdir(os.path.join(REPOS_DIR, d)) and not d.startswith(".")]
             if dirs:
-                # Retornar el mas reciente
                 latest = max(dirs, key=lambda d: os.path.getmtime(os.path.join(REPOS_DIR, d)))
                 return os.path.join(REPOS_DIR, latest)
         except:
@@ -1084,8 +956,6 @@ class AgentBrain:
         return REPOS_DIR
 
     def _execute_tool(self, action: str, params: dict) -> str:
-        """Ejecuta una herramienta por nombre."""
-        # Accion especial: conversar (no es una herramienta real)
         if action == "conversar":
             return self._conversar(params.get("mensaje", ""))
 
@@ -1100,91 +970,67 @@ class AgentBrain:
             return f"Herramienta no encontrada: {action}"
 
     def _conversar(self, mensaje: str) -> str:
-        """Responde al usuario de forma conversacional. Usa LLM para respuestas ricas."""
+        """Responde de forma conversacional. Usa LLM para respuestas ricas."""
         msg = mensaje.lower().strip()
 
-        # Respuestas predefinidas rapidas (sin necesidad de LLM)
+        # Respuestas rapidas para patrones obvios (sin LLM)
         saludos = ["hola", "hi", "hello", "hey", "buenos dias", "buenas", "que tal", "que onda", "saludos"]
         if any(msg.startswith(s) for s in saludos):
             return ("Hola! Soy tu agente autonomo local. Puedo hacer cosas como:\n"
+                    "- Abrir CUALQUIER aplicacion (busca automaticamente)\n"
                     "- Clonar y analizar repos de GitHub\n"
-                    "- Instalar dependencias\n"
-                    "- Abrir aplicaciones\n"
-                    "- Leer y escribir archivos\n"
                     "- Ejecutar comandos en la terminal\n"
+                    "- Leer y escribir archivos\n"
                     "- Consultar IA cloud si necesito ayuda\n\n"
-                    "Dime que necesitas y yo me encargo!")
+                    "Dime que necesitas!")
 
         if any(w in msg for w in ["como estas", "como te va", "como andas", "todo bien"]):
-            return ("Estoy listo para trabajar! Tengo acceso a tu terminal y puedo ejecutar comandos. "
-                    "Solo dime que necesitas.")
+            return "Listo para trabajar! Tengo acceso a tu terminal. Dime que necesitas."
 
         if any(w in msg for w in ["quien eres", "que eres", "que haces"]):
-            return ("Soy un agente autonomo local que PIENSA antes de actuar.\n"
+            return ("Soy un agente autonomo que PIENSA antes de actuar.\n"
                     "- Analizo tu solicitud y creo un plan\n"
-                    "- Ejecuto paso a paso y evaluo los resultados\n"
+                    "- Busco automaticamente apps y archivos\n"
                     "- Si algo falla, busco alternativas\n"
-                    "- Si me atasco, consulto IA cloud\n"
-                    "- Aprendo de mis errores\n\n"
-                    "Todo corre localmente en tu PC con Ollama (qwen2.5:14b).")
+                    "- Si me equivoco, aprendo y no repito el error\n"
+                    "Todo corre localmente con Ollama (qwen2.5:14b).")
 
         if any(w in msg for w in ["gracias", "thanks", "genial", "perfecto"]):
-            return "De nada! Estoy aqui para lo que necesites."
+            return "De nada! Aqui estoy para lo que necesites."
 
         if any(w in msg for w in ["ayuda", "help", "que puedes hacer"]):
             return ("Puedo hacer muchas cosas:\n\n"
-                    "**Repositorios:**\n"
-                    "- 'clona https://github.com/usuario/repo'\n"
-                    "- 'analiza signalTrade'\n"
-                    "- 'instalar dependencias signalTrade'\n\n"
-                    "**Aplicaciones:**\n"
-                    "- 'abre chrome'\n"
-                    "- 'abre vscode'\n"
-                    "- 'abre notepad'\n\n"
-                    "**Archivos:**\n"
-                    "- 'leer README.md de signalTrade'\n"
-                    "- 'listar archivos'\n\n"
-                    "**Terminal:**\n"
-                    "- 'ejecuta git status'\n"
-                    "- 'ejecuta npm run dev'\n\n"
-                    "**Lo especial:** Yo PIENSO antes de actuar y busco soluciones si algo falla.")
+                    "**Abrir apps:** 'abre whatsapp', 'autocad', 'chrome'\n"
+                    "**Repos:** 'clona https://github.com/usuario/repo'\n"
+                    "**Archivos:** 'leer README.md', 'listar archivos'\n"
+                    "**Terminal:** 'ejecuta git status', 'npm run dev'\n\n"
+                    "**Lo especial:** Busco automaticamente las apps, aprendo de mis errores, y consulto IA cloud si me atasco.")
 
-        # Si no es un patron conocido, intentar con el LLM para respuesta mas inteligente
+        # Para todo lo demas, usar el LLM
         respuesta_llm = self._ask_llm([
-            {"role": "system", "content": "Eres un asistente amigable que habla espanol. Responde de forma concisa y natural. No uses markdown, solo texto plano."},
+            {"role": "system", "content": "Eres un asistente amigable que habla espanol. Responde de forma concisa y natural."},
             {"role": "user", "content": mensaje}
         ])
         if respuesta_llm:
             return respuesta_llm
 
-        # Si el LLM tampoco responde (Ollama caido)
-        return ("No puedo pensar bien ahora porque Ollama no esta corriendo. "
-                "Pero puedo ejecutar acciones! Prueba con:\n"
-                "- 'clona https://github.com/...'\n"
-                "- 'abre chrome'\n"
-                "- 'analiza signalTrade'\n"
-                "Para que piense, ejecuta 'ollama serve' en otra terminal.")
+        return ("No puedo pensar bien ahora (Ollama no esta corriendo). "
+                "Pero puedo ejecutar acciones! Prueba: 'abre chrome', 'clona https://github.com/...'")
 
     def _try_alternative(self, alternative: str, original_action: str, params: dict) -> str:
-        """Intenta una solucion alternativa cuando algo falla."""
         self._log(f"Intentando alternativa: {alternative}", "execution")
 
-        # Si la alternativa es un comando, ejecutarlo
         if alternative and len(alternative) > 3:
-            # Intentar parsear como instruccion
             alt_lower = alternative.lower()
 
-            # Si sugiere otro comando
             if any(w in alt_lower for w in ["ejecuta", "corre", "run", "usa", "usa el comando"]):
                 cmd = re.sub(r'(?:ejecuta|corre|run|usa|usa el comando)\s+', '', alternative, flags=re.IGNORECASE)
                 return ejecutar_comando(cmd.strip())
 
-            # Si sugiere otra herramienta
             for tool_name in TOOL_FUNCTIONS:
                 if tool_name in alt_lower:
                     return self._execute_tool(tool_name, params)
 
-            # Si sugiere listar o investigar
             if "lista" in alt_lower or "verifica" in alt_lower or "revisa" in alt_lower:
                 if "ruta" in params:
                     return listar_archivos(params.get("ruta", REPOS_DIR))
@@ -1192,53 +1038,19 @@ class AgentBrain:
         return ""
 
     def _fallback_plan(self, user_message: str) -> dict:
-        """Plan de emergencia cuando el LLM no responde."""
+        """Plan de emergencia cuando el LLM no responde. Usa heuristicas simples."""
         msg = user_message.lower().strip()
 
-        # === PRIMERO: Detectar si es CONVERSACION (saludos, preguntas, etc.) ===
-        conversacion_patterns = [
-            r'^(hola|hi|hello|hey|buenos dias|buenas|que tal|que onda|saludos)',
-            r'^(como estas|como te va|como andas|todo bien|que haces)',
-            r'^(gracias|thanks|genial|perfecto|ok|vale|bien|excelente)',
-            r'^(quien eres|que eres|que haces|para que sirves|que puedes hacer)',
-            r'^(ayuda|help|que puedes hacer|como funcionas)',
-            r'^(si|no|ok|vale|bien|ahora|ya)',
-        ]
-        for pattern in conversacion_patterns:
-            if re.match(pattern, msg):
-                return {
-                    "analisis": "El usuario esta conversando",
-                    "plan": [{"paso": 1, "accion": "conversar", "params": {"mensaje": user_message}, "razon": "Responder al usuario"}],
-                    "riesgos": [],
-                    "siguiente_paso_sugerido": ""
-                }
-
-        # Si es solo "hola?" o algo corto sin intencion de accion Y sin nombre de app
-        app_names = ["whatsapp", "telegram", "zoom", "teams", "skype", "discord", "spotify",
-                     "chrome", "firefox", "edge", "vscode", "notepad", "word", "excel", "powerpoint",
-                     "autocad", "revit", "photoshop", "illustrator", "figma", "blender", "sketchup",
-                     "3ds max", "rhino", "vlc", "paint", "outlook", "onenote", "postman"]
-        if len(msg.split()) <= 3 and not any(w in msg for w in ["clona", "abre", "instal", "ejecuta", "analiz", "leer", "listar"]) and not any(a in msg for a in app_names):
+        # Saludos obvios
+        saludos = ["hola", "hi", "hello", "hey", "buenos dias", "buenas", "que tal", "que onda", "saludos"]
+        if any(msg.startswith(s) for s in saludos) and len(msg.split()) <= 4:
             return {
-                "analisis": "El usuario esta conversando o preguntando algo simple",
-                "plan": [{"paso": 1, "accion": "conversar", "params": {"mensaje": user_message}, "razon": "Responder al usuario"}],
-                "riesgos": [],
-                "siguiente_paso_sugerido": ""
+                "analisis": "El usuario esta saludando",
+                "plan": [{"paso": 1, "accion": "conversar", "params": {"mensaje": user_message}, "razon": "Es un saludo"}],
+                "riesgos": [], "siguiente_paso_sugerido": ""
             }
 
-        # Si el mensaje corto contiene un nombre de app, abrir la app
-        if any(a in msg for a in app_names):
-            # Extraer el nombre de la app del mensaje
-            app_found = next((a for a in app_names if a in msg), "")
-            if app_found:
-                return {
-                    "analisis": f"Abrir aplicacion: {app_found}",
-                    "plan": [{"paso": 1, "accion": "abrir_aplicacion", "params": {"app": app_found}, "razon": f"El usuario menciona la app {app_found}"}],
-                    "riesgos": [f"{app_found} puede no estar instalado"],
-                    "siguiente_paso_sugerido": ""
-                }
-
-        # === SEGUNDO: Deteccion rapida de intenciones de accion ===
+        # URLs de GitHub
         github_urls = re.findall(r'https?://github\.com/[\w\-]+/[\w\-\.]+', user_message, re.IGNORECASE)
         if github_urls:
             url = github_urls[0].rstrip("/")
@@ -1250,10 +1062,10 @@ class AgentBrain:
                     {"paso": 1, "accion": "clonar_repositorio", "params": {"url": url}, "razon": "Clonar el repo"},
                     {"paso": 2, "accion": "analizar_proyecto", "params": {"ruta": repo_path}, "razon": "Analizar estructura"},
                 ],
-                "riesgos": [],
-                "siguiente_paso_sugerido": "Instalar dependencias si necesita"
+                "riesgos": [], "siguiente_paso_sugerido": "Instalar dependencias si necesita"
             }
 
+        # Acciones con verbos
         if any(w in msg for w in ["abre", "abrir", "open", "inicia", "lanza"]):
             app_match = re.search(r'(?:abre|abrir|open|inicia|lanza)\s+(.+)', msg, re.IGNORECASE)
             app = app_match.group(1).strip() if app_match else ""
@@ -1261,79 +1073,54 @@ class AgentBrain:
                 return {
                     "analisis": f"Abrir aplicacion: {app}",
                     "plan": [{"paso": 1, "accion": "abrir_aplicacion", "params": {"app": app}, "razon": "Abrir la app"}],
-                    "riesgos": ["Puede no estar instalada"],
-                    "siguiente_paso_sugerido": ""
+                    "riesgos": ["Puede no estar instalada"], "siguiente_paso_sugerido": ""
                 }
 
-        if any(w in msg for w in ["instal", "dependencias", "npm install"]):
+        if any(w in msg for w in ["instal", "dependencias"]):
             for d in os.listdir(REPOS_DIR):
                 if d.lower() in msg:
                     return {
                         "analisis": f"Instalar dependencias de {d}",
                         "plan": [{"paso": 1, "accion": "instalar_dependencias", "params": {"ruta": os.path.join(REPOS_DIR, d)}, "razon": "Instalar deps"}],
-                        "riesgos": ["Pueden faltar herramientas"],
-                        "siguiente_paso_sugerido": ""
+                        "riesgos": [], "siguiente_paso_sugerido": ""
                     }
 
-        if any(w in msg for w in ["analiz", "analiza", "analizar"]):
+        if any(w in msg for w in ["analiz", "analiza"]):
             for d in os.listdir(REPOS_DIR):
                 if d.lower() in msg:
                     return {
                         "analisis": f"Analizar proyecto {d}",
-                        "plan": [
-                            {"paso": 1, "accion": "analizar_proyecto", "params": {"ruta": os.path.join(REPOS_DIR, d)}, "razon": "Analizar estructura"},
-                            {"paso": 2, "accion": "leer_archivo", "params": {"ruta": os.path.join(REPOS_DIR, d, "README.md")}, "razon": "Leer documentacion"},
-                        ],
-                        "riesgos": [],
-                        "siguiente_paso_sugerido": "Instalar dependencias o revisar archivos especificos"
+                        "plan": [{"paso": 1, "accion": "analizar_proyecto", "params": {"ruta": os.path.join(REPOS_DIR, d)}, "razon": "Analizar"}],
+                        "riesgos": [], "siguiente_paso_sugerido": ""
                     }
-
-        if any(w in msg for w in ["leer", "muestra", "ver"]):
-            archivo_match = re.search(r'(?:leer|muestra|ver)\s+(.+)', msg, re.IGNORECASE)
-            archivo = archivo_match.group(1).strip() if archivo_match else ""
-            if archivo:
-                return {
-                    "analisis": f"Leer archivo: {archivo}",
-                    "plan": [{"paso": 1, "accion": "leer_archivo", "params": {"ruta": archivo}, "razon": "Mostrar contenido"}],
-                    "riesgos": ["Archivo puede no existir"],
-                    "siguiente_paso_sugerido": ""
-                }
-
-        if any(w in msg for w in ["listar", "lista", "archivos", "carpetas"]):
-            return {
-                "analisis": "Listar archivos del directorio de trabajo",
-                "plan": [{"paso": 1, "accion": "listar_archivos", "params": {"ruta": REPOS_DIR}, "razon": "Mostrar contenido del directorio"}],
-                "riesgos": [],
-                "siguiente_paso_sugerido": ""
-            }
 
         if any(w in msg for w in ["ejecuta", "corre", "run", "comando"]):
             cmd_match = re.search(r'(?:ejecuta|corre|run|comando)\s+(.+)', msg, re.IGNORECASE)
             cmd = cmd_match.group(1).strip() if cmd_match else ""
             if cmd:
                 return {
-                    "analisis": f"Ejecutar comando: {cmd}",
-                    "plan": [{"paso": 1, "accion": "ejecutar_comando", "params": {"comando": cmd}, "razon": "Ejecutar el comando solicitado"}],
-                    "riesgos": ["El comando puede fallar"],
-                    "siguiente_paso_sugerido": ""
+                    "analisis": f"Ejecutar: {cmd}",
+                    "plan": [{"paso": 1, "accion": "ejecutar_comando", "params": {"comando": cmd}, "razon": "Ejecutar comando"}],
+                    "riesgos": ["Puede fallar"], "siguiente_paso_sugerido": ""
                 }
 
-        if any(w in msg for w in ["busca", "buscar", "encuentra", "search"]):
-            # Busqueda web o en archivos
-            busqueda = re.sub(r'(?:busca|buscar|encuentra|search)\s+', '', msg, flags=re.IGNORECASE).strip()
+        # Si contiene algo que podria ser un nombre de app, intentar abrirlo
+        # (Heuristica: palabras con mayuscula inicial, o numeros de version como "2025")
+        words = msg.split()
+        has_version = any(re.match(r'\d{4}', w) for w in words)
+        if has_version or (len(words) <= 3 and len(words[0]) > 2):
+            # Podria ser una app
             return {
-                "analisis": f"Busqueda: {busqueda}",
-                "plan": [{"paso": 1, "accion": "conversar", "params": {"mensaje": user_message}, "razon": "Responder sobre la busqueda"}],
-                "riesgos": [],
-                "siguiente_paso_sugerido": "Si necesito buscar en internet, requeriria API de busqueda"
+                "analisis": f"Posible solicitud de abrir app: {user_message}",
+                "plan": [{"paso": 1, "accion": "abrir_aplicacion", "params": {"app": user_message.strip()}, "razon": "Parece una app, intentar abrirla"}],
+                "riesgos": ["Puede no ser una app"], "siguiente_paso_sugerido": ""
             }
 
-        # Si no se detecta nada claro, usar conversacion con LLM
+        # Default: conversar
         return {
-            "analisis": "No se detecto una accion clara, conversar con el usuario",
-            "plan": [{"paso": 1, "accion": "conversar", "params": {"mensaje": user_message}, "razon": "No es una accion clara, responder conversacionalmente"}],
-            "riesgos": [],
-            "siguiente_paso_sugerido": ""
+            "analisis": "No se detecto una accion clara",
+            "plan": [{"paso": 1, "accion": "conversar", "params": {"mensaje": user_message}, "razon": "Responder conversacionalmente"}],
+            "riesgos": [], "siguiente_paso_sugerido": ""
         }
 
     def _get_repos(self) -> list:
@@ -1345,25 +1132,17 @@ class AgentBrain:
 
 
 # ============================================================
-# MOTOR PRINCIPAL - Orquesta el pensamiento y la ejecucion
+# MOTOR PRINCIPAL
 # ============================================================
 
 brain = AgentBrain()
 
 def procesar_mensaje(user_message: str) -> tuple:
-    """
-    Procesamiento principal: PIENSA → PLANIFICA → EJECUTA → EVALUA
-    """
     brain.actions_taken = []
-
-    # === PASO 1: PENSAR ===
     brain._log(f"Mensaje del usuario: {user_message}", "input")
     plan = brain.think(user_message)
-
-    # === PASO 2: EJECUTAR ===
     results = brain.execute_plan(plan)
 
-    # === PASO 3: CONSTRUIR RESPUESTA ===
     respuesta = ""
     for i, r in enumerate(results, 1):
         action = r["action"]
@@ -1372,7 +1151,6 @@ def procesar_mensaje(user_message: str) -> tuple:
         evaluation = r.get("evaluation", {})
 
         if evaluation.get("exitoso", True):
-            # Conversacion: mostrar directamente sin caja de codigo
             if action == "conversar":
                 respuesta += f"{result}\n\n"
             else:
@@ -1382,70 +1160,47 @@ def procesar_mensaje(user_message: str) -> tuple:
             if evaluation.get("solucion_alternativa"):
                 respuesta += f"Intentando: {evaluation['solucion_alternativa']}\n\n"
 
-    # Agregar sugerencia de siguiente paso (solo si no es conversacion)
     is_conversation = any(r.get("action") == "conversar" for r in results)
     if plan.get("siguiente_paso_sugerido") and not is_conversation:
         respuesta += f"**Siguiente paso sugerido:** {plan['siguiente_paso_sugerido']}"
 
-    # Si no hubo resultados utiles Y no es conversacion, ofrecer consulta cloud
     if not is_conversation and (not results or all(not r.get("evaluation", {}).get("exitoso", True) for r in results)):
-        respuesta += "\n\nTuve problemas con la ejecucion. Quieres que consulte una IA cloud para encontrar una solucion?"
+        respuesta += "\n\nTuve problemas. Quieres que consulte una IA cloud?"
 
     return respuesta, brain.thinking_log
 
 
 # ============================================================
-# INTERFAZ STREAMLIT - Mejorada visualmente
+# INTERFAZ STREAMLIT
 # ============================================================
 
 def main():
     st.set_page_config(
-        page_title="Agente Autonomo v8.1",
+        page_title="Agente Autonomo v9",
         page_icon="🧠",
         layout="wide"
     )
 
-    # === ESTILOS CSS MEJORADOS ===
     st.markdown("""
     <style>
-    /* Fondo general */
-    .stApp {
-        max-width: 1200px;
-        margin: 0 auto;
-    }
+    .stApp { max-width: 1200px; margin: 0 auto; }
 
-    /* Titulo principal */
     .main-title {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
-        font-size: 2.2rem;
-        font-weight: 800;
-        text-align: center;
-        margin-bottom: 0.3rem;
+        font-size: 2.2rem; font-weight: 800; text-align: center; margin-bottom: 0.3rem;
     }
-
     .main-subtitle {
-        text-align: center;
-        color: #888;
-        font-size: 0.9rem;
-        margin-bottom: 1.5rem;
+        text-align: center; color: #888; font-size: 0.9rem; margin-bottom: 1.5rem;
     }
 
-    /* Caja de pensamiento */
     .thinking-box {
         background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
-        color: #00ff88;
-        padding: 16px;
-        border-radius: 12px;
-        font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-        font-size: 11px;
-        max-height: 400px;
-        overflow-y: auto;
-        white-space: pre-wrap;
-        word-break: break-all;
-        border: 1px solid rgba(100, 100, 255, 0.2);
-        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+        color: #00ff88; padding: 16px; border-radius: 12px;
+        font-family: 'Consolas', 'Monaco', monospace; font-size: 11px;
+        max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+        border: 1px solid rgba(100, 100, 255, 0.2); box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
     }
     .thinking-box .thinking { color: #88aaff; }
     .thinking-box .plan { color: #ffaa44; }
@@ -1456,90 +1211,24 @@ def main():
     .thinking-box .cloud { color: #44aaff; }
     .thinking-box .input { color: #88ff88; }
 
-    /* Mensajes del chat mejorados */
-    [data-testid="stChatMessage"] {
-        border-radius: 12px;
-        padding: 12px 16px;
-        margin: 4px 0;
-    }
+    [data-testid="stChatMessage"] { border-radius: 12px; padding: 12px 16px; margin: 4px 0; }
 
-    /* Mensaje del usuario */
-    [data-testid="stChatMessage"][data-testid="stChatMessage-user"] {
-        background: linear-gradient(135deg, #1a1a3e 0%, #2d2d5e 100%);
-        border: 1px solid rgba(100, 100, 255, 0.15);
-    }
+    .stButton > button { border-radius: 8px; transition: all 0.2s; }
+    .stButton > button:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(100, 100, 255, 0.3); }
 
-    /* Mensaje del asistente */
-    [data-testid="stChatMessage"][data-testid="stChatMessage-assistant"] {
-        background: linear-gradient(135deg, #1a2e1a 0%, #1a3e2d 100%);
-        border: 1px solid rgba(0, 255, 136, 0.1);
-    }
-
-    /* Input del chat */
-    [data-testid="stChatInput"] {
-        border-radius: 16px;
-    }
-
-    /* Botones del sidebar */
-    .stButton > button {
-        border-radius: 8px;
-        transition: all 0.2s;
-    }
-    .stButton > button:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 4px 12px rgba(100, 100, 255, 0.3);
-    }
-
-    /* Metricas */
-    [data-testid="stMetricValue"] {
-        font-size: 1.5rem;
-        font-weight: 700;
-    }
-
-    /* Scrollbar personalizada */
-    ::-webkit-scrollbar {
-        width: 6px;
-    }
-    ::-webkit-scrollbar-track {
-        background: rgba(0, 0, 0, 0.1);
-        border-radius: 3px;
-    }
-    ::-webkit-scrollbar-thumb {
-        background: rgba(100, 100, 255, 0.3);
-        border-radius: 3px;
-    }
-    ::-webkit-scrollbar-thumb:hover {
-        background: rgba(100, 100, 255, 0.5);
-    }
-
-    /* Expander de pensamiento */
-    .streamlit-expanderHeader {
-        background: linear-gradient(135deg, #1a1a3e 0%, #2d2d5e 100%) !important;
-        border-radius: 8px !important;
-        border: 1px solid rgba(100, 100, 255, 0.15) !important;
-    }
-
-    /* Status indicators */
-    .status-ok {
-        color: #00ff88;
-        font-weight: 600;
-    }
-    .status-fail {
-        color: #ff4444;
-        font-weight: 600;
-    }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.1); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb { background: rgba(100, 100, 255, 0.3); border-radius: 3px; }
     </style>
     """, unsafe_allow_html=True)
 
-    # Session state
     if "messages" not in st.session_state:
         st.session_state.messages = []
     if "thinking_history" not in st.session_state:
         st.session_state.thinking_history = []
 
-    # Titulo con estilo
-    st.markdown('<div class="main-title">Agente Autonomo v8.1</div>', unsafe_allow_html=True)
-    st.markdown('<div class="main-subtitle">Piensa → Planifica → Ejecuta → Evalua → Aprende — Consulta IA cloud si se atasca</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-title">Agente Autonomo v9</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-subtitle">Piensa → Planifica → Ejecuta → Evalua → Aprende → Se corrige</div>', unsafe_allow_html=True)
 
     # === SIDEBAR ===
     with st.sidebar:
@@ -1547,11 +1236,9 @@ def main():
         st.write(f"**Modelo:** {AGENT_MODEL}")
         st.write(f"**Repos:** {REPOS_DIR}")
 
-        # === TEST DE CONEXION OLLAMA ===
         st.header("Ollama Status")
         if st.button("Test conexion Ollama", use_container_width=True):
-            with st.spinner("Probando conexion..."):
-                # Probar conexion de 4 formas
+            with st.spinner("Probando..."):
                 try:
                     import ollama
                     try:
@@ -1559,35 +1246,30 @@ def main():
                         st.success("ollama.chat() - CONECTA")
                     except:
                         st.error("ollama.chat() - FALLA")
-
                     try:
                         client = ollama.Client(host='http://localhost:11434')
                         r = client.list()
-                        st.success("Client(localhost:11434) - CONECTA")
+                        st.success("Client(localhost) - CONECTA")
                     except Exception as e:
-                        st.error(f"Client(localhost) - FALLA: {e}")
-
+                        st.error(f"Client(localhost) - FALLA")
                     try:
                         client = ollama.Client(host='http://127.0.0.1:11434')
                         r = client.list()
                         st.success("Client(127.0.0.1) - CONECTA")
-                    except Exception as e:
-                        st.error(f"Client(127.0.0.1) - FALLA: {e}")
+                    except:
+                        st.error("Client(127.0.0.1) - FALLA")
                 except ImportError:
                     st.error("Libreria ollama no instalada")
-
-                # Test HTTP directo
                 try:
                     import urllib.request
                     req = urllib.request.Request("http://localhost:11434/api/tags")
                     with urllib.request.urlopen(req, timeout=5) as resp:
                         data = json.loads(resp.read().decode("utf-8"))
                         models = [m["name"] for m in data.get("models", [])]
-                        st.success(f"HTTP directo - CONECTA. Modelos: {models}")
+                        st.success(f"HTTP directo - Modelos: {models}")
                 except Exception as e:
-                    st.error(f"HTTP directo - FALLA: {e}")
+                    st.error(f"HTTP directo - FALLA")
 
-        # Mostrar estado rapido
         try:
             import urllib.request
             req = urllib.request.Request("http://localhost:11434/api/tags")
@@ -1603,6 +1285,19 @@ def main():
         col1, col2 = st.columns(2)
         col1.metric("Conocimiento", stats["knowledge"])
         col2.metric("Correcciones", stats["corrections"])
+
+        # === CORRECCIONES ===
+        st.header("Corregir agente")
+        st.caption("Si se equivoco, ensenale para que no repita el error")
+        correction_msg = st.text_input("Que dijiste?", key="corr_msg")
+        correction_wrong = st.text_input("Que hizo mal?", key="corr_wrong")
+        correction_right = st.text_input("Que debia hacer?", key="corr_right")
+        if st.button("Guardar correccion", use_container_width=True):
+            if correction_msg and correction_wrong and correction_right:
+                learning.save_correction(correction_msg, correction_wrong, correction_right)
+                st.success("Correccion guardada! No repetira este error.")
+            else:
+                st.warning("Completa los 3 campos")
 
         st.header("IA Cloud")
         groq_key = os.environ.get("GROQ_API_KEY", "")
@@ -1629,7 +1324,6 @@ def main():
         except:
             st.write("Sin repos")
 
-        # Ver pensamiento historico
         st.header("Historial de pensamiento")
         if st.session_state.thinking_history:
             for i, th in enumerate(st.session_state.thinking_history[-5:]):
@@ -1652,11 +1346,9 @@ def main():
                 try:
                     respuesta, thinking_log = procesar_mensaje(prompt)
 
-                    # Mostrar proceso de pensamiento
                     if thinking_log:
                         thinking_text = "\n".join(thinking_log)
                         st.session_state.thinking_history.append(thinking_text)
-
                         with st.expander("Proceso de pensamiento (click para ver)", expanded=False):
                             st.markdown(f'<div class="thinking-box">{thinking_text}</div>',
                                        unsafe_allow_html=True)
