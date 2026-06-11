@@ -6,6 +6,8 @@ Singleton con cache de conexion persistente.
 - Cache en archivo JSON (sobrevive reinicios)
 - Timeout agresivo con 1 solo reintento
 - Modelo dual: chat rapido vs code potente
+- Streaming para respuestas en tiempo real
+- Deteccion de GPU para diagnosticar lentitud
 =============================================================
 """
 
@@ -67,6 +69,7 @@ class OllamaClient:
     """
     Singleton que maneja la conexion a Ollama.
     Cachea la conexion exitosa en archivo JSON para sobrevivir reinicios.
+    Soporta streaming para respuestas en tiempo real.
     """
 
     _instance = None
@@ -82,6 +85,7 @@ class OllamaClient:
         self._models_list = None
         self._detected = False
         self._client = None
+        self._gpu_status = None  # None = no verificado, True/False
 
     @classmethod
     def get(cls):
@@ -202,6 +206,52 @@ class OllamaClient:
         self.embed_model = "nomic-embed-text"  # Default
 
     # ----------------------------------------------------------
+    # DETECCION DE GPU
+    # ----------------------------------------------------------
+
+    def check_gpu_status(self):
+        """
+        Verifica si Ollama esta usando la GPU.
+        Retorna: True (GPU), False (CPU), None (no se pudo determinar)
+        """
+        if self._gpu_status is not None:
+            return self._gpu_status
+
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["ollama", "ps"],
+                capture_output=True, text=True, timeout=5
+            )
+            output = result.stdout
+            if "100% CPU" in output:
+                self._gpu_status = False
+                logger.warning("GPU NO detectada por Ollama - corriendo en CPU (LENTO)")
+            elif "GPU" in output:
+                self._gpu_status = True
+                logger.info("Ollama esta usando GPU")
+            else:
+                # No hay modelo cargado, verificar con nvidia-smi
+                try:
+                    nvidia = subprocess.run(
+                        ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    if nvidia.returncode == 0 and nvidia.stdout.strip():
+                        logger.info(f"GPU NVIDIA detectada: {nvidia.stdout.strip()}")
+                        # GPU existe pero no sabemos si Ollama la usa
+                        self._gpu_status = None
+                    else:
+                        self._gpu_status = False
+                except Exception:
+                    self._gpu_status = False
+        except Exception as e:
+            logger.debug(f"No se pudo verificar GPU: {e}")
+            self._gpu_status = None
+
+        return self._gpu_status
+
+    # ----------------------------------------------------------
     # CACHE PERSISTENTE DE CONEXION
     # ----------------------------------------------------------
 
@@ -236,7 +286,7 @@ class OllamaClient:
             pass
 
     # ----------------------------------------------------------
-    # GENERACION
+    # GENERACION (sin streaming)
     # ----------------------------------------------------------
 
     def _get_timeout(self, model_name):
@@ -298,6 +348,171 @@ class OllamaClient:
     def generate_code(self, messages):
         """Para codigo: usa modelo potente."""
         return self.generate(messages, model_override=self.code_model)
+
+    # ----------------------------------------------------------
+    # GENERACION CON STREAMING
+    # ----------------------------------------------------------
+
+    def generate_stream(self, messages, tools=None, model_override=None):
+        """
+        Genera respuesta del LLM con streaming.
+        Yields: str (tokens de texto) o dict (resultado final con tool_calls).
+        El llamador itera sobre los chunks para streaming en tiempo real.
+        Retorna None si todo falla (el llamador debe usar generate() como fallback).
+        """
+        self.detect_models()
+        model = model_override or self.model
+
+        # Probar hosts en orden
+        hosts = [self.host] if self.host else ['http://localhost:11434', 'http://127.0.0.1:11434']
+        hosts = [h for h in hosts if h]  # Filtrar None
+        if not hosts:
+            hosts = ['http://localhost:11434', 'http://127.0.0.1:11434']
+
+        for host in hosts:
+            # Intentar streaming HTTP directo (mas rapido)
+            stream = self._try_stream_http(host, model, messages, tools)
+            if stream is not None:
+                yield from stream
+                return
+
+            # Intentar streaming via client
+            stream = self._try_stream_client(host, model, messages, tools)
+            if stream is not None:
+                yield from stream
+                return
+
+        # Ultimo fallback: sin streaming
+        result = self.generate(messages, tools=tools, model_override=model_override)
+        if result:
+            if isinstance(result, str):
+                yield result
+            elif isinstance(result, dict):
+                yield result
+            return
+        return
+
+    def _try_stream_http(self, host, model, messages, tools):
+        """Intenta streaming HTTP. Retorna generador o None si falla."""
+        try:
+            import urllib.request
+            payload = {
+                "model": model,
+                "messages": messages,
+                "stream": True
+            }
+            if tools:
+                payload["tools"] = tools
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                f"{host}/api/chat",
+                data=data,
+                headers={"Content-Type": "application/json"}
+            )
+
+            def _stream():
+                with urllib.request.urlopen(req, timeout=LLM_TIMEOUT_LARGE) as resp:
+                    full_content = ""
+                    full_tool_calls = []
+                    for line in resp:
+                        line = line.decode("utf-8").strip()
+                        if not line:
+                            continue
+                        try:
+                            chunk = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+
+                        msg = chunk.get("message", {})
+                        content = msg.get("content", "")
+                        tool_calls = msg.get("tool_calls", [])
+
+                        if content:
+                            full_content += content
+                            yield content
+
+                        if tool_calls:
+                            full_tool_calls.extend(tool_calls)
+
+                        if chunk.get("done", False):
+                            self.host = host
+                            self.method = 'http'
+                            self._save_connection_cache()
+
+                            if full_tool_calls:
+                                yield {
+                                    "message": {
+                                        "content": full_content,
+                                        "tool_calls": full_tool_calls
+                                    }
+                                }
+                            return
+
+            # Test rapido: verificar que podemos abrir la conexion
+            test_req = urllib.request.Request(
+                f"{host}/api/tags",
+                headers={"Content-Type": "application/json"}
+            )
+            urllib.request.urlopen(test_req, timeout=3)
+            return _stream()
+        except Exception as e:
+            logger.debug(f"HTTP streaming setup failed: {e}")
+        return None
+
+    def _try_stream_client(self, host, model, messages, tools):
+        """Intenta streaming via ollama.Client. Retorna generador o None si falla."""
+        try:
+            import ollama as ollama_lib
+            client = ollama_lib.Client(host=host)
+
+            def _stream():
+                full_content = ""
+                full_tool_calls = []
+
+                if tools:
+                    # ollama client no soporta streaming con tools
+                    # Usar modo no-streaming y yield todo de golpe
+                    response = client.chat(model=model, messages=messages, tools=tools)
+                    msg = response.get("message", response)
+                    content = msg.get("content", "")
+                    tool_calls = msg.get("tool_calls", [])
+
+                    if content:
+                        full_content = content
+                        yield content
+                    if tool_calls:
+                        full_tool_calls = tool_calls
+
+                    self.host = host
+                    self.method = 'client'
+                    self._save_connection_cache()
+
+                    if full_tool_calls:
+                        yield {"message": {"content": full_content, "tool_calls": full_tool_calls}}
+                    return
+                else:
+                    stream = client.chat(model=model, messages=messages, stream=True)
+                    for chunk in stream:
+                        msg = chunk.get("message", {})
+                        content = msg.get("content", "")
+                        if content:
+                            full_content += content
+                            yield content
+
+                        if chunk.get("done", False):
+                            self.host = host
+                            self.method = 'client'
+                            self._save_connection_cache()
+                            return
+
+            return _stream()
+        except Exception as e:
+            logger.debug(f"Client streaming setup failed: {e}")
+        return None
+
+    # ----------------------------------------------------------
+    # METODOS INTERNOS
+    # ----------------------------------------------------------
 
     def _try_method(self, host, method, model, messages, tools, timeout):
         """Intenta una combinacion de host/metodo/modelo. Retorna None si falla."""
@@ -380,7 +595,7 @@ class OllamaClient:
                 pass
 
     # ----------------------------------------------------------
-    # EMBEDDINGS
+    # EMBEDDINGS (con cache optimizado)
     # ----------------------------------------------------------
 
     def get_embedding(self, text):

@@ -62,9 +62,9 @@ EMBED_MODEL_CANDIDATES = ["nomic-embed-text", "mxbai-embed-large", "all-minilm"]
 # ============================================================
 # LIMITES
 # ============================================================
-MAX_REACT_ITERATIONS = 8         # Max vueltas del bucle ReAct
-MAX_CONVERSATION_MEMORY = 20     # Mensajes de contexto que recuerda
-MAX_CONTEXT_CHARS = 3000         # Budget de chars para contexto enriquecido
+MAX_REACT_ITERATIONS = 6         # Max vueltas del bucle ReAct (reducido de 8 para velocidad)
+MAX_CONVERSATION_MEMORY = 15     # Mensajes de contexto que recuerda (reducido de 20)
+MAX_CONTEXT_CHARS = 2000         # Budget de chars para contexto enriquecido (reducido de 3000)
 MAX_FILE_READ = 8000             # Max chars al leer un archivo
 MAX_TOOL_OUTPUT = 3000           # Max chars en salida de herramienta
 MAX_EMBED_CACHE = 200            # Maximo entradas en cache de embeddings
@@ -72,13 +72,20 @@ MAX_VECTORS_IN_MEMORY = 500      # Maximo vectores cargados en RAM
 CONNECTION_CACHE_DAYS = 7        # Dias que se guarda la conexion Ollama cacheada
 
 # ============================================================
+# RENDIMIENTO
+# ============================================================
+SKIP_EMBED_ON_INTERACTION = True  # Saltar embedding al guardar interacciones (mas rapido)
+USE_STREAMING = True              # Usar streaming por defecto
+GPU_CHECK_ON_START = True         # Verificar GPU al iniciar el agente
+
+# ============================================================
 # TIMEOUTS
 # ============================================================
-DEFAULT_TIMEOUT = 120            # Segundos para comandos normales
+DEFAULT_TIMEOUT = 90             # Segundos para comandos normales (reducido)
 LONG_TIMEOUT = 300               # Segundos para install/build/docker
-LLM_TIMEOUT_SMALL = 120          # Timeout para modelos <=8b
-LLM_TIMEOUT_LARGE = 180          # Timeout para modelos >=14b
-EMBED_TIMEOUT = 15               # Timeout para embeddings
+LLM_TIMEOUT_SMALL = 90           # Timeout para modelos <=8b (reducido de 120)
+LLM_TIMEOUT_LARGE = 150          # Timeout para modelos >=14b (reducido de 180)
+EMBED_TIMEOUT = 10               # Timeout para embeddings (reducido de 15)
 WEB_TIMEOUT = 10                 # Timeout para busquedas web
 
 # ============================================================

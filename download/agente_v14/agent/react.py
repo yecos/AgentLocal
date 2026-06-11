@@ -3,8 +3,9 @@
 AGENTE v14 - Motor ReAct
 =============================================================
 Piensa -> Actua -> Observa -> Piensa de nuevo -> Repite.
-v14: Usa TripleMemory como unica fuente de historial.
-     Inyeccion de dependencias (memory, llm).
+v14.3: Streaming REAL token-a-token, metacognicion integrada,
+       optimizacion de contexto y llamadas API.
+       Usa TripleMemory como unica fuente de historial.
 =============================================================
 """
 
@@ -21,6 +22,7 @@ from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS
 from memory.triple_memory import TripleMemory, learning
 from llm import ollama
 from agent.schemas import SYSTEM_PROMPT, JSON_TOOLS_PROMPT
+from agent.metacognition import Metacognition
 
 
 class ReactAgent:
@@ -30,22 +32,26 @@ class ReactAgent:
         self.memory = memory or TripleMemory()
         self.thinking_log = []
         self.supports_tool_calling = None
+        self.metacognition = Metacognition()
+        self._models_cache = None  # Cache de modelos para no llamar API cada vez
 
     def _log(self, message, category="info"):
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.thinking_log.append(f"[{timestamp}] [{category.upper()}] {message}")
 
+    # ----------------------------------------------------------
+    # RUN SIN STREAMING (original, para compatibilidad)
+    # ----------------------------------------------------------
     def run(self, user_message):
         """
         Bucle ReAct principal. Retorna (respuesta, thinking_log).
         """
         self.thinking_log = []
+        self.metacognition.reset()
         self._log(f"Mensaje del usuario: {user_message}", "input")
 
-        # Construir mensajes con memoria conversacional
         messages = self._build_messages(user_message)
 
-        # Detectar si el modelo soporta tool calling (primera vez)
         if self.supports_tool_calling is None:
             self.supports_tool_calling = self._detect_tool_calling_support()
             self._log(
@@ -53,9 +59,13 @@ class ReactAgent:
                 "info"
             )
 
-        # BUCLE ReAct
         for iteration in range(MAX_REACT_ITERATIONS):
             self._log(f"--- Iteracion {iteration + 1}/{MAX_REACT_ITERATIONS} ---", "react")
+
+            meta_prompt = self.metacognition.get_metacognitive_prompt(iteration)
+            if meta_prompt:
+                self._log("Alerta metacognitiva inyectada", "evaluation")
+                self._inject_metacognitive_prompt(messages, meta_prompt)
 
             if self.supports_tool_calling:
                 action_result = self._react_with_tools(messages, iteration)
@@ -64,63 +74,277 @@ class ReactAgent:
 
             if action_result[0] == "respond":
                 final_response = action_result[1]
-                self._log("Respuesta final generada", "success")
-                # Guardar en Triple Memoria
-                self.memory.add_conversation("user", user_message)
-                self.memory.add_conversation("assistant", final_response)
-                # Aprender de la interaccion
-                self.memory.remember(
-                    f"Usuario pregunto: {user_message[:100]} -> Respuesta: {final_response[:200]}",
-                    metadata={"type": "interaction", "user_msg": user_message[:50]}
+                reflection = self.metacognition.evaluate_result(
+                    user_message, final_response, iteration + 1
                 )
-                self.memory.set_success(final_response[:100])
+                self._log(
+                    f"Evaluacion: {reflection['assessment']} "
+                    f"(confianza={reflection['confidence_final']})",
+                    "evaluation"
+                )
+                for lesson in reflection.get("lessons", []):
+                    learning.add_knowledge(lesson, source="metacognition")
+                self._log("Respuesta final generada", "success")
+                self._save_interaction(user_message, final_response)
                 return final_response, self.thinking_log
 
-            elif action_result[0] == "tool_call":
-                tool_name = action_result[1]
-                tool_params = action_result[2]
-
-                self._log(f"Ejecutando: {tool_name}({tool_params})", "execution")
-                tool_result = self._execute_tool(tool_name, tool_params)
-                self._log(f"Resultado: {tool_result[:150]}...", "observation")
-
-                # Alimentar memoria de trabajo
-                self.memory.add_step(f"{tool_name}({tool_params})", tool_result[:200])
-                if "ERROR" in tool_result:
-                    self.memory.set_error(f"{tool_name}: {tool_result[:100]}")
-                if len(tool_result) > 50 and "ERROR" not in tool_result:
-                    self.memory.remember(
-                        f"Resultado de {tool_name}: {tool_result[:300]}",
-                        metadata={"type": "tool_result", "tool": tool_name}
+            elif action_result[0] == "tool_calls":
+                tool_calls = action_result[1]
+                for tc in tool_calls:
+                    self.metacognition.record_iteration(
+                        iteration=iteration, action_type="tool_call", tool_name=tc["name"]
                     )
-
-                # Alimentar resultado de vuelta al agente
-                if self.supports_tool_calling:
-                    messages.append({"role": "assistant", "content": "",
-                                     "tool_calls": [{
-                                         "function": {"name": tool_name, "arguments": tool_params}
-                                     }]})
-                    messages.append({"role": "tool", "content": tool_result})
-                else:
-                    messages.append({"role": "assistant",
-                                     "content": json.dumps({
-                                         "pensamiento": f"Ejecute {tool_name}",
-                                         "accion": tool_name,
-                                         "params": tool_params
-                                     })})
-                    messages.append({"role": "user",
-                                     "content": f"Resultado de {tool_name}: {tool_result}\n\nQue hago ahora? Responde con JSON."})
+                results = self._execute_tool_calls(tool_calls, messages)
+                for tc, res in zip(tool_calls, results):
+                    had_error = "ERROR" in res
+                    self.metacognition.record_iteration(
+                        iteration=iteration, action_type="tool_result",
+                        tool_name=tc["name"], result_summary=res[:200], had_error=had_error
+                    )
+                self._feed_tool_results(tool_calls, results, messages)
 
             elif action_result[0] == "error":
                 self._log(f"Error: {action_result[1]}", "error")
+                self.metacognition.record_iteration(
+                    iteration=iteration, action_type="error", had_error=True
+                )
                 if iteration >= MAX_REACT_ITERATIONS - 1:
                     return "Tuve problemas para procesar tu solicitud. Puedes reformularla?", self.thinking_log
 
         self._log("Alcanzado limite de iteraciones", "warning")
         return "Alcance el limite de iteraciones. Puede que necesites ser mas especifico.", self.thinking_log
 
+    # ----------------------------------------------------------
+    # RUN CON STREAMING REAL (token a token)
+    # ----------------------------------------------------------
+    def run_stream(self, user_message):
+        """
+        Bucle ReAct con streaming REAL. Yields cada token al instante.
+        Eventos: {"type": "text"|"tool_start"|"tool_result"|"meta"|"done", "data": ...}
+        """
+        self.thinking_log = []
+        self.metacognition.reset()
+        self._log(f"Mensaje del usuario: {user_message}", "input")
+
+        messages = self._build_messages(user_message)
+
+        if self.supports_tool_calling is None:
+            self.supports_tool_calling = self._detect_tool_calling_support()
+            self._log(
+                f"Tool calling nativo: {'SI' if self.supports_tool_calling else 'NO (usando JSON fallback)'}",
+                "info"
+            )
+
+        for iteration in range(MAX_REACT_ITERATIONS):
+            self._log(f"--- Iteracion {iteration + 1}/{MAX_REACT_ITERATIONS} ---", "react")
+
+            # Check metacognitivo
+            meta_prompt = self.metacognition.get_metacognitive_prompt(iteration)
+            if meta_prompt:
+                self._log("Alerta metacognitiva inyectada", "evaluation")
+                self._inject_metacognitive_prompt(messages, meta_prompt)
+                yield {
+                    "type": "meta",
+                    "data": {
+                        "confidence": self.metacognition.confidence,
+                        "errors": self.metacognition.error_count,
+                        "successes": self.metacognition.success_count,
+                        "plan_changes": self.metacognition.plan_changes,
+                    }
+                }
+
+            # ---- NUCLEO: Streaming token-a-token ----
+            full_text = ""
+            tool_calls_found = []
+            is_final_response = False
+
+            if self.supports_tool_calling:
+                # Stream del LLM y procesar en tiempo real
+                for event in self._stream_llm_with_tools(messages):
+                    if event["type"] == "token":
+                        full_text += event["data"]
+                        yield {"type": "text", "data": event["data"]}
+                    elif event["type"] == "tool_calls":
+                        tool_calls_found = event["data"]
+                    elif event["type"] == "done":
+                        is_final_response = event["data"]  # True si es respuesta final
+            else:
+                # JSON fallback (sin streaming real)
+                result_type, result_data = self._react_with_json(messages, iteration)
+                if result_type == "respond":
+                    full_text = result_data
+                    yield {"type": "text", "data": result_data}
+                    is_final_response = True
+                elif result_type == "tool_calls":
+                    tool_calls_found = result_data
+                elif result_type == "error":
+                    self._log(f"Error: {result_data}", "error")
+                    self.metacognition.record_iteration(
+                        iteration=iteration, action_type="error", had_error=True
+                    )
+                    if iteration >= MAX_REACT_ITERATIONS - 1:
+                        yield {
+                            "type": "done",
+                            "data": "Tuve problemas para procesar tu solicitud. Puedes reformularla?",
+                            "thinking_log": self.thinking_log,
+                            "meta_status": self.metacognition.get_status(),
+                        }
+                        return
+                    continue
+
+            # Procesar resultado de esta iteracion
+            if is_final_response and not tool_calls_found:
+                # Respuesta final - terminar
+                reflection = self.metacognition.evaluate_result(
+                    user_message, full_text, iteration + 1
+                )
+                self._log(
+                    f"Evaluacion: {reflection['assessment']} (confianza={reflection['confidence_final']})",
+                    "evaluation"
+                )
+                for lesson in reflection.get("lessons", []):
+                    learning.add_knowledge(lesson, source="metacognition")
+
+                self._log("Respuesta final generada (streaming)", "success")
+                self._save_interaction(user_message, full_text)
+                yield {
+                    "type": "done",
+                    "data": full_text,
+                    "thinking_log": self.thinking_log,
+                    "meta_status": self.metacognition.get_status(),
+                }
+                return
+
+            elif tool_calls_found:
+                # Ejecutar tool calls
+                for tc in tool_calls_found:
+                    self.metacognition.record_iteration(
+                        iteration=iteration, action_type="tool_call", tool_name=tc["name"]
+                    )
+                    yield {"type": "tool_start", "data": tc}
+
+                results = self._execute_tool_calls(tool_calls_found, messages)
+
+                for tc, res in zip(tool_calls_found, results):
+                    had_error = "ERROR" in res
+                    self.metacognition.record_iteration(
+                        iteration=iteration, action_type="tool_result",
+                        tool_name=tc["name"], result_summary=res[:200], had_error=had_error
+                    )
+                    yield {"type": "tool_result", "data": {"tool": tc, "result": res}}
+
+                self._feed_tool_results(tool_calls_found, results, messages)
+
+            elif not full_text:
+                # Ni respuesta ni tool calls - error
+                self._log("Respuesta vacia del modelo", "error")
+                self.metacognition.record_iteration(
+                    iteration=iteration, action_type="error", had_error=True
+                )
+                if iteration >= MAX_REACT_ITERATIONS - 1:
+                    yield {
+                        "type": "done",
+                        "data": "Tuve problemas para procesar tu solicitud. Puedes reformularla?",
+                        "thinking_log": self.thinking_log,
+                        "meta_status": self.metacognition.get_status(),
+                    }
+                    return
+
+        # Limite de iteraciones
+        yield {
+            "type": "done",
+            "data": "Alcance el limite de iteraciones. Puede que necesites ser mas especifico.",
+            "thinking_log": self.thinking_log,
+            "meta_status": self.metacognition.get_status(),
+        }
+
+    # ----------------------------------------------------------
+    # STREAMING LLM CON TOOL CALLING (token a token)
+    # ----------------------------------------------------------
+    def _stream_llm_with_tools(self, messages):
+        """
+        Genera respuesta del LLM con streaming REAL.
+        Yields: {"type": "token"|"tool_calls"|"done", "data": ...}
+        """
+        full_content = ""
+        full_tool_calls = []
+
+        try:
+            # Intentar streaming HTTP directo (mas rapido, sin overhead de lib)
+            for chunk in ollama.generate_stream(messages, tools=TOOL_SCHEMAS):
+                if isinstance(chunk, str):
+                    # Token de texto - emitir inmediatamente
+                    full_content += chunk
+                    yield {"type": "token", "data": chunk}
+                elif isinstance(chunk, dict):
+                    # Resultado final con tool_calls
+                    msg = chunk.get("message", chunk)
+                    tool_calls = msg.get("tool_calls", [])
+                    content = msg.get("content", "")
+
+                    if content and not full_content:
+                        # Contenido que no se streameo (fallback)
+                        full_content = content
+                        yield {"type": "token", "data": content}
+
+                    if tool_calls:
+                        # Parsear tool calls
+                        parsed_calls = []
+                        for tc in tool_calls:
+                            tool_name = tc.get("function", {}).get("name", "")
+                            tool_params = tc.get("function", {}).get("arguments", {})
+                            self._log(f"Tool call: {tool_name}({tool_params})", "thinking")
+                            parsed_calls.append({"name": tool_name, "params": tool_params})
+                        yield {"type": "tool_calls", "data": parsed_calls}
+                        yield {"type": "done", "data": False}
+                        return
+
+            # Si llegamos aqui sin tool_calls, es respuesta final
+            if full_content:
+                yield {"type": "done", "data": True}
+                return
+
+        except Exception as e:
+            self._log(f"Error en streaming: {e}", "error")
+
+        # Fallback: modo no-streaming
+        try:
+            response = ollama.generate(messages, tools=TOOL_SCHEMAS)
+            if isinstance(response, str):
+                yield {"type": "token", "data": response}
+                yield {"type": "done", "data": True}
+                return
+
+            message = response.get("message", response)
+            tool_calls = message.get("tool_calls", [])
+            content = message.get("content", "")
+
+            if tool_calls:
+                parsed_calls = []
+                for tc in tool_calls:
+                    tool_name = tc.get("function", {}).get("name", "")
+                    tool_params = tc.get("function", {}).get("arguments", {})
+                    self._log(f"Tool call: {tool_name}({tool_params})", "thinking")
+                    parsed_calls.append({"name": tool_name, "params": tool_params})
+                yield {"type": "tool_calls", "data": parsed_calls}
+                yield {"type": "done", "data": False}
+                return
+
+            if content:
+                yield {"type": "token", "data": content}
+                yield {"type": "done", "data": True}
+                return
+
+        except Exception as e:
+            self._log(f"Error en fallback: {e}", "error")
+
+        yield {"type": "done", "data": False}
+
+    # ----------------------------------------------------------
+    # REACT CON TOOL CALLING (sin streaming)
+    # ----------------------------------------------------------
     def _react_with_tools(self, messages, iteration):
-        """ReAct usando function calling nativo."""
+        """ReAct usando function calling nativo. Soporta multiple tool calls."""
         try:
             response = ollama.generate(messages, tools=TOOL_SCHEMAS)
 
@@ -131,11 +355,13 @@ class ReactAgent:
             tool_calls = message.get("tool_calls", [])
 
             if tool_calls:
-                tc = tool_calls[0]
-                tool_name = tc.get("function", {}).get("name", "")
-                tool_params = tc.get("function", {}).get("arguments", {})
-                self._log(f"Tool call: {tool_name}({tool_params})", "thinking")
-                return ("tool_call", tool_name, tool_params)
+                parsed_calls = []
+                for tc in tool_calls:
+                    tool_name = tc.get("function", {}).get("name", "")
+                    tool_params = tc.get("function", {}).get("arguments", {})
+                    self._log(f"Tool call: {tool_name}({tool_params})", "thinking")
+                    parsed_calls.append({"name": tool_name, "params": tool_params})
+                return ("tool_calls", parsed_calls)
 
             content = message.get("content", "")
             if content:
@@ -148,6 +374,9 @@ class ReactAgent:
             self.supports_tool_calling = False
             return ("error", str(e))
 
+    # ----------------------------------------------------------
+    # REACT CON JSON FALLBACK
+    # ----------------------------------------------------------
     def _react_with_json(self, messages, iteration):
         """ReAct usando JSON parsing (fallback)."""
         if not any("HERRAMIENTAS DISPONIBLES" in str(m.get("content", "")) for m in messages):
@@ -175,16 +404,99 @@ class ReactAgent:
                 self._log(f"Pensamiento: {pensamiento}", "thinking")
 
             if accion and accion in TOOL_FUNCTIONS:
-                return ("tool_call", accion, params)
+                return ("tool_calls", [{"name": accion, "params": params}])
 
             return ("respond", response)
 
         except Exception as e:
             return ("error", str(e))
 
+    # ----------------------------------------------------------
+    # EJECUCION DE TOOLS (multiple)
+    # ----------------------------------------------------------
+    def _execute_tool_calls(self, tool_calls, messages):
+        """Ejecuta multiples tool calls y retorna lista de resultados."""
+        results = []
+        for tc in tool_calls:
+            tool_name = tc["name"]
+            tool_params = tc["params"]
+
+            self._log(f"Ejecutando: {tool_name}({tool_params})", "execution")
+            tool_result = self._execute_tool(tool_name, tool_params)
+            self._log(f"Resultado: {tool_result[:150]}...", "observation")
+
+            # Alimentar memoria de trabajo
+            self.memory.add_step(f"{tool_name}({tool_params})", tool_result[:200])
+            if "ERROR" in tool_result:
+                self.memory.set_error(f"{tool_name}: {tool_result[:100]}")
+            if "PELIGROSO" in tool_result:
+                self._log(f"Comando peligroso bloqueado: {tool_name}", "warning")
+            if len(tool_result) > 50 and "ERROR" not in tool_result:
+                self.memory.remember(
+                    f"Resultado de {tool_name}: {tool_result[:300]}",
+                    metadata={"type": "tool_result", "tool": tool_name}
+                )
+
+            results.append(tool_result)
+        return results
+
+    def _feed_tool_results(self, tool_calls, results, messages):
+        """Alimenta resultados de tools de vuelta al agente."""
+        if self.supports_tool_calling:
+            assistant_msg = {"role": "assistant", "content": "", "tool_calls": []}
+            for tc in tool_calls:
+                assistant_msg["tool_calls"].append({
+                    "function": {"name": tc["name"], "arguments": tc["params"]}
+                })
+            messages.append(assistant_msg)
+            for tc, result in zip(tool_calls, results):
+                messages.append({"role": "tool", "content": result})
+        else:
+            for tc, result in zip(tool_calls, results):
+                messages.append({
+                    "role": "assistant",
+                    "content": json.dumps({
+                        "pensamiento": f"Ejecute {tc['name']}",
+                        "accion": tc["name"],
+                        "params": tc["params"]
+                    })
+                })
+                messages.append({
+                    "role": "user",
+                    "content": f"Resultado de {tc['name']}: {result}\n\nQue hago ahora? Responde con JSON."
+                })
+
+    def _execute_tool(self, tool_name, params):
+        """Ejecuta una herramienta por nombre."""
+        if tool_name in TOOL_FUNCTIONS:
+            try:
+                params = self._resolve_params(params)
+                return TOOL_FUNCTIONS[tool_name](**params)
+            except Exception as e:
+                return f"ERROR ejecutando {tool_name}: {e}"
+        return f"Herramienta no encontrada: {tool_name}"
+
+    # ----------------------------------------------------------
+    # METACOGNICION: INYECCION DE PROMPT
+    # ----------------------------------------------------------
+    def _inject_metacognitive_prompt(self, messages, meta_prompt):
+        """Inyecta el prompt metacognitivo en la conversacion."""
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i]["role"] == "user":
+                messages.insert(i + 1, {"role": "user", "content": meta_prompt})
+                return
+        messages.append({"role": "user", "content": meta_prompt})
+
+    # ----------------------------------------------------------
+    # CONSTRUCCION DE MENSAJES (OPTIMIZADA)
+    # ----------------------------------------------------------
     def _build_messages(self, new_message):
-        """Construye la lista de mensajes con CONTEXTO ENRIQUECIDO."""
-        models = ollama._fetch_available_models() or [ollama.model or "desconocido"]
+        """Construye la lista de mensajes con contexto enriquecido (optimizado)."""
+        # Cache de modelos para evitar llamada API en cada mensaje
+        if self._models_cache is None:
+            self._models_cache = ollama._fetch_available_models() or [ollama.model or "desconocido"]
+        models = self._models_cache
+
         system_content = SYSTEM_PROMPT.format(
             so=os.name,
             repos_dir=REPOS_DIR,
@@ -192,7 +504,7 @@ class ReactAgent:
             corrections="Ver correcciones abajo"
         )
 
-        # Contexto enriquecido desde Triple Memoria
+        # Contexto enriquecido desde Triple Memoria (con cache de embedding)
         enriched_context = self.memory.get_context_for(new_message)
         if enriched_context:
             system_content += f"\n\n--- CONTEXTO DE MEMORIA ---\n{enriched_context}"
@@ -215,16 +527,9 @@ class ReactAgent:
 
         return messages
 
-    def _execute_tool(self, tool_name, params):
-        """Ejecuta una herramienta por nombre."""
-        if tool_name in TOOL_FUNCTIONS:
-            try:
-                params = self._resolve_params(params)
-                return TOOL_FUNCTIONS[tool_name](**params)
-            except Exception as e:
-                return f"ERROR ejecutando {tool_name}: {e}"
-        return f"Herramienta no encontrada: {tool_name}"
-
+    # ----------------------------------------------------------
+    # HELPERS
+    # ----------------------------------------------------------
     def _resolve_params(self, params):
         resolved = {}
         for key, value in params.items():
@@ -290,3 +595,15 @@ class ReactAgent:
         except Exception:
             pass
         return False
+
+    def _save_interaction(self, user_message, final_response):
+        """Guarda la interaccion en la triple memoria."""
+        self.memory.add_conversation("user", user_message)
+        self.memory.add_conversation("assistant", final_response)
+        # Guardar interaccion sin embedding (mas rapido)
+        self.memory.remember(
+            f"Usuario pregunto: {user_message[:100]} -> Respuesta: {final_response[:200]}",
+            metadata={"type": "interaction", "user_msg": user_message[:50]},
+            fast=True  # skip_embedding para velocidad
+        )
+        self.memory.set_success(final_response[:100])

@@ -16,7 +16,8 @@ import logging
 from datetime import datetime
 
 from config import (
-    LEARN_DIR, MAX_CONVERSATION_MEMORY, MAX_CONTEXT_CHARS, logger
+    LEARN_DIR, MAX_CONVERSATION_MEMORY, MAX_CONTEXT_CHARS,
+    SKIP_EMBED_ON_INTERACTION, logger
 )
 from memory.vectorstore import VectorStore
 from memory.learning import LearningSystem
@@ -61,7 +62,8 @@ class TripleMemory:
                 if msg["role"] == "assistant" and len(msg["content"]) > 50:
                     self.long_term.add(
                         msg["content"][:500],
-                        metadata={"type": "conversation", "role": msg["role"]}
+                        metadata={"type": "conversation", "role": msg["role"]},
+                        skip_embedding=SKIP_EMBED_ON_INTERACTION
                     )
             self.short_term = self.short_term[-(MAX_CONVERSATION_MEMORY * 2):]
 
@@ -71,9 +73,14 @@ class TripleMemory:
             self._auto_save_counter = 0
             self.save_session()
 
-    def remember(self, text, metadata=None):
-        """Guarda algo en la memoria a largo plazo."""
-        return self.long_term.add(text, metadata=metadata)
+    def remember(self, text, metadata=None, fast=False):
+        """Guarda algo en la memoria a largo plazo.
+        
+        Args:
+            fast: Si True, salta el calculo de embedding (mas rapido).
+                  La entrada solo aparecera en busquedas por texto.
+        """
+        return self.long_term.add(text, metadata=metadata, skip_embedding=fast)
 
     def recall(self, query, limit=5):
         """Recupera recuerdos relevantes de la memoria a largo plazo."""
