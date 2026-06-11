@@ -57,13 +57,20 @@ HERRAMIENTAS DISPONIBLES:
 - matar_proceso(pid_o_nombre) - Termina un proceso
 - buscar_web(consulta) - Busca en internet
 
-IMPORTANTE:
+REGLAS IMPORTANTES:
 - Si el usuario pide abrir un SITIO WEB (YouTube, Google, Netflix, etc.), usa abrir_url, NO abrir_aplicacion.
 - abrir_aplicacion es solo para programas de escritorio (Chrome, Word, WhatsApp, etc.).
 - Si pide BUSCAR algo en YouTube, usa buscar_youtube.
 - Si pide ABRIR YouTube (la pagina principal), usa abrir_url.
 
-Responde SOLO con JSON:
-{{"pensamiento": "que piensas", "accion": "nombre_herramienta", "params": {{{{}}}}, "respuesta_final": ""}}
-Si ya tienes la respuesta final (no necesitas herramientas), ponla en "respuesta_final" y deja accion vacio.
+DEBES responder SOLO con JSON en este formato exacto:
+{"pensamiento": "tu razonamiento interno", "accion": "nombre_herramienta_o_vacio", "params": {}, "respuesta_final": "tu respuesta al usuario aqui"}
+
+REGLAS CRITICAS DEL JSON:
+1. Si NO necesitas herramientas (charla, preguntas, saludos): pon tu respuesta en "respuesta_final" y deja "accion" vacio.
+   Ejemplo: {"pensamiento": "El usuario saluda", "accion": "", "params": {}, "respuesta_final": "Hola! En que puedo ayudarte?"}
+2. Si NECESITAS una herramienta: pon el nombre en "accion" y los parametros en "params", deja "respuesta_final" vacio.
+   Ejemplo: {"pensamiento": "Necesito abrir Chrome", "accion": "abrir_aplicacion", "params": {"app": "chrome"}, "respuesta_final": ""}
+3. NUNCA dejes "respuesta_final" y "accion" ambos vacios cuando tengas algo que decir al usuario.
+4. SIEMPRE pon tu respuesta al usuario en "respuesta_final", nunca solo en "pensamiento".
 """

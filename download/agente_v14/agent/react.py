@@ -391,25 +391,58 @@ class ReactAgent:
 
             parsed = self._parse_json(response)
             if not parsed:
-                return ("respond", response)
+                # No es JSON - probablemente respuesta directa del modelo
+                # Limpiar posibles restos de formato JSON
+                clean = self._clean_json_leak(response)
+                return ("respond", clean)
 
-            if parsed.get("respuesta_final"):
-                return ("respond", parsed["respuesta_final"])
+            # 1. Si hay respuesta_final con contenido, usarla
+            respuesta_final = parsed.get("respuesta_final", "").strip()
+            if respuesta_final:
+                return ("respond", respuesta_final)
 
-            accion = parsed.get("accion", "")
+            accion = parsed.get("accion", "").strip()
             params = parsed.get("params", {})
-            pensamiento = parsed.get("pensamiento", "")
+            pensamiento = parsed.get("pensamiento", "").strip()
 
             if pensamiento:
                 self._log(f"Pensamiento: {pensamiento}", "thinking")
 
+            # 2. Si hay accion valida, ejecutar herramienta
             if accion and accion in TOOL_FUNCTIONS:
+                # Si tambien hay pensamiento, inyectarlo como contexto
+                if pensamiento:
+                    messages.append({
+                        "role": "assistant",
+                        "content": f"[Pensamiento: {pensamiento}] Ejecutando {accion}..."
+                    })
                 return ("tool_calls", [{"name": accion, "params": params}])
 
-            return ("respond", response)
+            # 3. Si hay pensamiento pero no accion ni respuesta_final,
+            #    el modelo esta respondiendo en campo equivocado - usar pensamiento
+            if pensamiento and not accion:
+                self._log("Modelo respondio en 'pensamiento' en vez de 'respuesta_final'", "info")
+                return ("respond", pensamiento)
+
+            # 4. Fallback: devolver texto limpio (no JSON crudo)
+            clean = self._clean_json_leak(response)
+            return ("respond", clean)
 
         except Exception as e:
             return ("error", str(e))
+
+    def _clean_json_leak(self, text):
+        """Limpia texto que tiene restos de formato JSON para mostrar al usuario."""
+        # Si el texto es JSON completo, extraer solo el contenido util
+        parsed = self._parse_json(text)
+        if parsed:
+            # Prioridad: respuesta_final > pensamiento > texto original
+            if parsed.get("respuesta_final", "").strip():
+                return parsed["respuesta_final"].strip()
+            if parsed.get("pensamiento", "").strip():
+                return parsed["pensamiento"].strip()
+        # Si no es JSON, devolver tal cual (respuesta natural del modelo)
+        return text
 
     # ----------------------------------------------------------
     # EJECUCION DE TOOLS (multiple)
