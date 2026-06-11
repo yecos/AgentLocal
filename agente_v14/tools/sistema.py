@@ -25,8 +25,33 @@ PROCESOS_CRITICOS = {
     "msmpeng", "msascuil", "nissrv",
     # Ollama (nuestro LLM)
     "ollama", "ollama_llama_server",
-    # Linux
-    "systemd", "init", "kernel", "sshd", "dbus-daemon",
+    # Linux - Init y sistema
+    "systemd", "init", "sysvinit", "upstart", "openrc", "runit",
+    # Linux - SSH y acceso remoto
+    "sshd", "ssh-agent", "telnetd",
+    # Linux - Kernel y udev
+    "kthreadd", "ksoftirqd", "kworker", "migration", "rcu", "udev",
+    # Linux - Logging
+    "rsyslogd", "syslogd", "journald", "systemd-journal",
+    # Linux - DBus y comunicacion
+    "dbus-daemon", "systemd-logind", "systemd-udevd",
+    # Linux - Red
+    "NetworkManager", "dhclient", "dhcpcd", "wpa_supplicant",
+    "systemd-networkd", "avahi-daemon",
+    # Linux - DNS
+    "named", "dnsmasq", "systemd-resolved",
+    # Linux - Cron y programacion
+    "cron", "crond", "atd", "systemd-cron",
+    # Base de datos
+    "mysqld", "postgres", "mongod", "redis-server", "mariadbd",
+    # Servidor web
+    "nginx", "apache2", "httpd", "caddy",
+    # Supervision
+    "fail2ban", "monitorix", "prometheus", "grafana",
+    # Contenedores
+    "containerd", "dockerd", "kubelet",
+    # ZAI
+    "zai", "zai-core", "zai-agent", "chroma",
 }
 
 

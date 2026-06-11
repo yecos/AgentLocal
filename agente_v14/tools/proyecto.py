@@ -18,7 +18,7 @@ import glob as glob_mod
 
 from config import REPOS_DIR, logger
 from utils.helpers import safe_read_file
-from utils.security import sanitize_input
+from utils.security import sanitize_input, validate_url
 from tools.sistema import ejecutar_comando
 
 # Extensiones reconocidas por lenguaje
@@ -888,10 +888,14 @@ def clonar_repositorio(url: str) -> str:
     """Clona un repositorio de GitHub."""
     # Validar que la URL sea un repo Git legitimo
     url = url.strip()
-    if not re.match(r'^https?://github\.com/[\w\-\.]+/[\w\-\.]+(?:\.git)?$', url):
-        if not re.match(r'^git@github\.com:[\w\-\.]+/[\w\-\.]+(?:\.git)?$', url):
-            # Sanitizar si no es URL git estandar
-            url = sanitize_input(url)
+    
+    # Validar URL HTTPS con validate_url
+    if url.startswith("https://") or url.startswith("http://"):
+        if not validate_url(url):
+            return f"URL no valida o protocolo no permitido: {url[:100]}"
+    elif not re.match(r'^git@github\.com:[\w\-\.]+/[\w\-\.]+(?:\.git)?$', url):
+        # Si no es SSH, sanitizar
+        url = sanitize_input(url)
 
     repo_name = url.rstrip("/").split("/")[-1].replace(".git", "")
     target_dir = os.path.join(REPOS_DIR, repo_name)

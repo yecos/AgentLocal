@@ -36,6 +36,7 @@ class ChromaVectorStore:
     """
     Vector store basado en ChromaDB con decaimiento temporal y deduplicacion.
     Escalable a miles de documentos con busqueda semantica rapida.
+    v2: Auto-deteccion y recreacion ante mismatch de dimensiones de embeddings.
     """
 
     DECAY_HALF_LIFE_DAYS = 30  # Los recuerdos pierden la mitad de relevancia en 30 dias
@@ -44,14 +45,73 @@ class ChromaVectorStore:
         self.store_dir = store_dir or os.path.join(LEARN_DIR, "vectors")
         os.makedirs(self.store_dir, exist_ok=True)
 
+        # Detectar dimension del modelo de embedding actual
+        self._embedding_dim = self._detect_embedding_dimension()
+
         # Inicializar ChromaDB
         self._client = chromadb.PersistentClient(path=self.store_dir)
-        self._collection = self._client.get_or_create_collection(
-            name="agent_memory",
-            metadata={"hnsw:space": "cosine"}
-        )
+
+        # Obtener o crear coleccion con validacion de dimensiones
+        self._collection = self._get_or_create_collection()
+
         self._index_meta = self._load_meta()
-        logger.info(f"ChromaDB inicializado: {self._collection.count()} documentos")
+        logger.info(f"ChromaDB inicializado: {self._collection.count()} documentos (dim={self._embedding_dim})")
+
+    def _detect_embedding_dimension(self):
+        """Detecta la dimension de los embeddings del modelo actual."""
+        try:
+            test_embedding = ollama.get_embedding("test")
+            if test_embedding and isinstance(test_embedding, list):
+                return len(test_embedding)
+        except Exception as e:
+            logger.debug(f"No se pudo detectar dimension del embedding: {e}")
+        return None
+
+    def _get_collection_dimension(self, collection):
+        """Intenta obtener la dimension de embeddings de una coleccion existente."""
+        try:
+            metadata = collection.metadata
+            if metadata and "hnsw:dim" in metadata:
+                return int(metadata["hnsw:dim"])
+        except Exception:
+            pass
+        try:
+            peek_result = collection.peek(limit=1)
+            if peek_result and peek_result.get("embeddings") and len(peek_result["embeddings"]) > 0:
+                return len(peek_result["embeddings"][0])
+        except Exception:
+            pass
+        return None
+
+    def _get_or_create_collection(self):
+        """Obtiene o crea la coleccion, manejando mismatch de dimensiones."""
+        try:
+            existing = self._client.get_collection(name="agent_memory")
+
+            # Verificar dimensiones si las conocemos
+            if self._embedding_dim is not None:
+                existing_dim = self._get_collection_dimension(existing)
+
+                if existing_dim is not None and existing_dim != self._embedding_dim:
+                    logger.warning(
+                        f"⚠️ MISMATCH DE DIMENSIONES: coleccion espera {existing_dim} dim, "
+                        f"modelo actual produce {self._embedding_dim} dim. Recreando coleccion..."
+                    )
+                    self._client.delete_collection(name="agent_memory")
+                    logger.info(f"Coleccion eliminada. Creando nueva con dim={self._embedding_dim}")
+                    return self._client.create_collection(
+                        name="agent_memory",
+                        metadata={"hnsw:space": "cosine", "hnsw:dim": self._embedding_dim}
+                    )
+
+            return existing
+
+        except Exception:
+            # La coleccion no existe — crear nueva
+            metadata = {"hnsw:space": "cosine"}
+            if self._embedding_dim is not None:
+                metadata["hnsw:dim"] = self._embedding_dim
+            return self._client.create_collection(name="agent_memory", metadata=metadata)
 
     def _load_meta(self):
         """Carga metadatos adicionales (timestamp para decaimiento)."""
@@ -162,12 +222,33 @@ class ChromaVectorStore:
         embedding = ollama.get_embedding(text)
 
         if embedding:
-            self._collection.add(
-                ids=[entry_id],
-                embeddings=[embedding],
-                documents=[text[:500]],
-                metadatas=[meta]
-            )
+            # Validar dimension del embedding antes de insertar
+            if self._embedding_dim is not None and len(embedding) != self._embedding_dim:
+                logger.warning(
+                    f"Embedding con dimension incorrecta ({len(embedding)} vs {self._embedding_dim}). "
+                    f"Recreando coleccion..."
+                )
+                self._handle_dimension_error(embedding)
+
+            try:
+                self._collection.add(
+                    ids=[entry_id],
+                    embeddings=[embedding],
+                    documents=[text[:500]],
+                    metadatas=[meta]
+                )
+            except chromadb.errors.InvalidArgumentError as e:
+                if "dimension" in str(e).lower():
+                    logger.warning(f"Error de dimension al insertar. Recreando coleccion y reintentando...")
+                    self._handle_dimension_error(embedding)
+                    self._collection.add(
+                        ids=[entry_id],
+                        embeddings=[embedding],
+                        documents=[text[:500]],
+                        metadatas=[meta]
+                    )
+                else:
+                    raise
         else:
             # Sin embedding, guardar solo con metadatos
             meta["no_embedding"] = True
@@ -178,6 +259,32 @@ class ChromaVectorStore:
             )
 
         return entry_id
+
+    def _handle_dimension_error(self, sample_embedding=None):
+        """Maneja error de dimension recreando la coleccion."""
+        new_dim = len(sample_embedding) if sample_embedding else self._embedding_dim
+        if new_dim:
+            self._embedding_dim = new_dim
+        logger.warning(f"Recreando coleccion 'agent_memory' con dim={new_dim} (datos previos se pierden)")
+        try:
+            self._client.delete_collection(name="agent_memory")
+        except Exception:
+            pass
+        metadata = {"hnsw:space": "cosine"}
+        if new_dim:
+            metadata["hnsw:dim"] = new_dim
+        self._collection = self._client.create_collection(name="agent_memory", metadata=metadata)
+
+    def get_info(self):
+        """Retorna info de diagnostico de la coleccion."""
+        existing_dim = self._get_collection_dimension(self._collection)
+        return {
+            "document_count": self.count(),
+            "collection_dimension": existing_dim,
+            "model_dimension": self._embedding_dim,
+            "dimensions_match": existing_dim == self._embedding_dim if existing_dim and self._embedding_dim else "unknown",
+            "persist_dir": self.store_dir,
+        }
 
     def search(self, query, limit=5, min_similarity=0.3):
         """Busca entradas semanticamente similares con decaimiento temporal."""

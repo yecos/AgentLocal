@@ -17,7 +17,7 @@ from config import (
     REPOS_DIR, LEARN_DIR, SITIOS_CONOCIDOS, APP_ALIASES, IS_WINDOWS, logger
 )
 from utils.helpers import strip_prefixes, open_in_browser
-from utils.security import sanitize_input
+from utils.security import sanitize_input, validate_url
 from tools.sistema import ejecutar_comando
 
 # ============================================================
@@ -264,7 +264,7 @@ def buscar_exe(nombre: str) -> str:
 
 def abrir_url(url: str) -> str:
     """Abre una URL en el navegador por defecto."""
-    url = url.strip()
+    url = sanitize_input(url.strip())
     if not url.startswith("http://") and not url.startswith("https://"):
         url_lower = strip_prefixes(url).lower()
         if url_lower in SITIOS_CONOCIDOS:
@@ -274,11 +274,9 @@ def abrir_url(url: str) -> str:
         else:
             return f"No puedo determinar la URL para '{url}'. Intenta con una URL completa."
 
-    # Validar esquema
-    import urllib.parse
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https", ""):
-        return f"Esquema de URL no permitido: {parsed.scheme}"
+    # Validar URL con seguridad mejorada
+    if not validate_url(url):
+        return f"URL no valida o protocolo no permitido: {url[:100]}"
 
     resultado = open_in_browser(url, ejecutar_comando_fn=ejecutar_comando)
     if not resultado or resultado == "(sin salida)" or "error" not in resultado.lower():

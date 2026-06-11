@@ -11,7 +11,7 @@ import json
 import logging
 
 from config import WEB_TIMEOUT, logger
-from utils.security import sanitize_input
+from utils.security import sanitize_input, validate_url
 
 
 def buscar_web(consulta: str) -> str:

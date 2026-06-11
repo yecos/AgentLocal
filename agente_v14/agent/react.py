@@ -72,10 +72,30 @@ class ReactAgent:
         for iteration in range(MAX_REACT_ITERATIONS):
             self._log(f"--- Iteracion {iteration + 1}/{MAX_REACT_ITERATIONS} ---", "react")
 
+            # *** FIX: Metacognicion ANTES de decidir la accion ***
+            # Antes: se evaluaba DESPUES de actuar (paso 4→5→2)
+            # Ahora: se evalua ANTES (paso 2→3→4) para mejor toma de decisiones
             meta_prompt = self.metacognition.get_metacognitive_prompt(iteration)
             if meta_prompt:
-                self._log("Alerta metacognitiva inyectada", "evaluation")
+                self._log("Alerta metacognitiva inyectada ANTES de accion", "evaluation")
                 self._inject_metacognitive_prompt(messages, meta_prompt)
+
+            # Verificar si metacognicion indica que necesitamos mas contexto
+            if self.metacognition.confidence < 0.3 and iteration > 0:
+                extra_context = self.memory.get_context_for(user_message)
+                if extra_context and not any(extra_context[:50] in str(m.get("content", "")) for m in messages[-3:]):
+                    self._log("Metacognicion: inyectando contexto adicional de memoria", "evaluation")
+                    # No re-agregar contexto que ya esta en mensajes
+                    context_added = False
+                    for m in messages[-3:]:
+                        if "CONTEXTO DE MEMORIA" in m.get("content", ""):
+                            context_added = True
+                            break
+                    if not context_added:
+                        messages.append({
+                            "role": "user",
+                            "content": f"[Contexto adicional relevante]:\n{extra_context[:500]}\n\nUsa esta informacion si es relevante."
+                        })
 
             if self.supports_tool_calling:
                 action_result = self._react_with_tools(messages, iteration)
@@ -85,7 +105,7 @@ class ReactAgent:
             if action_result[0] == "respond":
                 final_response = action_result[1]
 
-                # PRIMERO: Evaluar resultado para poblar _last_evaluation
+                # Evaluar resultado para poblar _last_evaluation
                 reflection = self.metacognition.evaluate_result(
                     user_message, final_response, iteration + 1
                 )
@@ -166,10 +186,10 @@ class ReactAgent:
         for iteration in range(MAX_REACT_ITERATIONS):
             self._log(f"--- Iteracion {iteration + 1}/{MAX_REACT_ITERATIONS} ---", "react")
 
-            # Check metacognitivo
+            # *** FIX: Metacognicion ANTES de decidir la accion ***
             meta_prompt = self.metacognition.get_metacognitive_prompt(iteration)
             if meta_prompt:
-                self._log("Alerta metacognitiva inyectada", "evaluation")
+                self._log("Alerta metacognitiva inyectada ANTES de accion", "evaluation")
                 self._inject_metacognitive_prompt(messages, meta_prompt)
                 yield {
                     "type": "meta",
