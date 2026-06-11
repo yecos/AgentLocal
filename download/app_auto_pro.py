@@ -521,6 +521,60 @@ def escribir_archivo(ruta: str, contenido: str) -> str:
         return f"ERROR: {e}"
 
 
+def abrir_aplicacion(app: str) -> str:
+    """Abre una aplicacion en el sistema."""
+    # Mapeo de nombres comunes a comandos
+    app_map = {
+        "chrome": "start chrome",
+        "google chrome": "start chrome",
+        "firefox": "start firefox",
+        "edge": "start msedge",
+        "explorador": "start explorer",
+        "file explorer": "start explorer",
+        "vscode": "start code",
+        "visual studio code": "start code",
+        "vs code": "start code",
+        "notepad": "start notepad",
+        "bloc de notas": "start notepad",
+        "calculator": "start calc",
+        "calculadora": "start calc",
+        "paint": "start mspaint",
+        "word": "start winword",
+        "excel": "start excel",
+        "powerpoint": "start powerpnt",
+        "outlook": "start outlook",
+        "spotify": "start spotify",
+        "discord": "start discord",
+        "slack": "start slack",
+        "terminal": "start cmd",
+        "powershell": "start powershell",
+        "cmd": "start cmd",
+        "configuracion": "start ms-settings:",
+        "settings": "start ms-settings:",
+        "tienda": "start ms-windows-store:",
+        "windows store": "start ms-windows-store:",
+        "fotos": "start ms-photos:",
+        "camera": "start microsoft.windows.camera:",
+        "camara": "start microsoft.windows.camera:",
+    }
+
+    msg_lower = app.lower().strip()
+    comando = app_map.get(msg_lower)
+
+    if comando:
+        resultado = ejecutar_comando(comando)
+        # start command no suele dar salida, asi que verificamos
+        if not resultado or resultado == "(Comando ejecutado sin salida)":
+            return f"Aplicacion {app} abierta"
+        return resultado
+    else:
+        # Intentar abrir directamente con start
+        resultado = ejecutar_comando(f"start {app}")
+        if "ERROR" in resultado:
+            return f"No se pudo abrir '{app}'. Intenta con el nombre exacto del programa."
+        return f"Intentando abrir {app}..."
+
+
 # ============================================================
 # DETECCION DE INTENCION - Con aprendizaje integrado
 # ============================================================
@@ -605,6 +659,26 @@ def detectar_intencion(mensaje: str) -> dict:
     if any(w in msg for w in ["listar", "que hay", "mostrar archivos", "que archivos"]):
         return {"intencion": "listar", "params": params, "confianza": 0.75}
 
+    # Abrir aplicacion
+    if any(w in msg for w in ["abre", "abrir", "open", "inicia", "lanza", "ejecuta la app", "abreme"]):
+        # Extraer el nombre de la app
+        app_match = re.search(
+            r'(?:abre|abrir|open|inicia|lanza|abreme)\s+(?:la\s+|el\s+)?(.+?)(?:\s*$|\s+para|\s+y\s)',
+            msg, re.IGNORECASE
+        )
+        if app_match:
+            params["app"] = app_match.group(1).strip()
+        else:
+            # Intentar capturar todo despues de "abre"
+            simple_match = re.search(r'(?:abre|abrir|open)\s+(.+)', msg, re.IGNORECASE)
+            if simple_match:
+                params["app"] = simple_match.group(1).strip()
+
+        if params.get("app"):
+            return {"intencion": "abrir_app", "params": params, "confianza": 0.85}
+        else:
+            return {"intencion": "conversar", "params": {}, "confianza": 0.0}
+
     # Ejecutar comando
     if any(w in msg for w in ["ejecuta", "correr", "run ", "npm run", "npm start"]):
         cmd_match = re.search(r'(?:ejecuta|correr|run)\s+(.+)', msg)
@@ -648,6 +722,8 @@ def ejecutar_intencion(intencion_data: dict) -> list:
                 result = listar_archivos(action_params.get("ruta"))
             elif action_type == "ejecutar_comando":
                 result = ejecutar_comando(action_params.get("comando", ""))
+            elif action_type == "abrir_aplicacion":
+                result = abrir_aplicacion(action_params.get("app", ""))
             else:
                 result = f"Accion desconocida: {action_type}"
 
@@ -779,6 +855,24 @@ def ejecutar_intencion(intencion_data: dict) -> list:
             "resultado": result
         })
 
+    elif intencion == "abrir_app":
+        app = params.get("app", "")
+        if app:
+            result = abrir_aplicacion(app)
+            reflection = learning.self_reflect("abrir_aplicacion", result, app)
+            pasos.append({
+                "accion": "abrir_aplicacion",
+                "detalle": f"Abriendo {app}",
+                "resultado": result,
+                "reflection": reflection
+            })
+        else:
+            pasos.append({
+                "accion": "error",
+                "detalle": "Falta aplicacion",
+                "resultado": "Especifica que aplicacion abrir, ej: 'abre chrome' o 'abre vscode'"
+            })
+
     elif intencion == "comando":
         comando = params.get("comando", "")
         if comando:
@@ -857,6 +951,7 @@ Herramientas disponibles:
 - listar_archivos(ruta) - Lista directorio
 - analizar_proyecto(ruta) - Analiza un proyecto
 - escribir_archivo(ruta, contenido) - Crea/modifica archivo
+- abrir_aplicacion(app) - Abre una aplicacion (chrome, vscode, notepad, etc.)
 """
 
 
@@ -1070,6 +1165,20 @@ def procesar_mensaje(user_message: str) -> tuple:
                     }
                 }
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "abrir_aplicacion",
+                    "description": "Abre una aplicacion en el sistema (Chrome, Firefox, VSCode, etc.).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "app": {"type": "string", "description": "Nombre de la aplicacion a abrir (chrome, firefox, vscode, notepad, etc.)"}
+                        },
+                        "required": ["app"]
+                    }
+                }
+            },
         ]
 
         function_map = {
@@ -1080,6 +1189,7 @@ def procesar_mensaje(user_message: str) -> tuple:
             "listar_archivos": listar_archivos,
             "analizar_proyecto": analizar_proyecto,
             "escribir_archivo": escribir_archivo,
+            "abrir_aplicacion": abrir_aplicacion,
         }
 
         # Incluir lecciones aprendidas en el prompt
