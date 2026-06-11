@@ -6,6 +6,7 @@ Singleton con cache de conexion persistente.
 - Cache en archivo JSON (sobrevive reinicios)
 - Timeout agresivo con 1 solo reintento
 - Modelo dual: chat rapido vs code potente
+- Streaming para respuestas en tiempo real
 =============================================================
 """
 
@@ -67,6 +68,7 @@ class OllamaClient:
     """
     Singleton que maneja la conexion a Ollama.
     Cachea la conexion exitosa en archivo JSON para sobrevivir reinicios.
+    Soporta streaming para respuestas en tiempo real.
     """
 
     _instance = None
@@ -236,7 +238,7 @@ class OllamaClient:
             pass
 
     # ----------------------------------------------------------
-    # GENERACION
+    # GENERACION (sin streaming)
     # ----------------------------------------------------------
 
     def _get_timeout(self, model_name):
@@ -298,6 +300,148 @@ class OllamaClient:
     def generate_code(self, messages):
         """Para codigo: usa modelo potente."""
         return self.generate(messages, model_override=self.code_model)
+
+    # ----------------------------------------------------------
+    # GENERACION CON STREAMING
+    # ----------------------------------------------------------
+
+    def generate_stream(self, messages, tools=None, model_override=None):
+        """
+        Genera respuesta del LLM con streaming.
+        Yields: chunks de texto a medida que se generan.
+        Retorna el resultado final (str o dict con tool_calls).
+        """
+        self.detect_models()
+        model = model_override or self.model
+        host = self.host or 'http://localhost:11434'
+
+        # Intentar streaming via HTTP
+        result = yield from self._stream_http(host, model, messages, tools)
+        if result is not None:
+            return result
+
+        # Fallback: streaming via client
+        result = yield from self._stream_client(host, model, messages, tools)
+        if result is not None:
+            return result
+
+        # Ultimo fallback: sin streaming
+        result = self.generate(messages, tools=tools, model_override=model_override)
+        if result:
+            if isinstance(result, str):
+                yield result
+            return result
+        return ""
+
+    def _stream_http(self, host, model, messages, tools):
+        """Streaming via HTTP directo."""
+        try:
+            import urllib.request
+            payload = {
+                "model": model,
+                "messages": messages,
+                "stream": True
+            }
+            if tools:
+                payload["tools"] = tools
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                f"{host}/api/chat",
+                data=data,
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=LLM_TIMEOUT_LARGE) as resp:
+                full_content = ""
+                full_tool_calls = []
+                for line in resp:
+                    line = line.decode("utf-8").strip()
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    msg = chunk.get("message", {})
+                    content = msg.get("content", "")
+                    tool_calls = msg.get("tool_calls", [])
+
+                    if content:
+                        full_content += content
+                        yield content
+
+                    if tool_calls:
+                        full_tool_calls.extend(tool_calls)
+
+                    if chunk.get("done", False):
+                        # Guardar conexion exitosa
+                        self.host = host
+                        self.method = 'http'
+                        self._save_connection_cache()
+
+                        if full_tool_calls:
+                            return {
+                                "message": {
+                                    "content": full_content,
+                                    "tool_calls": full_tool_calls
+                                }
+                            }
+                        return full_content
+        except Exception as e:
+            logger.debug(f"HTTP streaming failed: {e}")
+        return None
+
+    def _stream_client(self, host, model, messages, tools):
+        """Streaming via ollama.Client."""
+        try:
+            import ollama as ollama_lib
+            client = ollama_lib.Client(host=host)
+
+            full_content = ""
+            full_tool_calls = []
+
+            if tools:
+                # ollama client no soporta streaming con tools
+                # Usar modo no-streaming y yield todo de golpe
+                response = client.chat(model=model, messages=messages, tools=tools)
+                msg = response.get("message", response)
+                content = msg.get("content", "")
+                tool_calls = msg.get("tool_calls", [])
+
+                if content:
+                    full_content = content
+                    yield content
+                if tool_calls:
+                    full_tool_calls = tool_calls
+
+                self.host = host
+                self.method = 'client'
+                self._save_connection_cache()
+
+                if full_tool_calls:
+                    return {"message": {"content": full_content, "tool_calls": full_tool_calls}}
+                return full_content
+            else:
+                stream = client.chat(model=model, messages=messages, stream=True)
+                for chunk in stream:
+                    msg = chunk.get("message", {})
+                    content = msg.get("content", "")
+                    if content:
+                        full_content += content
+                        yield content
+
+                    if chunk.get("done", False):
+                        self.host = host
+                        self.method = 'client'
+                        self._save_connection_cache()
+                        return full_content
+        except Exception as e:
+            logger.debug(f"Client streaming failed: {e}")
+        return None
+
+    # ----------------------------------------------------------
+    # METODOS INTERNOS
+    # ----------------------------------------------------------
 
     def _try_method(self, host, method, model, messages, tools, timeout):
         """Intenta una combinacion de host/metodo/modelo. Retorna None si falla."""

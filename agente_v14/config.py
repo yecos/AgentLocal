@@ -70,6 +70,11 @@ MAX_TOOL_OUTPUT = 3000           # Max chars en salida de herramienta
 MAX_EMBED_CACHE = 200            # Maximo entradas en cache de embeddings
 MAX_VECTORS_IN_MEMORY = 500      # Maximo vectores cargados en RAM
 CONNECTION_CACHE_DAYS = 7        # Dias que se guarda la conexion Ollama cacheada
+MEMORY_DECAY_HALF_LIFE = 30      # Dias para decaimiento de recuerdos
+MEMORY_CLEANUP_INTERVAL = 50     # Ops entre auto-cleanup
+MEMORY_MAX_ENTRIES = 1000        # Maximo entradas en vector store
+DEDUP_SIMILARITY_THRESHOLD = 0.95 # Umbral para deduplicacion semantica
+SUMMARY_MIN_MESSAGES = 10        # Minimo mensajes para generar resumen LLM
 
 # ============================================================
 # TIMEOUTS
@@ -78,6 +83,7 @@ DEFAULT_TIMEOUT = 120            # Segundos para comandos normales
 LONG_TIMEOUT = 300               # Segundos para install/build/docker
 LLM_TIMEOUT_SMALL = 120          # Timeout para modelos <=8b
 LLM_TIMEOUT_LARGE = 180          # Timeout para modelos >=14b
+LLM_SUMMARY_TIMEOUT = 30         # Timeout para resumen LLM
 EMBED_TIMEOUT = 15               # Timeout para embeddings
 WEB_TIMEOUT = 10                 # Timeout para busquedas web
 

@@ -3,6 +3,7 @@
 AGENTE LOCAL AUTONOMO v14 - Entry Point Streamlit
 =============================================================
 Arquitectura modular: importa los modulos que necesita.
+Streaming de respuestas + confirmacion de comandos.
 Para ejecutar: streamlit run app.py
 =============================================================
 """
@@ -23,6 +24,7 @@ def init_session():
         memory.load_session()
         st.session_state.agent = ReactAgent(memory=memory)
         st.session_state.memory = memory
+        st.session_state.pending_dangerous_cmd = None
         ollama.detect_models()
 
 init_session()
@@ -71,6 +73,19 @@ def main():
     .thinking-box .react { color: #ff88ff; font-weight: bold; }
     .thinking-box .success { color: #44ff88; font-weight: bold; }
 
+    .danger-box {
+        background: linear-gradient(135deg, #4a1010, #6b1a1a);
+        color: #ff8888; padding: 16px; border-radius: 12px;
+        border: 2px solid #ff4444; margin: 10px 0;
+    }
+    .danger-box .cmd { color: #ffcc00; font-family: monospace; font-weight: bold; }
+
+    .tool-badge {
+        display: inline-block; background: #2d2d6b; color: #88aaff;
+        padding: 2px 8px; border-radius: 10px; font-size: 11px;
+        margin: 2px; font-family: monospace;
+    }
+
     [data-testid="stChatMessage"] { border-radius: 12px; padding: 12px 16px; margin: 4px 0; }
 
     .stButton > button { border-radius: 8px; transition: all 0.2s; }
@@ -100,25 +115,69 @@ def main():
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
+            # Mostrar tools ejecutadas si las hay
+            if "tools_used" in msg and msg["tools_used"]:
+                tools_html = " ".join([f'<span class="tool-badge">{t}</span>' for t in msg["tools_used"]])
+                st.markdown(f"<div>{tools_html}</div>", unsafe_allow_html=True)
 
     # Input
     if prompt := st.chat_input("Que necesitas?"):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+        _handle_user_input(prompt)
 
-        with st.chat_message("assistant"):
-            with st.spinner("Pensando..."):
-                respuesta, thinking_log = st.session_state.agent.run(prompt)
+    # Verificar si hay comando peligroso pendiente de confirmacion
+    if st.session_state.get("pending_dangerous_cmd"):
+        _handle_dangerous_confirmation()
 
-            st.markdown(respuesta)
-            st.session_state.messages.append({"role": "assistant", "content": respuesta})
 
-            # Mostrar thinking log en expander
+def _handle_user_input(prompt):
+    """Maneja el input del usuario con streaming."""
+    st.session_state.messages.append({"role": "user", "content": prompt})
+
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    with st.chat_message("assistant"):
+        # Usar streaming
+        response_placeholder = st.empty()
+        thinking_placeholder = st.container()
+        tools_used = []
+        full_response = ""
+        thinking_log = []
+
+        try:
+            for event in st.session_state.agent.run_stream(prompt):
+                if event["type"] == "text":
+                    full_response += event["data"]
+                    response_placeholder.markdown(full_response + "▌")
+                elif event["type"] == "tool_start":
+                    tc = event["data"]
+                    tool_name = tc.get("name", "?")
+                    tools_used.append(tool_name)
+                    with thinking_placeholder:
+                        st.caption(f"🔧 Ejecutando: {tool_name}...")
+                elif event["type"] == "tool_result":
+                    result = event["data"]
+                    tool_name = result["tool"].get("name", "?")
+                    result_text = result["result"][:100]
+                    # Verificar si es un comando peligroso bloqueado
+                    if "PELIGROSO" in result_text:
+                        st.session_state.pending_dangerous_cmd = {
+                            "tool": result["tool"],
+                            "result": result["result"],
+                            "original_prompt": prompt,
+                            "tools_used": tools_used,
+                        }
+                        with thinking_placeholder:
+                            st.warning(f"⚠️ Comando peligroso detectado: {tool_name}")
+                elif event["type"] == "done":
+                    full_response = event["data"]
+                    thinking_log = event.get("thinking_log", [])
+                    response_placeholder.markdown(full_response)
+
+            # Mostrar thinking log
             if thinking_log:
                 with st.expander("Proceso de pensamiento", expanded=False):
                     log_text = "\n".join(thinking_log)
-                    # Colorear por categoria
                     for category, css_class in [
                         ("THINKING", "thinking"), ("PLAN", "plan"),
                         ("EXECUTION", "execution"), ("OBSERVATION", "observation"),
@@ -136,9 +195,71 @@ def main():
                         unsafe_allow_html=True
                     )
 
-    # Sidebar con stats
+        except Exception as e:
+            # Fallback a modo no-streaming si falla
+            full_response, thinking_log = st.session_state.agent.run(prompt)
+            response_placeholder.markdown(full_response)
+            if thinking_log:
+                with st.expander("Proceso de pensamiento", expanded=False):
+                    log_text = "\n".join(thinking_log)
+                    st.markdown(
+                        f'<div class="thinking-box">{log_text}</div>',
+                        unsafe_allow_html=True
+                    )
+
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": full_response,
+            "tools_used": tools_used,
+        })
+
+
+def _handle_dangerous_confirmation():
+    """Muestra dialogo de confirmacion para comandos peligrosos."""
+    pending = st.session_state.pending_dangerous_cmd
+    if not pending:
+        return
+
+    st.markdown("""
+    <div class="danger-box">
+        <h3>⚠️ Comando Peligroso Detectado</h3>
+        <p>El agente quiere ejecutar un comando que podria ser destructivo.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.warning(f"Comando: {pending['result'][:200]}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("✅ Confirmar y ejecutar", type="primary"):
+            # Re-ejecutar con confirmacion
+            from tools.sistema import ejecutar_comando
+            tool = pending["tool"]
+            params = tool.get("params", {})
+            params["confirmar_peligroso"] = True
+            try:
+                result = ejecutar_comando(**params)
+                st.success(f"Ejecutado: {result[:200]}")
+            except Exception as e:
+                st.error(f"Error: {e}")
+            st.session_state.pending_dangerous_cmd = None
+            st.rerun()
+
+    with col2:
+        if st.button("❌ Cancelar"):
+            st.info("Comando cancelado.")
+            st.session_state.pending_dangerous_cmd = None
+            st.rerun()
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+def _render_sidebar():
+    """Renderiza el sidebar con stats y controles."""
     with st.sidebar:
         st.header("Estado del Agente")
+
         if st.button("Nueva Sesion"):
             st.session_state.memory.clear_session()
             st.session_state.messages = []
@@ -149,8 +270,32 @@ def main():
             st.session_state.memory.save_session()
             st.success("Sesion guardada!")
 
+        # Stats
         stats = st.session_state.memory.get_stats()
-        st.json(stats)
+        st.subheader("Estadisticas")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Mensajes", stats.get("short_term_messages", 0))
+            st.metric("Conocimiento", stats.get("long_term_entries", 0))
+        with col2:
+            st.metric("Correcciones", stats.get("corrections", 0))
+            st.metric("Cache Embed", stats.get("embed_cache_size", 0))
+
+        # Modelo activo
+        st.subheader("Modelo")
+        st.text(f"Principal: {ollama.model or '?'}")
+        st.text(f"Chat: {ollama.chat_model or '?'}")
+        st.text(f"Code: {ollama.code_model or '?'}")
+        st.text(f"Embed: {ollama.embed_model or '?'}")
+
+        # Configuracion
+        st.subheader("Configuracion")
+        use_streaming = st.checkbox("Streaming", value=True, key="use_streaming")
+        show_thinking = st.checkbox("Mostrar pensamiento", value=False, key="show_thinking")
+
+
+# Ejecutar sidebar
+_render_sidebar()
 
 
 if __name__ == "__main__":

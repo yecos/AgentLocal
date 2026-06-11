@@ -3,10 +3,11 @@
 AGENTE v14 - Triple Memoria
 =============================================================
 1. Corto Plazo: Conversacion actual (ventana deslizante)
-2. Largo Plazo: Conocimiento con busqueda semantica (VectorStore)
+2. Largo Plazo: Conocimiento con busqueda semantica (ChromaDB)
 3. Trabajo: Scratchpad para la tarea actual
 
-v14: Sin duplicacion de historial, usa solo TripleMemory.
+v14.1: ChromaDB con decaimiento temporal, resumen LLM,
+       auto-cleanup, deduplicacion semantica.
 =============================================================
 """
 
@@ -18,7 +19,7 @@ from datetime import datetime
 from config import (
     LEARN_DIR, MAX_CONVERSATION_MEMORY, MAX_CONTEXT_CHARS, logger
 )
-from memory.vectorstore import VectorStore
+from memory.chroma_store import create_vector_store
 from memory.learning import LearningSystem
 from llm import embed_cache
 
@@ -27,13 +28,17 @@ learning = LearningSystem()
 
 class TripleMemory:
     """
-    Sistema de Triple Memoria v14.
+    Sistema de Triple Memoria v14.1.
     Fuente unica de verdad para el historial de conversacion.
+    Usa ChromaDB cuando esta disponible, fallback a VectorStore casero.
     """
+
+    # Auto-cleanup cada N operaciones
+    CLEANUP_INTERVAL = 50
 
     def __init__(self):
         self.short_term = []  # Memoria a corto plazo (conversacion)
-        self.long_term = VectorStore()  # Memoria a largo plazo (semantica)
+        self.long_term = create_vector_store()  # ChromaDB o fallback
         self.working = {  # Memoria de trabajo (scratchpad)
             "current_task": "",
             "task_steps": [],
@@ -46,6 +51,7 @@ class TripleMemory:
         self._summary_last_update = None
         self._session_file = os.path.join(LEARN_DIR, "session.json")
         self._auto_save_counter = 0
+        self._ops_counter = 0
 
     def add_conversation(self, role, content):
         """Agrega un mensaje a la memoria a corto plazo."""
@@ -70,6 +76,12 @@ class TripleMemory:
         if self._auto_save_counter >= 5:
             self._auto_save_counter = 0
             self.save_session()
+
+        # Auto-cleanup
+        self._ops_counter += 1
+        if self._ops_counter >= self.CLEANUP_INTERVAL:
+            self._ops_counter = 0
+            self.long_term.cleanup()
 
     def remember(self, text, metadata=None):
         """Guarda algo en la memoria a largo plazo."""
@@ -134,7 +146,7 @@ class TripleMemory:
             context_parts.append(corr_full)
             budget_remaining -= len(corr_full)
 
-        # 3. Memoria a Largo Plazo - budget restante
+        # 3. Memoria a Largo Plazo - budget restante (con decaimiento temporal)
         if budget_remaining > 200:
             recall_results = self.recall(query, limit=3)
             if recall_results:
@@ -145,7 +157,7 @@ class TripleMemory:
                 knowledge_full = f"CONOCIMIENTO RELEVANTE:\n{knowledge_text}"
                 context_parts.append(knowledge_full[:budget_remaining])
 
-        # 4. Resumen si conversacion larga
+        # 4. Resumen si conversacion larga (LLM-powered cuando es posible)
         if len(self.short_term) > 10:
             summary = self._get_conversation_summary()
             if summary:
@@ -155,10 +167,20 @@ class TripleMemory:
         return "\n\n".join(context_parts) if context_parts else ""
 
     def _get_conversation_summary(self):
+        """Obtiene resumen de la conversacion. Usa LLM si esta disponible."""
         if self._summary_cache and self._summary_last_update:
             msgs_since = len(self.short_term) - self._summary_last_update
             if msgs_since < 5:
                 return self._summary_cache
+
+        # Intentar resumen con LLM
+        llm_summary = self._llm_summarize()
+        if llm_summary:
+            self._summary_cache = llm_summary
+            self._summary_last_update = len(self.short_term)
+            return llm_summary
+
+        # Fallback: resumen basico
         user_msgs = [m["content"][:80] for m in self.short_term if m["role"] == "user"]
         if not user_msgs:
             return ""
@@ -166,6 +188,39 @@ class TripleMemory:
         self._summary_cache = summary
         self._summary_last_update = len(self.short_term)
         return summary
+
+    def _llm_summarize(self):
+        """Genera un resumen de la conversacion usando el LLM."""
+        try:
+            from llm import ollama
+            if not ollama.chat_model:
+                return None
+
+            # Construir texto de la conversacion
+            conv_text = ""
+            for msg in self.short_term[-20:]:
+                role = "Usuario" if msg["role"] == "user" else "Asistente"
+                conv_text += f"{role}: {msg['content'][:150]}\n"
+
+            if len(conv_text) < 200:
+                return None
+
+            messages = [
+                {"role": "system", "content": "Resume esta conversacion en 2-3 frases breves. Solo temas clave, sin detalles. Responde en espanol."},
+                {"role": "user", "content": conv_text[:2000]}
+            ]
+
+            summary = ollama.generate_chat(messages)
+            if summary and len(summary) > 20:
+                # Guardar como conocimiento
+                self.remember(
+                    f"Resumen de sesion: {summary[:200]}",
+                    metadata={"type": "session_summary"}
+                )
+                return summary
+        except Exception as e:
+            logger.debug(f"Resumen LLM fallo: {e}")
+        return None
 
     def save_session(self):
         try:
@@ -211,11 +266,13 @@ class TripleMemory:
         self._summary_last_update = None
 
     def get_stats(self):
-        return {
+        stats = {
             "short_term_messages": len(self.short_term),
             "long_term_entries": self.long_term.count(),
+            "long_term_type": type(self.long_term).__name__,
             "working_task": bool(self.working["current_task"]),
             "working_steps": len(self.working["task_steps"]),
             "corrections": len(learning.get_corrections_for("")),
             "embed_cache_size": len(embed_cache),
         }
+        return stats

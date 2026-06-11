@@ -148,6 +148,13 @@ if !ERRORLEVEL!==0 (
 %PYTHON_CMD% _helpers.py check_ollama_lib >nul 2>&1
 echo  [OK] ollama python (opcional)
 
+%PYTHON_CMD% -c "import chromadb" >nul 2>&1
+if !ERRORLEVEL!==0 (
+    echo  [OK] chromadb instalado
+) else (
+    echo  [!!] chromadb NO instalado (opcional, se usa VectorStore casero como fallback)
+)
+
 :: ============================================================
 :: 4. VERIFICAR IMPORTACIONES
 :: ============================================================
@@ -193,7 +200,7 @@ if %PKG_MISSING%==1 (
 if %FORCE_INSTALL%==1 (
     echo.
     echo  Instalando/actualizando dependencias...
-    %PYTHON_CMD% -m pip install streamlit ollama --upgrade --quiet
+    %PYTHON_CMD% -m pip install streamlit ollama chromadb --upgrade --quiet
     echo  [OK] Dependencias actualizadas
 )
 

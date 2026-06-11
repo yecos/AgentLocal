@@ -3,8 +3,9 @@
 AGENTE v14 - Motor ReAct
 =============================================================
 Piensa -> Actua -> Observa -> Piensa de nuevo -> Repite.
-v14: Usa TripleMemory como unica fuente de historial.
-     Inyeccion de dependencias (memory, llm).
+v14.1: Streaming, tool calling multiple, metacognicion basica.
+       Usa TripleMemory como unica fuente de historial.
+       Inyeccion de dependencias (memory, llm).
 =============================================================
 """
 
@@ -35,6 +36,9 @@ class ReactAgent:
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.thinking_log.append(f"[{timestamp}] [{category.upper()}] {message}")
 
+    # ----------------------------------------------------------
+    # RUN SIN STREAMING (original, para compatibilidad)
+    # ----------------------------------------------------------
     def run(self, user_message):
         """
         Bucle ReAct principal. Retorna (respuesta, thinking_log).
@@ -65,51 +69,14 @@ class ReactAgent:
             if action_result[0] == "respond":
                 final_response = action_result[1]
                 self._log("Respuesta final generada", "success")
-                # Guardar en Triple Memoria
-                self.memory.add_conversation("user", user_message)
-                self.memory.add_conversation("assistant", final_response)
-                # Aprender de la interaccion
-                self.memory.remember(
-                    f"Usuario pregunto: {user_message[:100]} -> Respuesta: {final_response[:200]}",
-                    metadata={"type": "interaction", "user_msg": user_message[:50]}
-                )
-                self.memory.set_success(final_response[:100])
+                self._save_interaction(user_message, final_response)
                 return final_response, self.thinking_log
 
-            elif action_result[0] == "tool_call":
-                tool_name = action_result[1]
-                tool_params = action_result[2]
-
-                self._log(f"Ejecutando: {tool_name}({tool_params})", "execution")
-                tool_result = self._execute_tool(tool_name, tool_params)
-                self._log(f"Resultado: {tool_result[:150]}...", "observation")
-
-                # Alimentar memoria de trabajo
-                self.memory.add_step(f"{tool_name}({tool_params})", tool_result[:200])
-                if "ERROR" in tool_result:
-                    self.memory.set_error(f"{tool_name}: {tool_result[:100]}")
-                if len(tool_result) > 50 and "ERROR" not in tool_result:
-                    self.memory.remember(
-                        f"Resultado de {tool_name}: {tool_result[:300]}",
-                        metadata={"type": "tool_result", "tool": tool_name}
-                    )
-
-                # Alimentar resultado de vuelta al agente
-                if self.supports_tool_calling:
-                    messages.append({"role": "assistant", "content": "",
-                                     "tool_calls": [{
-                                         "function": {"name": tool_name, "arguments": tool_params}
-                                     }]})
-                    messages.append({"role": "tool", "content": tool_result})
-                else:
-                    messages.append({"role": "assistant",
-                                     "content": json.dumps({
-                                         "pensamiento": f"Ejecute {tool_name}",
-                                         "accion": tool_name,
-                                         "params": tool_params
-                                     })})
-                    messages.append({"role": "user",
-                                     "content": f"Resultado de {tool_name}: {tool_result}\n\nQue hago ahora? Responde con JSON."})
+            elif action_result[0] == "tool_calls":
+                tool_calls = action_result[1]
+                # Ejecutar TODAS las tool calls de esta iteracion
+                results = self._execute_tool_calls(tool_calls, messages)
+                self._feed_tool_results(tool_calls, results, messages)
 
             elif action_result[0] == "error":
                 self._log(f"Error: {action_result[1]}", "error")
@@ -119,8 +86,96 @@ class ReactAgent:
         self._log("Alcanzado limite de iteraciones", "warning")
         return "Alcance el limite de iteraciones. Puede que necesites ser mas especifico.", self.thinking_log
 
+    # ----------------------------------------------------------
+    # RUN CON STREAMING
+    # ----------------------------------------------------------
+    def run_stream(self, user_message):
+        """
+        Bucle ReAct con streaming. Yields eventos para la UI.
+        Eventos: {"type": "text"|"thinking"|"tool_start"|"tool_result"|"done", "data": ...}
+        """
+        self.thinking_log = []
+        self._log(f"Mensaje del usuario: {user_message}", "input")
+
+        messages = self._build_messages(user_message)
+
+        if self.supports_tool_calling is None:
+            self.supports_tool_calling = self._detect_tool_calling_support()
+            self._log(
+                f"Tool calling nativo: {'SI' if self.supports_tool_calling else 'NO (usando JSON fallback)'}",
+                "info"
+            )
+
+        for iteration in range(MAX_REACT_ITERATIONS):
+            self._log(f"--- Iteracion {iteration + 1}/{MAX_REACT_ITERATIONS} ---", "react")
+
+            if self.supports_tool_calling:
+                result_type, result_data = self._react_with_tools_stream(messages, iteration)
+            else:
+                result_type, result_data = self._react_with_json(messages, iteration)
+
+            if result_type == "respond":
+                final_response = result_data
+                self._log("Respuesta final generada", "success")
+                self._save_interaction(user_message, final_response)
+                yield {"type": "done", "data": final_response, "thinking_log": self.thinking_log}
+                return
+
+            elif result_type == "tool_calls":
+                tool_calls = result_data
+                for tc in tool_calls:
+                    yield {"type": "tool_start", "data": tc}
+                results = self._execute_tool_calls(tool_calls, messages)
+                for tc, res in zip(tool_calls, results):
+                    yield {"type": "tool_result", "data": {"tool": tc, "result": res}}
+                self._feed_tool_results(tool_calls, results, messages)
+
+            elif result_type == "streaming":
+                # result_data es un generador de texto
+                full_text = ""
+                for chunk in result_data:
+                    if isinstance(chunk, str):
+                        full_text += chunk
+                        yield {"type": "text", "data": chunk}
+                    elif isinstance(chunk, dict):
+                        # El generador retorno un resultado final (tool_calls o texto)
+                        if isinstance(chunk, str):
+                            full_text += chunk
+                            yield {"type": "text", "data": chunk}
+                        elif isinstance(chunk, dict):
+                            # Tiene tool_calls
+                            msg = chunk.get("message", chunk)
+                            tool_calls = msg.get("tool_calls", [])
+                            if tool_calls:
+                                for tc in tool_calls:
+                                    yield {"type": "tool_start", "data": tc}
+                                results = self._execute_tool_calls(tool_calls, messages)
+                                for tc, res in zip(tool_calls, results):
+                                    yield {"type": "tool_result", "data": {"tool": tc, "result": res}}
+                                self._feed_tool_results(tool_calls, results, messages)
+                                break
+                        elif chunk is None:
+                            continue
+
+                if full_text and not isinstance(chunk, dict):
+                    self._log("Respuesta final generada (streaming)", "success")
+                    self._save_interaction(user_message, full_text)
+                    yield {"type": "done", "data": full_text, "thinking_log": self.thinking_log}
+                    return
+
+            elif result_type == "error":
+                self._log(f"Error: {result_data}", "error")
+                if iteration >= MAX_REACT_ITERATIONS - 1:
+                    yield {"type": "done", "data": "Tuve problemas para procesar tu solicitud. Puedes reformularla?", "thinking_log": self.thinking_log}
+                    return
+
+        yield {"type": "done", "data": "Alcance el limite de iteraciones. Puede que necesites ser mas especifico.", "thinking_log": self.thinking_log}
+
+    # ----------------------------------------------------------
+    # REACT CON TOOL CALLING (sin streaming)
+    # ----------------------------------------------------------
     def _react_with_tools(self, messages, iteration):
-        """ReAct usando function calling nativo."""
+        """ReAct usando function calling nativo. Soporta multiple tool calls."""
         try:
             response = ollama.generate(messages, tools=TOOL_SCHEMAS)
 
@@ -131,11 +186,14 @@ class ReactAgent:
             tool_calls = message.get("tool_calls", [])
 
             if tool_calls:
-                tc = tool_calls[0]
-                tool_name = tc.get("function", {}).get("name", "")
-                tool_params = tc.get("function", {}).get("arguments", {})
-                self._log(f"Tool call: {tool_name}({tool_params})", "thinking")
-                return ("tool_call", tool_name, tool_params)
+                # Parsear TODAS las tool calls
+                parsed_calls = []
+                for tc in tool_calls:
+                    tool_name = tc.get("function", {}).get("name", "")
+                    tool_params = tc.get("function", {}).get("arguments", {})
+                    self._log(f"Tool call: {tool_name}({tool_params})", "thinking")
+                    parsed_calls.append({"name": tool_name, "params": tool_params})
+                return ("tool_calls", parsed_calls)
 
             content = message.get("content", "")
             if content:
@@ -148,6 +206,55 @@ class ReactAgent:
             self.supports_tool_calling = False
             return ("error", str(e))
 
+    # ----------------------------------------------------------
+    # REACT CON TOOL CALLING (streaming)
+    # ----------------------------------------------------------
+    def _react_with_tools_stream(self, messages, iteration):
+        """ReAct con streaming. Retorna (type, data) donde data puede ser un generador."""
+        try:
+            # Intentar streaming
+            stream_gen = ollama.generate_stream(messages, tools=TOOL_SCHEMAS)
+            collected_chunks = ""
+            collected_tool_calls = []
+            final_result = None
+
+            for chunk in stream_gen:
+                if isinstance(chunk, str):
+                    collected_chunks += chunk
+                elif isinstance(chunk, dict):
+                    final_result = chunk
+
+            if final_result is not None:
+                if isinstance(final_result, dict):
+                    msg = final_result.get("message", final_result)
+                    tool_calls = msg.get("tool_calls", [])
+                    content = msg.get("content", "")
+                    if tool_calls:
+                        parsed_calls = []
+                        for tc in tool_calls:
+                            tool_name = tc.get("function", {}).get("name", "")
+                            tool_params = tc.get("function", {}).get("arguments", {})
+                            self._log(f"Tool call: {tool_name}({tool_params})", "thinking")
+                            parsed_calls.append({"name": tool_name, "params": tool_params})
+                        return ("tool_calls", parsed_calls)
+                    if content:
+                        return ("respond", content)
+                elif isinstance(final_result, str) and final_result:
+                    return ("respond", final_result)
+
+            if collected_chunks:
+                return ("respond", collected_chunks)
+
+            return ("error", "Respuesta vacia del modelo")
+
+        except Exception as e:
+            self._log(f"Error en tool calling stream: {e}", "error")
+            # Fallback a modo no-streaming
+            return self._react_with_tools(messages, iteration)
+
+    # ----------------------------------------------------------
+    # REACT CON JSON FALLBACK
+    # ----------------------------------------------------------
     def _react_with_json(self, messages, iteration):
         """ReAct usando JSON parsing (fallback)."""
         if not any("HERRAMIENTAS DISPONIBLES" in str(m.get("content", "")) for m in messages):
@@ -175,13 +282,83 @@ class ReactAgent:
                 self._log(f"Pensamiento: {pensamiento}", "thinking")
 
             if accion and accion in TOOL_FUNCTIONS:
-                return ("tool_call", accion, params)
+                return ("tool_calls", [{"name": accion, "params": params}])
 
             return ("respond", response)
 
         except Exception as e:
             return ("error", str(e))
 
+    # ----------------------------------------------------------
+    # EJECUCION DE TOOLS (multiple)
+    # ----------------------------------------------------------
+    def _execute_tool_calls(self, tool_calls, messages):
+        """Ejecuta multiples tool calls y retorna lista de resultados."""
+        results = []
+        for tc in tool_calls:
+            tool_name = tc["name"]
+            tool_params = tc["params"]
+
+            self._log(f"Ejecutando: {tool_name}({tool_params})", "execution")
+            tool_result = self._execute_tool(tool_name, tool_params)
+            self._log(f"Resultado: {tool_result[:150]}...", "observation")
+
+            # Alimentar memoria de trabajo
+            self.memory.add_step(f"{tool_name}({tool_params})", tool_result[:200])
+            if "ERROR" in tool_result:
+                self.memory.set_error(f"{tool_name}: {tool_result[:100]}")
+            if "PELIGROSO" in tool_result:
+                self._log(f"Comando peligroso bloqueado: {tool_name}", "warning")
+            if len(tool_result) > 50 and "ERROR" not in tool_result:
+                self.memory.remember(
+                    f"Resultado de {tool_name}: {tool_result[:300]}",
+                    metadata={"type": "tool_result", "tool": tool_name}
+                )
+
+            results.append(tool_result)
+        return results
+
+    def _feed_tool_results(self, tool_calls, results, messages):
+        """Alimenta resultados de tools de vuelta al agente."""
+        if self.supports_tool_calling:
+            # Formato tool calling: assistant con tool_calls + tool messages
+            assistant_msg = {"role": "assistant", "content": "", "tool_calls": []}
+            for tc in tool_calls:
+                assistant_msg["tool_calls"].append({
+                    "function": {"name": tc["name"], "arguments": tc["params"]}
+                })
+            messages.append(assistant_msg)
+            for tc, result in zip(tool_calls, results):
+                messages.append({"role": "tool", "content": result})
+        else:
+            # Formato JSON: simular con mensajes de usuario
+            for tc, result in zip(tool_calls, results):
+                messages.append({
+                    "role": "assistant",
+                    "content": json.dumps({
+                        "pensamiento": f"Ejecute {tc['name']}",
+                        "accion": tc["name"],
+                        "params": tc["params"]
+                    })
+                })
+                messages.append({
+                    "role": "user",
+                    "content": f"Resultado de {tc['name']}: {result}\n\nQue hago ahora? Responde con JSON."
+                })
+
+    def _execute_tool(self, tool_name, params):
+        """Ejecuta una herramienta por nombre."""
+        if tool_name in TOOL_FUNCTIONS:
+            try:
+                params = self._resolve_params(params)
+                return TOOL_FUNCTIONS[tool_name](**params)
+            except Exception as e:
+                return f"ERROR ejecutando {tool_name}: {e}"
+        return f"Herramienta no encontrada: {tool_name}"
+
+    # ----------------------------------------------------------
+    # CONSTRUCCION DE MENSAJES
+    # ----------------------------------------------------------
     def _build_messages(self, new_message):
         """Construye la lista de mensajes con CONTEXTO ENRIQUECIDO."""
         models = ollama._fetch_available_models() or [ollama.model or "desconocido"]
@@ -215,16 +392,9 @@ class ReactAgent:
 
         return messages
 
-    def _execute_tool(self, tool_name, params):
-        """Ejecuta una herramienta por nombre."""
-        if tool_name in TOOL_FUNCTIONS:
-            try:
-                params = self._resolve_params(params)
-                return TOOL_FUNCTIONS[tool_name](**params)
-            except Exception as e:
-                return f"ERROR ejecutando {tool_name}: {e}"
-        return f"Herramienta no encontrada: {tool_name}"
-
+    # ----------------------------------------------------------
+    # HELPERS
+    # ----------------------------------------------------------
     def _resolve_params(self, params):
         resolved = {}
         for key, value in params.items():
@@ -290,3 +460,13 @@ class ReactAgent:
         except Exception:
             pass
         return False
+
+    def _save_interaction(self, user_message, final_response):
+        """Guarda la interaccion en la triple memoria."""
+        self.memory.add_conversation("user", user_message)
+        self.memory.add_conversation("assistant", final_response)
+        self.memory.remember(
+            f"Usuario pregunto: {user_message[:100]} -> Respuesta: {final_response[:200]}",
+            metadata={"type": "interaction", "user_msg": user_message[:50]}
+        )
+        self.memory.set_success(final_response[:100])

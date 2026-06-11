@@ -141,6 +141,7 @@ def check_imports():
         ("utils.security", "from utils.security import is_dangerous_command, validate_path"),
         ("utils.helpers", "from utils.helpers import strip_prefixes, open_in_browser"),
         ("memory.vectorstore", "from memory.vectorstore import VectorStore"),
+        ("memory.chroma_store", "from memory.chroma_store import create_vector_store"),
         ("memory.learning", "from memory.learning import LearningSystem"),
         ("memory.triple_memory", "from memory.triple_memory import TripleMemory"),
         ("tools", "from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS"),
@@ -186,7 +187,7 @@ def install_deps():
     """Instala dependencias faltantes."""
     import subprocess
     result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "streamlit", "ollama", "--quiet"],
+        [sys.executable, "-m", "pip", "install", "streamlit", "ollama", "chromadb", "--quiet"],
         capture_output=True, text=True
     )
     if result.returncode == 0:
