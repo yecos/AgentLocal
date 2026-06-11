@@ -308,33 +308,44 @@ class OllamaClient:
     def generate_stream(self, messages, tools=None, model_override=None):
         """
         Genera respuesta del LLM con streaming.
-        Yields: chunks de texto a medida que se generan.
-        Retorna el resultado final (str o dict con tool_calls).
+        Yields: str (tokens de texto) o dict (resultado final con tool_calls).
+        El llamador itera sobre los chunks para streaming en tiempo real.
+        Retorna None si todo falla (el llamador debe usar generate() como fallback).
         """
         self.detect_models()
         model = model_override or self.model
-        host = self.host or 'http://localhost:11434'
 
-        # Intentar streaming via HTTP
-        result = yield from self._stream_http(host, model, messages, tools)
-        if result is not None:
-            return result
+        # Probar hosts en orden
+        hosts = [self.host] if self.host else ['http://localhost:11434', 'http://127.0.0.1:11434']
+        hosts = [h for h in hosts if h]  # Filtrar None
+        if not hosts:
+            hosts = ['http://localhost:11434', 'http://127.0.0.1:11434']
 
-        # Fallback: streaming via client
-        result = yield from self._stream_client(host, model, messages, tools)
-        if result is not None:
-            return result
+        for host in hosts:
+            # Intentar streaming HTTP directo (mas rapido)
+            stream = self._try_stream_http(host, model, messages, tools)
+            if stream is not None:
+                yield from stream
+                return
+
+            # Intentar streaming via client
+            stream = self._try_stream_client(host, model, messages, tools)
+            if stream is not None:
+                yield from stream
+                return
 
         # Ultimo fallback: sin streaming
         result = self.generate(messages, tools=tools, model_override=model_override)
         if result:
             if isinstance(result, str):
                 yield result
-            return result
-        return ""
+            elif isinstance(result, dict):
+                yield result
+            return
+        return
 
-    def _stream_http(self, host, model, messages, tools):
-        """Streaming via HTTP directo."""
+    def _try_stream_http(self, host, model, messages, tools):
+        """Intenta streaming HTTP. Retorna generador o None si falla."""
         try:
             import urllib.request
             payload = {
@@ -350,94 +361,108 @@ class OllamaClient:
                 data=data,
                 headers={"Content-Type": "application/json"}
             )
-            with urllib.request.urlopen(req, timeout=LLM_TIMEOUT_LARGE) as resp:
-                full_content = ""
-                full_tool_calls = []
-                for line in resp:
-                    line = line.decode("utf-8").strip()
-                    if not line:
-                        continue
-                    try:
-                        chunk = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
 
-                    msg = chunk.get("message", {})
-                    content = msg.get("content", "")
-                    tool_calls = msg.get("tool_calls", [])
+            def _stream():
+                with urllib.request.urlopen(req, timeout=LLM_TIMEOUT_LARGE) as resp:
+                    full_content = ""
+                    full_tool_calls = []
+                    for line in resp:
+                        line = line.decode("utf-8").strip()
+                        if not line:
+                            continue
+                        try:
+                            chunk = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
 
-                    if content:
-                        full_content += content
-                        yield content
+                        msg = chunk.get("message", {})
+                        content = msg.get("content", "")
+                        tool_calls = msg.get("tool_calls", [])
 
-                    if tool_calls:
-                        full_tool_calls.extend(tool_calls)
+                        if content:
+                            full_content += content
+                            yield content
 
-                    if chunk.get("done", False):
-                        # Guardar conexion exitosa
-                        self.host = host
-                        self.method = 'http'
-                        self._save_connection_cache()
+                        if tool_calls:
+                            full_tool_calls.extend(tool_calls)
 
-                        if full_tool_calls:
-                            return {
-                                "message": {
-                                    "content": full_content,
-                                    "tool_calls": full_tool_calls
+                        if chunk.get("done", False):
+                            self.host = host
+                            self.method = 'http'
+                            self._save_connection_cache()
+
+                            if full_tool_calls:
+                                yield {
+                                    "message": {
+                                        "content": full_content,
+                                        "tool_calls": full_tool_calls
+                                    }
                                 }
-                            }
-                        return full_content
+                            return
+
+            # Test rapido: verificar que podemos abrir la conexion
+            test_req = urllib.request.Request(
+                f"{host}/api/tags",
+                headers={"Content-Type": "application/json"}
+            )
+            urllib.request.urlopen(test_req, timeout=3)
+            return _stream()
         except Exception as e:
-            logger.debug(f"HTTP streaming failed: {e}")
+            logger.debug(f"HTTP streaming setup failed: {e}")
         return None
 
-    def _stream_client(self, host, model, messages, tools):
-        """Streaming via ollama.Client."""
+    def _try_stream_client(self, host, model, messages, tools):
+        """Intenta streaming via ollama.Client. Retorna generador o None si falla."""
         try:
             import ollama as ollama_lib
             client = ollama_lib.Client(host=host)
 
-            full_content = ""
-            full_tool_calls = []
+            def _stream():
+                full_content = ""
+                full_tool_calls = []
 
-            if tools:
-                # ollama client no soporta streaming con tools
-                # Usar modo no-streaming y yield todo de golpe
-                response = client.chat(model=model, messages=messages, tools=tools)
-                msg = response.get("message", response)
-                content = msg.get("content", "")
-                tool_calls = msg.get("tool_calls", [])
-
-                if content:
-                    full_content = content
-                    yield content
-                if tool_calls:
-                    full_tool_calls = tool_calls
-
-                self.host = host
-                self.method = 'client'
-                self._save_connection_cache()
-
-                if full_tool_calls:
-                    return {"message": {"content": full_content, "tool_calls": full_tool_calls}}
-                return full_content
-            else:
-                stream = client.chat(model=model, messages=messages, stream=True)
-                for chunk in stream:
-                    msg = chunk.get("message", {})
+                if tools:
+                    # ollama client no soporta streaming con tools
+                    # Usar modo no-streaming y yield todo de golpe
+                    response = client.chat(model=model, messages=messages, tools=tools)
+                    msg = response.get("message", response)
                     content = msg.get("content", "")
-                    if content:
-                        full_content += content
-                        yield content
+                    tool_calls = msg.get("tool_calls", [])
 
-                    if chunk.get("done", False):
-                        self.host = host
-                        self.method = 'client'
-                        self._save_connection_cache()
-                        return full_content
+                    if content:
+                        full_content = content
+                        yield content
+                    if tool_calls:
+                        full_tool_calls = tool_calls
+
+                    self.host = host
+                    self.method = 'client'
+                    self._save_connection_cache()
+
+                    if full_tool_calls:
+                        yield {"message": {"content": full_content, "tool_calls": full_tool_calls}}
+                    return
+                else:
+                    stream = client.chat(model=model, messages=messages, stream=True)
+                    for chunk in stream:
+                        msg = chunk.get("message", {})
+                        content = msg.get("content", "")
+                        if content:
+                            full_content += content
+                            yield content
+
+                        if chunk.get("done", False):
+                            self.host = host
+                            self.method = 'client'
+                            self._save_connection_cache()
+                            return
+
+            return _stream()
         except Exception as e:
-            logger.debug(f"Client streaming failed: {e}")
+            logger.debug(f"Client streaming setup failed: {e}")
         return None
+
+
 
     # ----------------------------------------------------------
     # METODOS INTERNOS
