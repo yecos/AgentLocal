@@ -36,10 +36,12 @@ class ChromaVectorStore:
     """
     Vector store basado en ChromaDB con decaimiento temporal y deduplicacion.
     Escalable a miles de documentos con busqueda semantica rapida.
-    v2: Auto-deteccion y recreacion ante mismatch de dimensiones de embeddings.
+    v3: Auto-deteccion robusta y recreacion ante mismatch de dimensiones de embeddings.
+        Catch-all de errores de dimension para que NUNCA crashee el agente.
     """
 
     DECAY_HALF_LIFE_DAYS = 30  # Los recuerdos pierden la mitad de relevancia en 30 dias
+    MAX_RECREATE_RETRIES = 2   # Max reintentos al recrear coleccion por dimension mismatch
 
     def __init__(self, store_dir=None):
         self.store_dir = store_dir or os.path.join(LEARN_DIR, "vectors")
@@ -53,6 +55,9 @@ class ChromaVectorStore:
 
         # Obtener o crear coleccion con validacion de dimensiones
         self._collection = self._get_or_create_collection()
+
+        # Validacion post-init: verificar que las dimensiones coinciden
+        self._validate_collection_dimension()
 
         self._index_meta = self._load_meta()
         logger.info(f"ChromaDB inicializado: {self._collection.count()} documentos (dim={self._embedding_dim})")
@@ -82,6 +87,46 @@ class ChromaVectorStore:
         except Exception:
             pass
         return None
+
+    def _validate_collection_dimension(self):
+        """Validacion post-inicializacion: prueba insertar y buscar un vector de prueba.
+        Si falla por dimension mismatch, recrea la coleccion automaticamente.
+        Esto atrapa casos donde _get_or_create_collection no detecto el mismatch.
+        """
+        if self._embedding_dim is None:
+            return
+        try:
+            # Intentar una operacion de query con un vector de la dimension actual
+            test_vec = [0.0] * self._embedding_dim
+            self._collection.query(
+                query_embeddings=[test_vec],
+                n_results=1,
+                include=["distances"]
+            )
+            logger.debug("Validacion de dimensiones ChromaDB: OK")
+        except Exception as e:
+            err_msg = str(e).lower()
+            if "dimension" in err_msg or "dim" in err_msg:
+                logger.warning(
+                    f"⚠️ MISMATCH DETECTADO EN VALIDACION POST-INIT: {e}. "
+                    f"Recreando coleccion con dim={self._embedding_dim}..."
+                )
+                self._force_recreate_collection()
+            else:
+                logger.debug(f"Validacion ChromaDB fallo (no es dimension): {e}")
+
+    def _force_recreate_collection(self):
+        """Fuerza la recreacion de la coleccion, eliminando datos previos."""
+        try:
+            self._client.delete_collection(name="agent_memory")
+            logger.info("Coleccion 'agent_memory' eliminada para recreacion")
+        except Exception:
+            pass
+        metadata = {"hnsw:space": "cosine"}
+        if self._embedding_dim is not None:
+            metadata["hnsw:dim"] = self._embedding_dim
+        self._collection = self._client.create_collection(name="agent_memory", metadata=metadata)
+        logger.info(f"Coleccion recreada con dim={self._embedding_dim}")
 
     def _get_or_create_collection(self):
         """Obtiene o crea la coleccion, manejando mismatch de dimensiones."""
@@ -158,9 +203,15 @@ class ChromaVectorStore:
         """
         Verifica si un texto es duplicado semantico de uno existente.
         Usa embeddings para comparar.
+        v3: Catch de errores de dimension para no crashear.
         """
         embedding = ollama.get_embedding(text)
         if not embedding:
+            return False
+
+        # Verificar dimension antes de consultar
+        if self._embedding_dim is not None and len(embedding) != self._embedding_dim:
+            logger.debug(f"Dimension mismatch en _is_duplicate, saltando verificacion")
             return False
 
         try:
@@ -175,7 +226,15 @@ class ChromaVectorStore:
                 similarity = 1 - distance
                 return similarity >= threshold
         except Exception as e:
-            logger.debug(f"Error verificando duplicado semantico: {e}")
+            err_msg = str(e).lower()
+            if "dimension" in err_msg or "dim" in err_msg:
+                logger.warning(f"Dimension mismatch en _is_duplicate, recreando coleccion...")
+                try:
+                    self._handle_dimension_error(embedding)
+                except Exception:
+                    pass
+            else:
+                logger.debug(f"Error verificando duplicado semantico: {e}")
         return False
 
     def add(self, text, metadata=None, entry_id=None, skip_embedding=False):
@@ -184,6 +243,7 @@ class ChromaVectorStore:
         Args:
             skip_embedding: Si True, NO calcula embedding (mas rapido).
                            La entrada solo aparecera en busquedas por texto.
+        v3: Catch-all de errores de dimension con reintento automatico.
         """
         if not entry_id:
             entry_id = hashlib.md5(text.encode()).hexdigest()[:12]
@@ -196,10 +256,14 @@ class ChromaVectorStore:
         except Exception as e:
             logger.debug(f"Error verificando entrada existente en ChromaDB: {e}")
 
-        # Verificar duplicado semantico (solo si tenemos embedding)
-        if not skip_embedding and self._is_duplicate(text):
-            logger.debug(f"Texto duplicado semantico, saltando: {text[:50]}...")
-            return entry_id
+        # Verificar duplicado semantico (solo si tenemos embedding y no skip)
+        if not skip_embedding:
+            try:
+                if self._is_duplicate(text):
+                    logger.debug(f"Texto duplicado semantico, saltando: {text[:50]}...")
+                    return entry_id
+            except Exception as e:
+                logger.debug(f"Error verificando duplicado semantico: {e}")
 
         now = datetime.now().isoformat()
 
@@ -211,61 +275,96 @@ class ChromaVectorStore:
         # Si skip_embedding, guardar solo con metadatos (sin calculo de embedding)
         if skip_embedding:
             meta["no_embedding"] = True
-            self._collection.add(
-                ids=[entry_id],
-                documents=[text[:500]],
-                metadatas=[meta]
-            )
+            try:
+                self._collection.add(
+                    ids=[entry_id],
+                    documents=[text[:500]],
+                    metadatas=[meta]
+                )
+            except Exception as e:
+                logger.debug(f"Error agregando sin embedding a ChromaDB: {e}")
             return entry_id
 
         # Obtener embedding
         embedding = ollama.get_embedding(text)
 
         if embedding:
+            # Actualizar dimension si es la primera vez que obtenemos un embedding valido
+            if self._embedding_dim is None:
+                self._embedding_dim = len(embedding)
+                logger.info(f"Dimension de embedding detectada dinamicamente: {self._embedding_dim}")
+
             # Validar dimension del embedding antes de insertar
-            if self._embedding_dim is not None and len(embedding) != self._embedding_dim:
+            if len(embedding) != self._embedding_dim:
                 logger.warning(
                     f"Embedding con dimension incorrecta ({len(embedding)} vs {self._embedding_dim}). "
-                    f"Recreando coleccion..."
+                    f"Actualizando dimension y recreando coleccion..."
                 )
                 self._handle_dimension_error(embedding)
 
-            try:
-                self._collection.add(
-                    ids=[entry_id],
-                    embeddings=[embedding],
-                    documents=[text[:500]],
-                    metadatas=[meta]
-                )
-            except chromadb.errors.InvalidArgumentError as e:
-                if "dimension" in str(e).lower():
-                    logger.warning(f"Error de dimension al insertar. Recreando coleccion y reintentando...")
-                    self._handle_dimension_error(embedding)
+            # Intentar insertar con catch-all de errores de dimension
+            for attempt in range(self.MAX_RECREATE_RETRIES + 1):
+                try:
                     self._collection.add(
                         ids=[entry_id],
                         embeddings=[embedding],
                         documents=[text[:500]],
                         metadatas=[meta]
                     )
-                else:
-                    raise
+                    return entry_id
+                except Exception as e:
+                    err_msg = str(e).lower()
+                    if "dimension" in err_msg or "dim" in err_msg:
+                        if attempt < self.MAX_RECREATE_RETRIES:
+                            logger.warning(
+                                f"Error de dimension al insertar (intento {attempt + 1}). "
+                                f"Recreando coleccion..."
+                            )
+                            self._handle_dimension_error(embedding)
+                        else:
+                            logger.error(
+                                f"No se pudo resolver error de dimension tras {attempt + 1} intentos. "
+                                f"Guardando sin embedding."
+                            )
+                            # Fallback: guardar sin embedding para no perder el dato
+                            meta["no_embedding"] = True
+                            try:
+                                self._collection.add(
+                                    ids=[entry_id],
+                                    documents=[text[:500]],
+                                    metadatas=[meta]
+                                )
+                            except Exception:
+                                pass
+                            return entry_id
+                    else:
+                        logger.debug(f"Error al insertar en ChromaDB (no dimension): {e}")
+                        return entry_id
         else:
             # Sin embedding, guardar solo con metadatos
             meta["no_embedding"] = True
-            self._collection.add(
-                ids=[entry_id],
-                documents=[text[:500]],
-                metadatas=[meta]
-            )
+            try:
+                self._collection.add(
+                    ids=[entry_id],
+                    documents=[text[:500]],
+                    metadatas=[meta]
+                )
+            except Exception as e:
+                logger.debug(f"Error agregando sin embedding a ChromaDB: {e}")
 
         return entry_id
 
     def _handle_dimension_error(self, sample_embedding=None):
-        """Maneja error de dimension recreando la coleccion."""
+        """Maneja error de dimension recreando la coleccion.
+        v3: Actualiza _embedding_dim con la dimension real del embedding recibido.
+        """
         new_dim = len(sample_embedding) if sample_embedding else self._embedding_dim
         if new_dim:
             self._embedding_dim = new_dim
-        logger.warning(f"Recreando coleccion 'agent_memory' con dim={new_dim} (datos previos se pierden)")
+        logger.warning(
+            f"Recreando coleccion 'agent_memory' con dim={new_dim} "
+            f"(datos previos se pierden para evitar errores de dimension)"
+        )
         try:
             self._client.delete_collection(name="agent_memory")
         except Exception:
@@ -273,7 +372,11 @@ class ChromaVectorStore:
         metadata = {"hnsw:space": "cosine"}
         if new_dim:
             metadata["hnsw:dim"] = new_dim
-        self._collection = self._client.create_collection(name="agent_memory", metadata=metadata)
+        try:
+            self._collection = self._client.create_collection(name="agent_memory", metadata=metadata)
+            logger.info(f"Coleccion recreada exitosamente con dim={new_dim}")
+        except Exception as e:
+            logger.error(f"Error recreando coleccion: {e}")
 
     def get_info(self):
         """Retorna info de diagnostico de la coleccion."""
@@ -287,16 +390,23 @@ class ChromaVectorStore:
         }
 
     def search(self, query, limit=5, min_similarity=0.3):
-        """Busca entradas semanticamente similares con decaimiento temporal."""
+        """Busca entradas semanticamente similares con decaimiento temporal.
+        v3: Catch-all de errores de dimension con fallback a busqueda por texto.
+        """
         query_embedding = ollama.get_embedding(query)
         if not query_embedding:
             return self._text_search(query, limit)
 
+        # Actualizar dimension si es la primera vez que obtenemos un embedding valido
+        if self._embedding_dim is None:
+            self._embedding_dim = len(query_embedding)
+            logger.info(f"Dimension de embedding detectada dinamicamente: {self._embedding_dim}")
+
         # Validar dimension del embedding antes de buscar
-        if self._embedding_dim is not None and len(query_embedding) != self._embedding_dim:
+        if len(query_embedding) != self._embedding_dim:
             logger.warning(
                 f"Dimension mismatch en search: {len(query_embedding)} vs {self._embedding_dim}. "
-                f"Recreando coleccion y usando text search..."
+                f"Actualizando dimension y recreando coleccion..."
             )
             try:
                 self._handle_dimension_error(query_embedding)
@@ -346,7 +456,7 @@ class ChromaVectorStore:
 
         except Exception as e:
             err_msg = str(e).lower()
-            if "dimension" in err_msg:
+            if "dimension" in err_msg or "dim" in err_msg:
                 logger.warning(f"Dimension mismatch en query, recreando coleccion...")
                 try:
                     self._handle_dimension_error(query_embedding)
