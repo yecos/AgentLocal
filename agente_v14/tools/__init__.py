@@ -1027,6 +1027,142 @@ def info_modelos() -> str:
     return output
 
 
+# --- Environment Manager (v18) ---
+
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "gestionar_entorno",
+        "description": "Gestiona entornos de desarrollo: crear virtualenvs, instalar paquetes Python/Node, detectar entorno de proyecto, ejecutar comandos en el entorno correcto. Usa ESTO en vez de ejecutar_comando para pip install o npm install.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "accion": {"type": "string", "description": "Accion: crear_venv, instalar_python, instalar_node, detectar_entorno, ejecutar, version_node, set_version_node"},
+                "ruta_proyecto": {"type": "string", "description": "Ruta al proyecto"},
+                "paquetes": {"type": "string", "description": "Paquetes a instalar (separados por coma)"},
+                "dev": {"type": "boolean", "description": "Instalar como dependencia de desarrollo (default: false)"},
+                "comando": {"type": "string", "description": "Comando a ejecutar (para accion=ejecutar)"},
+                "version": {"type": "string", "description": "Version (para set_version_node)"},
+                "nombre_venv": {"type": "string", "description": "Nombre del venv (default: .venv)"}
+            },
+            "required": ["accion"]
+        }
+    }
+})
+def gestionar_entorno(accion: str, ruta_proyecto: str = "", paquetes: str = "",
+                      dev: bool = False, comando: str = "", version: str = "",
+                      nombre_venv: str = ".venv") -> str:
+    """Gestiona entornos de desarrollo (Python/Node)."""
+    from .env_manager import get_env_manager
+
+    mgr = get_env_manager()
+    accion = accion.lower().strip()
+
+    if accion == "crear_venv":
+        result = mgr.create_venv(ruta_proyecto or REPOS_DIR, name=nombre_venv)
+    elif accion == "instalar_python":
+        if not paquetes:
+            return "ERROR: Especifica los paquetes a instalar"
+        pkg_list = [p.strip() for p in paquetes.split(",")]
+        result = mgr.install_python_packages(pkg_list, project_path=ruta_proyecto or None, dev=dev)
+    elif accion == "instalar_node":
+        if not paquetes:
+            return "ERROR: Especifica los paquetes a instalar"
+        pkg_list = [p.strip() for p in paquetes.split(",")]
+        result = mgr.install_node_packages(pkg_list, project_path=ruta_proyecto or None, dev=dev)
+    elif accion == "detectar_entorno":
+        result = mgr.detect_project_environment(ruta_proyecto or REPOS_DIR)
+    elif accion == "ejecutar":
+        if not comando:
+            return "ERROR: Especifica el comando a ejecutar"
+        result = mgr.run_in_env(comando, project_path=ruta_proyecto or REPOS_DIR)
+    elif accion == "version_node":
+        result = {"node_version": mgr.get_node_version()}
+    elif accion == "set_version_node":
+        if not version:
+            return "ERROR: Especifica la version de Node.js"
+        result = mgr.set_node_version(version, project_path=ruta_proyecto or None)
+    else:
+        return f"Accion no soportada: {accion}. Usa: crear_venv, instalar_python, instalar_node, detectar_entorno, ejecutar, version_node, set_version_node"
+
+    if result.get("success") or "node_version" in result or isinstance(result, dict):
+        return json.dumps(result, ensure_ascii=False, indent=2, default=str)[:2000]
+    return f"ERROR: {result.get('error', 'Error desconocido')}"
+
+
+# --- User Feedback (v18) ---
+
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "registrar_feedback",
+        "description": "Registra feedback del usuario sobre una respuesta del agente (thumbs up/down, rating, correccion). Esto ayuda al agente a mejorar con el tiempo.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "id_mensaje": {"type": "string", "description": "ID del mensaje al que corresponde el feedback"},
+                "tipo_feedback": {"type": "string", "description": "Tipo: thumbs_up, thumbs_down, rating, correction"},
+                "calificacion": {"type": "integer", "description": "Calificacion 1-5 (para tipo=rating)"},
+                "comentario": {"type": "string", "description": "Comentario o correccion del usuario"},
+                "herramienta": {"type": "string", "description": "Herramienta que se uso en la respuesta (opcional)"}
+            },
+            "required": ["id_mensaje", "tipo_feedback"]
+        }
+    }
+})
+def registrar_feedback(id_mensaje: str, tipo_feedback: str, calificacion: int = 0,
+                       comentario: str = "", herramienta: str = "") -> str:
+    """Registra feedback del usuario."""
+    from .user_feedback import feedback_tracker
+
+    details = {}
+    if calificacion:
+        details["rating"] = calificacion
+    if comentario:
+        details["comment"] = comentario
+    if herramienta:
+        details["tool"] = herramienta
+
+    result = feedback_tracker.record_feedback(id_mensaje, tipo_feedback, details or None)
+
+    if result.get("success"):
+        return "Feedback registrado. Gracias por ayudarme a mejorar!"
+    return f"ERROR: {result.get('error', 'No se pudo registrar')}"
+
+
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "stats_feedback",
+        "description": "Muestra estadisticas de feedback del usuario: thumbs up/down, rating promedio, tendencias, y areas de mejora.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    }
+})
+def stats_feedback() -> str:
+    """Muestra estadisticas de feedback."""
+    from .user_feedback import feedback_tracker
+
+    stats = feedback_tracker.get_feedback_stats()
+    output = "ESTADISTICAS DE FEEDBACK:\n\n"
+    output += f"  Total: {stats.get('total_feedback', 0)}\n"
+    output += f"  Thumbs up: {stats.get('thumbs_up', 0)}\n"
+    output += f"  Thumbs down: {stats.get('thumbs_down', 0)}\n"
+    output += f"  Rating promedio: {stats.get('avg_rating', 0):.1f}/5\n"
+    output += f"  Tendencia: {stats.get('recent_trend', 'N/A')}\n"
+
+    by_tool = stats.get("by_tool", {})
+    if by_tool:
+        output += "\n  Por herramienta:\n"
+        for tool, counts in by_tool.items():
+            output += f"    {tool}: +{counts.get('positive', 0)} / -{counts.get('negative', 0)}\n"
+
+    return output
+
+
 # ============================================================
 # CARGAR SKILLS DINAMICAMENTE
 # ============================================================
