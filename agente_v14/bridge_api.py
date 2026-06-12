@@ -15,6 +15,9 @@ import os
 import json
 import asyncio
 import time
+import queue
+import threading
+import traceback
 
 # Agregar directorio del agente al path
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -51,6 +54,7 @@ app.add_middleware(
 # --- Singleton del agente ---
 _agent: Optional[ReactAgent] = None
 _start_time = time.time()
+_busy = False  # Flag: el agente esta procesando
 
 
 def get_agent() -> ReactAgent:
@@ -100,6 +104,7 @@ async def status():
     return {
         "connected": ollama_ok,
         "agent_available": AGENT_AVAILABLE,
+        "busy": _busy,
         "models": [
             {
                 "name": m.get("name", ""),
@@ -148,7 +153,7 @@ async def chat(request: ChatRequest):
 
     if request.stream:
         return StreamingResponse(
-            _stream_agent(agent, request.message),
+            _stream_agent_threaded(agent, request.message),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -157,8 +162,9 @@ async def chat(request: ChatRequest):
             }
         )
     else:
-        # Modo sin streaming
-        response, thinking_log = agent.run(request.message)
+        # Modo sin streaming - correr en thread para no bloquear
+        loop = asyncio.get_event_loop()
+        response, thinking_log = await loop.run_in_executor(None, agent.run, request.message)
         return ChatResponse(
             response=response,
             thinking_log=thinking_log,
@@ -167,41 +173,79 @@ async def chat(request: ChatRequest):
         )
 
 
-async def _stream_agent(agent: ReactAgent, message: str):
-    """Genera eventos SSE desde el agente ReAct con streaming."""
+def _agent_runner(agent: ReactAgent, message: str, q: queue.Queue):
+    """
+    Corre agent.run_stream() en un thread separado.
+    Pone cada evento en la queue para que el async generator lo consuma.
+    Esto evita bloquear el event loop de FastAPI.
+    """
+    global _busy
+    _busy = True
     try:
         for event in agent.run_stream(message):
+            q.put(event)
+        # Senal de fin
+        q.put(None)
+    except Exception as e:
+        print(f"[ERROR] _agent_runner: {e}")
+        traceback.print_exc()
+        q.put({"type": "error", "data": str(e)})
+        q.put(None)
+    finally:
+        _busy = False
+
+
+async def _stream_agent_threaded(agent: ReactAgent, message: str):
+    """
+    Genera eventos SSE desde el agente ReAct SIN bloquear el event loop.
+    Usa un thread separado para correr el generador sincrono.
+    """
+    q = queue.Queue()
+
+    # Iniciar el generador sincrono en un thread
+    thread = threading.Thread(
+        target=_agent_runner,
+        args=(agent, message, q),
+        daemon=True,
+    )
+    thread.start()
+
+    try:
+        while True:
+            # Esperar evento de la queue sin bloquear el event loop
+            event = await asyncio.get_event_loop().run_in_executor(None, q.get)
+
+            # None = fin del stream
+            if event is None:
+                break
+
             event_type = event.get("type", "text")
             event_data = event.get("data", "")
 
             if event_type == "text":
-                # Token de texto - enviar como SSE
                 yield f"data: {json.dumps({'type': 'text', 'data': event_data}, ensure_ascii=False)}\n\n"
 
             elif event_type == "tool_start":
-                # Inicio de tool call
                 tool_info = {
                     "type": "tool_start",
                     "data": {
-                        "name": event_data.get("name", "unknown"),
-                        "arguments": event_data.get("arguments", {}),
+                        "name": event_data.get("name", "unknown") if isinstance(event_data, dict) else str(event_data),
+                        "arguments": event_data.get("arguments", {}) if isinstance(event_data, dict) else {},
                     }
                 }
                 yield f"data: {json.dumps(tool_info, ensure_ascii=False)}\n\n"
 
             elif event_type == "tool_result":
-                # Resultado de tool call
                 result_info = {
                     "type": "tool_result",
                     "data": {
-                        "tool": event_data.get("tool", {}),
-                        "result": event_data.get("result", "")[:500],  # Limitar resultado
+                        "tool": event_data.get("tool", {}) if isinstance(event_data, dict) else {},
+                        "result": str(event_data.get("result", ""))[:500] if isinstance(event_data, dict) else str(event_data)[:500],
                     }
                 }
                 yield f"data: {json.dumps(result_info, ensure_ascii=False)}\n\n"
 
             elif event_type == "meta":
-                # Metacognicion
                 meta_info = {
                     "type": "meta",
                     "data": event_data,
@@ -209,7 +253,6 @@ async def _stream_agent(agent: ReactAgent, message: str):
                 yield f"data: {json.dumps(meta_info, ensure_ascii=False)}\n\n"
 
             elif event_type == "done":
-                # Respuesta final
                 done_info = {
                     "type": "done",
                     "data": event_data if isinstance(event_data, str) else "",
@@ -218,12 +261,13 @@ async def _stream_agent(agent: ReactAgent, message: str):
                 }
                 yield f"data: {json.dumps(done_info, ensure_ascii=False)}\n\n"
 
-            # Pequeña pausa para no saturar
-            await asyncio.sleep(0.001)
+            elif event_type == "error":
+                yield f"data: {json.dumps({'type': 'error', 'data': str(event_data)}, ensure_ascii=False)}\n\n"
 
     except Exception as e:
-        error_msg = f"Error del agente: {str(e)}"
-        yield f"data: {json.dumps({'type': 'error', 'data': error_msg}, ensure_ascii=False)}\n\n"
+        print(f"[ERROR] _stream_agent_threaded: {e}")
+        traceback.print_exc()
+        yield f"data: {json.dumps({'type': 'error', 'data': f'Stream error: {str(e)}'}, ensure_ascii=False)}\n\n"
 
 
 @app.post("/api/chat/simple")
@@ -256,8 +300,8 @@ async def chat_simple(request: ChatRequest):
 
 @app.get("/api/health")
 async def health():
-    """Health check."""
-    return {"status": "ok", "agent": AGENT_AVAILABLE}
+    """Health check - rapido, nunca bloquea."""
+    return {"status": "ok", "agent": AGENT_AVAILABLE, "busy": _busy}
 
 
 # --- Main ---
@@ -265,8 +309,9 @@ async def health():
 if __name__ == "__main__":
     import uvicorn
     print("=" * 60)
-    print("  ZAI Agent Bridge API")
+    print("  ZAI Agent Bridge API v2.0")
     print("  Puerto: 8000")
     print("  Agente:", "DISPONIBLE" if AGENT_AVAILABLE else "NO DISPONIBLE")
+    print("  Threading: ACTIVADO (no bloquea event loop)")
     print("=" * 60)
     uvicorn.run(app, host="0.0.0.0", port=8000)
