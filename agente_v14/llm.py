@@ -230,15 +230,53 @@ class OllamaClient:
             self.code_model = self.model
 
     def _detect_embed_model(self, available):
-        """Detecta que modelo de embeddings esta disponible."""
+        """Detecta que modelo de embeddings esta disponible.
+        v3: Guarda el modelo detectado en cache para consistencia entre sesiones.
+        """
+        # Primero intentar cargar modelo de embeddings desde cache
+        cached_embed = self._load_embed_model_cache()
+        if cached_embed:
+            # Verificar que el modelo cacheado siga instalado
+            available_lower = [m.lower() for m in available]
+            if any(cached_embed.lower() in al for al in available_lower):
+                self.embed_model = cached_embed
+                logger.info(f"Modelo de embeddings (desde cache): {cached_embed}")
+                return
+            else:
+                logger.warning(f"Modelo de embeddings cacheado '{cached_embed}' ya no esta instalado. Detectando nuevo...")
+        
         available_lower = [m.lower() for m in available]
         for candidate in EMBED_MODEL_CANDIDATES:
             for al in available_lower:
                 if candidate in al:
                     self.embed_model = candidate
                     logger.info(f"Modelo de embeddings detectado: {candidate}")
+                    # Guardar en cache para consistencia
+                    self._save_embed_model_cache(candidate)
                     return
         self.embed_model = "nomic-embed-text"  # Default
+        self._save_embed_model_cache(self.embed_model)
+
+    def _load_embed_model_cache(self):
+        """Carga el modelo de embeddings desde cache."""
+        try:
+            cache_file = os.path.join(LEARN_DIR, "embed_model_cache.json")
+            if os.path.exists(cache_file):
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                return data.get("embed_model")
+        except Exception:
+            pass
+        return None
+
+    def _save_embed_model_cache(self, model_name):
+        """Guarda el modelo de embeddings en cache para consistencia."""
+        try:
+            cache_file = os.path.join(LEARN_DIR, "embed_model_cache.json")
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump({"embed_model": model_name, "saved_at": datetime.now().isoformat()}, f)
+        except Exception:
+            pass
 
     # ----------------------------------------------------------
     # DETECCION DE GPU
@@ -726,7 +764,9 @@ class OllamaClient:
     # ----------------------------------------------------------
 
     def get_embedding(self, text):
-        """Obtiene el embedding de un texto usando Ollama. Con cache LRU."""
+        """Obtiene el embedding de un texto usando Ollama. Con cache LRU.
+        v3: Retry con modelo alternativo si falla el principal.
+        """
         import hashlib
         cache_key = hashlib.md5(text[:500].encode()).hexdigest()[:16]
 
@@ -736,10 +776,38 @@ class OllamaClient:
             return cached
 
         self.detect_models()
+        
+        # Intentar con el modelo principal de embeddings
+        embedding = self._try_get_embedding(text, self.embed_model)
+        if embedding:
+            embed_cache.put(cache_key, embedding)
+            get_metrics().record_embedding_call()
+            return embedding
+        
+        # Fallback: intentar con otros modelos de embedding disponibles
+        for fallback_model in EMBED_MODEL_CANDIDATES:
+            if fallback_model == self.embed_model:
+                continue
+            embedding = self._try_get_embedding(text, fallback_model)
+            if embedding:
+                logger.warning(f"Embedding fallback exitoso con modelo: {fallback_model}")
+                # Actualizar modelo de embeddings al que funciona
+                self.embed_model = fallback_model
+                self._save_embed_model_cache(fallback_model)
+                embed_cache.put(cache_key, embedding)
+                get_metrics().record_embedding_call()
+                return embedding
+        
+        logger.warning("No se pudo obtener embedding con ningun modelo")
+        get_metrics().record_error("embedding")
+        return []
+
+    def _try_get_embedding(self, text, model_name):
+        """Intenta obtener embedding con un modelo especifico. Retorna [] si falla."""
         try:
             import urllib.request
             data = json.dumps({
-                "model": self.embed_model,
+                "model": model_name,
                 "prompt": text[:2000]
             }).encode("utf-8")
             req = urllib.request.Request(
@@ -749,15 +817,10 @@ class OllamaClient:
             )
             with urllib.request.urlopen(req, timeout=EMBED_TIMEOUT) as resp:
                 result = json.loads(resp.read().decode("utf-8"))
-                embedding = result.get("embedding", [])
-                if embedding:
-                    embed_cache.put(cache_key, embedding)
-                    get_metrics().record_embedding_call()
-                    return embedding
+                return result.get("embedding", [])
         except Exception as e:
-            logger.warning(f"Error obteniendo embedding: {e}")
-            get_metrics().record_error("embedding")
-        return []
+            logger.debug(f"Embedding falló con modelo {model_name}: {e}")
+            return []
 
     @staticmethod
     def cosine_similarity(vec1, vec2):

@@ -16,17 +16,23 @@ import logging
 from datetime import datetime
 
 from config import (
-    REPOS_DIR, MAX_REACT_ITERATIONS, MAX_CONVERSATION_MEMORY, logger
+    REPOS_DIR, MAX_REACT_ITERATIONS, MAX_CONVERSATION_MEMORY, logger,
+    USER_PROFILE_FILE
 )
 from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS
 from memory.triple_memory import TripleMemory, learning
 from llm import ollama
 from agent.schemas import SYSTEM_PROMPT, JSON_TOOLS_PROMPT
 from agent.metacognition import Metacognition
+from utils.metrics import get_metrics
 
 
 class ReactAgent:
     """Motor ReAct: Piensa -> Actua -> Observa -> Piensa de nuevo."""
+
+    # Rate limiting: max llamadas a la misma herramienta por conversacion
+    MAX_SAME_TOOL_CALLS = 5
+    MAX_TOTAL_TOOL_CALLS = 12
 
     def __init__(self, memory=None):
         self.memory = memory or TripleMemory()
@@ -34,6 +40,8 @@ class ReactAgent:
         self.supports_tool_calling = None
         self.metacognition = Metacognition()
         self._models_cache = None  # Cache de modelos para no llamar API cada vez
+        self._tool_call_counts = {}  # Rate limiting por herramienta
+        self._total_tool_calls = 0   # Total de tool calls en esta conversacion
 
     def _log(self, message, category="info"):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -48,6 +56,8 @@ class ReactAgent:
         """
         self.thinking_log = []
         self.metacognition.reset()
+        self._tool_call_counts = {}
+        self._total_tool_calls = 0
         self._log(f"Mensaje del usuario: {user_message}", "input")
 
         messages = self._build_messages(user_message)
@@ -62,10 +72,30 @@ class ReactAgent:
         for iteration in range(MAX_REACT_ITERATIONS):
             self._log(f"--- Iteracion {iteration + 1}/{MAX_REACT_ITERATIONS} ---", "react")
 
+            # *** FIX: Metacognicion ANTES de decidir la accion ***
+            # Antes: se evaluaba DESPUES de actuar (paso 4→5→2)
+            # Ahora: se evalua ANTES (paso 2→3→4) para mejor toma de decisiones
             meta_prompt = self.metacognition.get_metacognitive_prompt(iteration)
             if meta_prompt:
-                self._log("Alerta metacognitiva inyectada", "evaluation")
+                self._log("Alerta metacognitiva inyectada ANTES de accion", "evaluation")
                 self._inject_metacognitive_prompt(messages, meta_prompt)
+
+            # Verificar si metacognicion indica que necesitamos mas contexto
+            if self.metacognition.confidence < 0.3 and iteration > 0:
+                extra_context = self.memory.get_context_for(user_message)
+                if extra_context and not any(extra_context[:50] in str(m.get("content", "")) for m in messages[-3:]):
+                    self._log("Metacognicion: inyectando contexto adicional de memoria", "evaluation")
+                    # No re-agregar contexto que ya esta en mensajes
+                    context_added = False
+                    for m in messages[-3:]:
+                        if "CONTEXTO DE MEMORIA" in m.get("content", ""):
+                            context_added = True
+                            break
+                    if not context_added:
+                        messages.append({
+                            "role": "user",
+                            "content": f"[Contexto adicional relevante]:\n{extra_context[:500]}\n\nUsa esta informacion si es relevante."
+                        })
 
             if self.supports_tool_calling:
                 action_result = self._react_with_tools(messages, iteration)
@@ -74,7 +104,46 @@ class ReactAgent:
 
             if action_result[0] == "respond":
                 final_response = action_result[1]
-                # Inyectar reflexion metacognitiva si el proceso tuvo problemas
+
+                # SAFETY CHECK: Si la respuesta es JSON de tool call, ejecutarlo
+                # en vez de mostrarlo como texto al usuario
+                parsed_json = self._parse_json(final_response)
+                if parsed_json:
+                    accion = parsed_json.get("accion", "").strip()
+                    if accion and accion in TOOL_FUNCTIONS:
+                        self._log(f"JSON de tool detectado en respuesta: {accion}", "thinking")
+                        action_result = ("tool_calls", [{"name": accion, "params": parsed_json.get("params", {})}])
+                        # Procesar como tool call en vez de respuesta
+                        for tc in action_result[1]:
+                            self.metacognition.record_iteration(
+                                iteration=iteration, action_type="tool_call", tool_name=tc["name"]
+                            )
+                        results = self._execute_tool_calls(action_result[1], messages)
+                        for tc, res in zip(action_result[1], results):
+                            had_error = "ERROR" in res
+                            self.metacognition.record_iteration(
+                                iteration=iteration, action_type="tool_result",
+                                tool_name=tc["name"], result_summary=res[:200], had_error=had_error
+                            )
+                        self._feed_tool_results(action_result[1], results, messages)
+                        continue  # Siguiente iteracion del bucle ReAct
+                    elif not parsed_json.get("respuesta_final", "").strip():
+                        # JSON sin respuesta_final ni accion valida - limpiar
+                        clean = self._clean_json_leak(final_response)
+                        if clean != final_response:
+                            final_response = clean
+
+                # Evaluar resultado para poblar _last_evaluation
+                reflection = self.metacognition.evaluate_result(
+                    user_message, final_response, iteration + 1
+                )
+                self._log(
+                    f"Evaluacion: {reflection['assessment']} "
+                    f"(confianza={reflection['confidence_final']})",
+                    "evaluation"
+                )
+
+                # SEGUNDO: Ahora get_final_reflection_prompt() tiene datos reales
                 reflection_prompt = self.metacognition.get_final_reflection_prompt()
                 if reflection_prompt:
                     self._log("Reflexion metacognitiva inyectada en respuesta final", "evaluation")
@@ -87,14 +156,6 @@ class ReactAgent:
                             final_response = improved
                             self._log("Respuesta mejorada via metacognicion", "success")
 
-                reflection = self.metacognition.evaluate_result(
-                    user_message, final_response, iteration + 1
-                )
-                self._log(
-                    f"Evaluacion: {reflection['assessment']} "
-                    f"(confianza={reflection['confidence_final']})",
-                    "evaluation"
-                )
                 for lesson in reflection.get("lessons", []):
                     learning.add_knowledge(lesson, source="metacognition")
                 self._log("Respuesta final generada", "success")
@@ -137,6 +198,8 @@ class ReactAgent:
         """
         self.thinking_log = []
         self.metacognition.reset()
+        self._tool_call_counts = {}
+        self._total_tool_calls = 0
         self._log(f"Mensaje del usuario: {user_message}", "input")
 
         messages = self._build_messages(user_message)
@@ -151,10 +214,10 @@ class ReactAgent:
         for iteration in range(MAX_REACT_ITERATIONS):
             self._log(f"--- Iteracion {iteration + 1}/{MAX_REACT_ITERATIONS} ---", "react")
 
-            # Check metacognitivo
+            # *** FIX: Metacognicion ANTES de decidir la accion ***
             meta_prompt = self.metacognition.get_metacognitive_prompt(iteration)
             if meta_prompt:
-                self._log("Alerta metacognitiva inyectada", "evaluation")
+                self._log("Alerta metacognitiva inyectada ANTES de accion", "evaluation")
                 self._inject_metacognitive_prompt(messages, meta_prompt)
                 yield {
                     "type": "meta",
@@ -206,8 +269,33 @@ class ReactAgent:
                     continue
 
             # Procesar resultado de esta iteracion
+            # SAFETY CHECK: Si full_text parece JSON de tool call, parsearlo y ejecutar
+            # en vez de mostrarlo como texto al usuario
+            if is_final_response and not tool_calls_found and full_text:
+                parsed_json = self._parse_json(full_text)
+                if parsed_json:
+                    accion = parsed_json.get("accion", "").strip()
+                    if accion and accion in TOOL_FUNCTIONS:
+                        self._log(f"JSON de tool detectado en respuesta final: {accion}", "thinking")
+                        tool_calls_found = [{"name": accion, "params": parsed_json.get("params", {})}]
+                        is_final_response = False  # No es respuesta final, es tool call
+                    elif not parsed_json.get("respuesta_final", "").strip():
+                        # JSON sin respuesta_final ni accion valida - extraer contenido util
+                        clean = self._clean_json_leak(full_text)
+                        if clean != full_text:
+                            full_text = clean
+
             if is_final_response and not tool_calls_found:
-                # Reflexion metacognitiva para respuestas problematicas
+                # PRIMERO: Evaluar resultado para poblar _last_evaluation
+                reflection = self.metacognition.evaluate_result(
+                    user_message, full_text, iteration + 1
+                )
+                self._log(
+                    f"Evaluacion: {reflection['assessment']} (confianza={reflection['confidence_final']})",
+                    "evaluation"
+                )
+
+                # SEGUNDO: Ahora get_final_reflection_prompt() tiene datos reales
                 reflection_prompt = self.metacognition.get_final_reflection_prompt()
                 if reflection_prompt and len(full_text) < 100 and self.metacognition.error_count > 0:
                     self._log("Reflexion metacognitiva: reintentando respuesta mejorada", "evaluation")
@@ -222,13 +310,6 @@ class ReactAgent:
                         pass
 
                 # Respuesta final - terminar
-                reflection = self.metacognition.evaluate_result(
-                    user_message, full_text, iteration + 1
-                )
-                self._log(
-                    f"Evaluacion: {reflection['assessment']} (confianza={reflection['confidence_final']})",
-                    "evaluation"
-                )
                 for lesson in reflection.get("lessons", []):
                     learning.add_knowledge(lesson, source="metacognition")
 
@@ -293,6 +374,8 @@ class ReactAgent:
         Genera respuesta del LLM con streaming REAL.
         Yields: {"type": "token"|"tool_calls"|"done", "data": ...}
         """
+        import time as _time
+        _llm_start = _time.monotonic()
         full_content = ""
         full_tool_calls = []
 
@@ -301,7 +384,12 @@ class ReactAgent:
             for chunk in ollama.generate_stream(messages, tools=TOOL_SCHEMAS):
                 if isinstance(chunk, str):
                     # Token de texto - emitir inmediatamente
+                    # PERO: si parece JSON de tool call, no emitirlo al usuario
                     full_content += chunk
+                    # Detectar si el contenido es JSON de herramienta
+                    if self._looks_like_tool_json(full_content):
+                        continue  # Acumular sin emitir
+                    # Si antes se acumulaba JSON pero ya no, limpiar
                     yield {"type": "token", "data": chunk}
                 elif isinstance(chunk, dict):
                     # Resultado final con tool_calls
@@ -326,17 +414,41 @@ class ReactAgent:
                         yield {"type": "done", "data": False}
                         return
 
-            # Si llegamos aqui sin tool_calls, es respuesta final
+            # Si llegamos aqui sin tool_calls, verificar si el contenido es JSON de herramientas
             if full_content:
+                # Si el contenido acumulado era JSON de tool calls (no se emitio),
+                # parsearlo y ejecutar como tool calls
+                if self._looks_like_tool_json(full_content):
+                    parsed = self._parse_json(full_content)
+                    if parsed:
+                        # Verificar si son multiples tool calls
+                        if parsed.get("_multi_tool_calls") and parsed.get("tool_calls"):
+                            yield {"type": "tool_calls", "data": parsed["tool_calls"]}
+                            yield {"type": "done", "data": False}
+                            return
+                        accion = parsed.get("accion", "").strip()
+                        if accion and accion in TOOL_FUNCTIONS:
+                            yield {"type": "tool_calls", "data": [{"name": accion, "params": parsed.get("params", {})}]}
+                            yield {"type": "done", "data": False}
+                            return
+                    # Si no se pudo parsear como tool call, emitir el texto limpio
+                    clean = self._clean_json_leak(full_content)
+                    if clean != full_content:
+                        # El texto era JSON, emitir version limpia
+                        yield {"type": "token", "data": clean}
+                _llm_elapsed = (_time.monotonic() - _llm_start) * 1000.0
+                get_metrics().record_llm_call(_llm_elapsed)
                 yield {"type": "done", "data": True}
                 return
 
         except Exception as e:
             self._log(f"Error en streaming: {e}", "error")
+            get_metrics().record_error("llm_stream")
 
         # Fallback: modo no-streaming
         try:
             response = ollama.generate(messages, tools=TOOL_SCHEMAS)
+            # generate() already records llm_call via @timed, so no duplicate
             if isinstance(response, str):
                 yield {"type": "token", "data": response}
                 yield {"type": "done", "data": True}
@@ -372,6 +484,7 @@ class ReactAgent:
     # ----------------------------------------------------------
     def _react_with_tools(self, messages, iteration):
         """ReAct usando function calling nativo. Soporta multiple tool calls."""
+        # generate() already records llm_call via @timed decorator
         try:
             response = ollama.generate(messages, tools=TOOL_SCHEMAS)
 
@@ -392,6 +505,19 @@ class ReactAgent:
 
             content = message.get("content", "")
             if content:
+                # SAFETY CHECK: Si el modelo genero JSON de tool call en vez de
+                # usar function calling nativo, parsearlo y ejecutarlo
+                parsed = self._parse_json(content)
+                if parsed:
+                    accion = parsed.get("accion", "").strip()
+                    if accion and accion in TOOL_FUNCTIONS:
+                        self._log(f"Tool call via JSON (modelo no uso function calling nativo): {accion}", "thinking")
+                        params = parsed.get("params", {})
+                        return ("tool_calls", [{"name": accion, "params": params}])
+                    # Si tiene respuesta_final, usarla
+                    respuesta_final = parsed.get("respuesta_final", "").strip()
+                    if respuesta_final:
+                        return ("respond", respuesta_final)
                 return ("respond", content)
 
             return ("error", "Respuesta vacia del modelo")
@@ -406,6 +532,7 @@ class ReactAgent:
     # ----------------------------------------------------------
     def _react_with_json(self, messages, iteration):
         """ReAct usando JSON parsing (fallback)."""
+        # generate_chat() already records llm_call via @timed decorator
         if not any("HERRAMIENTAS DISPONIBLES" in str(m.get("content", "")) for m in messages):
             system_msg_idx = next((i for i, m in enumerate(messages) if m["role"] == "system"), -1)
             if system_msg_idx >= 0:
@@ -423,7 +550,11 @@ class ReactAgent:
                 clean = self._clean_json_leak(response)
                 return ("respond", clean)
 
-            # 1. Si hay respuesta_final con contenido, usarla
+            # 1. Si hay _multi_tool_calls, ejecutar todas las herramientas
+            if parsed.get("_multi_tool_calls") and parsed.get("tool_calls"):
+                return ("tool_calls", parsed["tool_calls"])
+
+            # 2. Si hay respuesta_final con contenido, usarla
             respuesta_final = parsed.get("respuesta_final", "").strip()
             if respuesta_final:
                 return ("respond", respuesta_final)
@@ -435,7 +566,7 @@ class ReactAgent:
             if pensamiento:
                 self._log(f"Pensamiento: {pensamiento}", "thinking")
 
-            # 2. Si hay accion valida, ejecutar herramienta
+            # 3. Si hay accion valida, ejecutar herramienta
             if accion and accion in TOOL_FUNCTIONS:
                 # Si tambien hay pensamiento, inyectarlo como contexto
                 if pensamiento:
@@ -459,7 +590,9 @@ class ReactAgent:
             return ("error", str(e))
 
     def _clean_json_leak(self, text):
-        """Limpia texto que tiene restos de formato JSON para mostrar al usuario."""
+        """Limpia texto que tiene restos de formato JSON para mostrar al usuario.
+        v3: Mas agresivo - tambien limpia JSON parcial al inicio/final del texto.
+        """
         # Si el texto es JSON completo, extraer solo el contenido util
         parsed = self._parse_json(text)
         if parsed:
@@ -468,15 +601,41 @@ class ReactAgent:
                 return parsed["respuesta_final"].strip()
             if parsed.get("pensamiento", "").strip():
                 return parsed["pensamiento"].strip()
-        # Si no es JSON, devolver tal cual (respuesta natural del modelo)
-        return text
+        # Si no es JSON completo, intentar limpiar restos
+        # Caso: texto que empieza con JSON parcial
+        import re as _re
+        # Remover JSON parcial al inicio: {"pensamiento": "..." ... restos
+        cleaned = _re.sub(r'^\s*\{[^}]*$', '', text).strip()
+        # Remover JSON parcial al final
+        cleaned = _re.sub(r'\{[^}]*$\s*$', '', cleaned).strip()
+        # Si despues de limpiar quedo vacio, devolver texto original
+        return cleaned if cleaned else text
 
     # ----------------------------------------------------------
     # EJECUCION DE TOOLS (paralelo + retry)
     # ----------------------------------------------------------
     def _execute_tool_calls(self, tool_calls, messages):
-        """Ejecuta multiples tool calls (paralelo cuando es seguro) y retorna lista de resultados."""
+        """Ejecuta multiples tool calls con rate limiting y paralelismo."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # Rate limiting: filtrar herramientas que se llamaron demasiadas veces
+        filtered_calls = []
+        for tc in tool_calls:
+            tool_name = tc["name"]
+            self._tool_call_counts[tool_name] = self._tool_call_counts.get(tool_name, 0) + 1
+            self._total_tool_calls += 1
+
+            if self._total_tool_calls > self.MAX_TOTAL_TOOL_CALLS:
+                self._log(f"Rate limit: max total tool calls alcanzado ({self.MAX_TOTAL_TOOL_CALLS})", "warning")
+                break
+
+            if self._tool_call_counts[tool_name] > self.MAX_SAME_TOOL_CALLS:
+                self._log(f"Rate limit: {tool_name} llamada {self._tool_call_counts[tool_name]} veces (max {self.MAX_SAME_TOOL_CALLS})", "warning")
+                continue
+
+            filtered_calls.append(tc)
+
+        tool_calls = filtered_calls
 
         # Validar parametros de todos los tool calls primero
         for tc in tool_calls:
@@ -516,10 +675,13 @@ class ReactAgent:
 
     def _execute_single_tool(self, tc, messages, max_retries=1):
         """Ejecuta un solo tool call con retry automatico."""
+        import time as _time
         tool_name = tc["name"]
         tool_params = tc["params"]
 
         self._log(f"Ejecutando: {tool_name}({tool_params})", "execution")
+
+        _tool_start = _time.monotonic()
         tool_result = self._execute_tool(tool_name, tool_params)
 
         # Retry si fallo y el tool es reintentable
@@ -528,6 +690,12 @@ class ReactAgent:
             if any(err in tool_result for err in retryable_errors):
                 self._log(f"Reintentando {tool_name} (error transitorio)...", "execution")
                 tool_result = self._execute_tool(tool_name, tool_params)
+
+        _tool_elapsed_ms = (_time.monotonic() - _tool_start) * 1000.0
+        get_metrics().record_tool_call(tool_name, _tool_elapsed_ms)
+
+        if "ERROR" in tool_result:
+            get_metrics().record_error("tool:" + tool_name)
 
         self._log(f"Resultado: {tool_result[:150]}...", "observation")
 
@@ -631,6 +799,16 @@ class ReactAgent:
             corrections="Ver correcciones abajo"
         )
 
+        # Perfil de usuario (personalizacion)
+        user_profile = self._load_user_profile()
+        if user_profile:
+            profile_parts = []
+            for key, label in [("name", "Nombre"), ("role", "Rol"), ("interests", "Intereses"), ("language", "Idioma preferido"), ("style", "Estilo de respuesta")]:
+                if key in user_profile and user_profile[key]:
+                    profile_parts.append(f"{label}: {user_profile[key]}")
+            if profile_parts:
+                system_content += "\n\n--- PERFIL DEL USUARIO ---\n" + "\n".join(profile_parts)
+
         # Contexto enriquecido desde Triple Memoria (con cache de embedding)
         enriched_context = self.memory.get_context_for(new_message)
         if enriched_context:
@@ -653,6 +831,16 @@ class ReactAgent:
         messages.append({"role": "user", "content": new_message})
 
         return messages
+
+    def _load_user_profile(self):
+        """Carga el perfil de usuario desde archivo JSON."""
+        try:
+            if os.path.exists(USER_PROFILE_FILE):
+                with open(USER_PROFILE_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {}
 
     # ----------------------------------------------------------
     # HELPERS
@@ -685,7 +873,6 @@ class ReactAgent:
         patterns = [
             r'```json\s*(.*?)\s*```',
             r'```\s*(.*?)\s*```',
-            r'(\{[\s\S]*\})',
         ]
         for pattern in patterns:
             match = re.search(pattern, text, re.DOTALL)
@@ -694,7 +881,90 @@ class ReactAgent:
                     return json.loads(match.group(1))
                 except Exception:
                     continue
+        # Intentar parsear multiples JSONs en el texto
+        # Cada JSON es una accion separada del ReAct
+        jsons = self._extract_all_jsons(text)
+        if len(jsons) == 1:
+            return jsons[0]
+        elif len(jsons) > 1:
+            # Multiples JSONs = multiples tool calls
+            # Combinar en una lista de tool calls
+            tool_calls = []
+            for j in jsons:
+                accion = j.get("accion", "").strip()
+                if accion:
+                    tool_calls.append({"name": accion, "params": j.get("params", {})})
+            if tool_calls:
+                # Retornar formato especial para multiples tool calls
+                return {"_multi_tool_calls": True, "tool_calls": tool_calls}
+            return jsons[0]  # Fallback al primer JSON
+        # Ultimo intento: buscar un solo objeto JSON
+        match = re.search(r'(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})', text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except Exception:
+                pass
         return None
+
+    def _extract_all_jsons(self, text):
+        """Extrae todos los objetos JSON validos de un texto."""
+        results = []
+        # Buscar secuencias que parezcan JSON
+        i = 0
+        while i < len(text):
+            # Encontrar el proximo '{'
+            start = text.find('{', i)
+            if start == -1:
+                break
+            # Intentar parsear desde este punto
+            depth = 0
+            end = start
+            for j in range(start, len(text)):
+                if text[j] == '{':
+                    depth += 1
+                elif text[j] == '}':
+                    depth -= 1
+                if depth == 0:
+                    end = j + 1
+                    break
+            if end > start:
+                try:
+                    parsed = json.loads(text[start:end])
+                    if isinstance(parsed, dict):
+                        results.append(parsed)
+                except Exception:
+                    pass
+                i = end
+            else:
+                i = start + 1
+        return results
+
+    def _looks_like_tool_json(self, text):
+        """Detecta si el texto parece ser JSON de tool call (no respuesta al usuario).
+        v3: Mas robusto - detecta JSON que empieza despues de whitespace o texto corto.
+        """
+        text = text.strip()
+        if not text:
+            return False
+        # Si el texto empieza con { probablemente es JSON de tool call
+        if text.startswith('{'):
+            return True
+        # Si despues de whitespace/newline hay {, tambien es JSON
+        # Esto captura casos donde el modelo genera: "\n{" o "  {"
+        stripped = text.lstrip()
+        if stripped.startswith('{'):
+            return True
+        # Si contiene patrones de tool calls en cualquier parte
+        tool_indicators = ['"accion"', '"pensamiento"', '"params"', '"respuesta_final"',
+                          '"abrir_', '"ejecutar_', '"leer_', '"escribir_', '"buscar_"']
+        for indicator in tool_indicators:
+            if indicator in text:
+                return True
+        # Si el texto es corto y parece inicio de JSON
+        if len(text) < 5 and text in ['{', '"', '\n', '\r']:
+            return True
+        return False
 
     def _detect_tool_calling_support(self):
         """Detecta si el modelo soporta function calling nativo."""

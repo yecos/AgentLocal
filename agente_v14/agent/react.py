@@ -105,6 +105,34 @@ class ReactAgent:
             if action_result[0] == "respond":
                 final_response = action_result[1]
 
+                # SAFETY CHECK: Si la respuesta es JSON de tool call, ejecutarlo
+                # en vez de mostrarlo como texto al usuario
+                parsed_json = self._parse_json(final_response)
+                if parsed_json:
+                    accion = parsed_json.get("accion", "").strip()
+                    if accion and accion in TOOL_FUNCTIONS:
+                        self._log(f"JSON de tool detectado en respuesta: {accion}", "thinking")
+                        action_result = ("tool_calls", [{"name": accion, "params": parsed_json.get("params", {})}])
+                        # Procesar como tool call en vez de respuesta
+                        for tc in action_result[1]:
+                            self.metacognition.record_iteration(
+                                iteration=iteration, action_type="tool_call", tool_name=tc["name"]
+                            )
+                        results = self._execute_tool_calls(action_result[1], messages)
+                        for tc, res in zip(action_result[1], results):
+                            had_error = "ERROR" in res
+                            self.metacognition.record_iteration(
+                                iteration=iteration, action_type="tool_result",
+                                tool_name=tc["name"], result_summary=res[:200], had_error=had_error
+                            )
+                        self._feed_tool_results(action_result[1], results, messages)
+                        continue  # Siguiente iteracion del bucle ReAct
+                    elif not parsed_json.get("respuesta_final", "").strip():
+                        # JSON sin respuesta_final ni accion valida - limpiar
+                        clean = self._clean_json_leak(final_response)
+                        if clean != final_response:
+                            final_response = clean
+
                 # Evaluar resultado para poblar _last_evaluation
                 reflection = self.metacognition.evaluate_result(
                     user_message, final_response, iteration + 1
@@ -241,6 +269,22 @@ class ReactAgent:
                     continue
 
             # Procesar resultado de esta iteracion
+            # SAFETY CHECK: Si full_text parece JSON de tool call, parsearlo y ejecutar
+            # en vez de mostrarlo como texto al usuario
+            if is_final_response and not tool_calls_found and full_text:
+                parsed_json = self._parse_json(full_text)
+                if parsed_json:
+                    accion = parsed_json.get("accion", "").strip()
+                    if accion and accion in TOOL_FUNCTIONS:
+                        self._log(f"JSON de tool detectado en respuesta final: {accion}", "thinking")
+                        tool_calls_found = [{"name": accion, "params": parsed_json.get("params", {})}]
+                        is_final_response = False  # No es respuesta final, es tool call
+                    elif not parsed_json.get("respuesta_final", "").strip():
+                        # JSON sin respuesta_final ni accion valida - extraer contenido util
+                        clean = self._clean_json_leak(full_text)
+                        if clean != full_text:
+                            full_text = clean
+
             if is_final_response and not tool_calls_found:
                 # PRIMERO: Evaluar resultado para poblar _last_evaluation
                 reflection = self.metacognition.evaluate_result(
@@ -461,6 +505,19 @@ class ReactAgent:
 
             content = message.get("content", "")
             if content:
+                # SAFETY CHECK: Si el modelo genero JSON de tool call en vez de
+                # usar function calling nativo, parsearlo y ejecutarlo
+                parsed = self._parse_json(content)
+                if parsed:
+                    accion = parsed.get("accion", "").strip()
+                    if accion and accion in TOOL_FUNCTIONS:
+                        self._log(f"Tool call via JSON (modelo no uso function calling nativo): {accion}", "thinking")
+                        params = parsed.get("params", {})
+                        return ("tool_calls", [{"name": accion, "params": params}])
+                    # Si tiene respuesta_final, usarla
+                    respuesta_final = parsed.get("respuesta_final", "").strip()
+                    if respuesta_final:
+                        return ("respond", respuesta_final)
                 return ("respond", content)
 
             return ("error", "Respuesta vacia del modelo")
@@ -533,7 +590,9 @@ class ReactAgent:
             return ("error", str(e))
 
     def _clean_json_leak(self, text):
-        """Limpia texto que tiene restos de formato JSON para mostrar al usuario."""
+        """Limpia texto que tiene restos de formato JSON para mostrar al usuario.
+        v3: Mas agresivo - tambien limpia JSON parcial al inicio/final del texto.
+        """
         # Si el texto es JSON completo, extraer solo el contenido util
         parsed = self._parse_json(text)
         if parsed:
@@ -542,8 +601,15 @@ class ReactAgent:
                 return parsed["respuesta_final"].strip()
             if parsed.get("pensamiento", "").strip():
                 return parsed["pensamiento"].strip()
-        # Si no es JSON, devolver tal cual (respuesta natural del modelo)
-        return text
+        # Si no es JSON completo, intentar limpiar restos
+        # Caso: texto que empieza con JSON parcial
+        import re as _re
+        # Remover JSON parcial al inicio: {"pensamiento": "..." ... restos
+        cleaned = _re.sub(r'^\s*\{[^}]*$', '', text).strip()
+        # Remover JSON parcial al final
+        cleaned = _re.sub(r'\{[^}]*$\s*$', '', cleaned).strip()
+        # Si despues de limpiar quedo vacio, devolver texto original
+        return cleaned if cleaned else text
 
     # ----------------------------------------------------------
     # EJECUCION DE TOOLS (paralelo + retry)
@@ -875,19 +941,29 @@ class ReactAgent:
         return results
 
     def _looks_like_tool_json(self, text):
-        """Detecta si el texto parece ser JSON de tool call (no respuesta al usuario)."""
+        """Detecta si el texto parece ser JSON de tool call (no respuesta al usuario).
+        v3: Mas robusto - detecta JSON que empieza despues de whitespace o texto corto.
+        """
         text = text.strip()
         if not text:
             return False
-        # Si empieza con { probablemente es JSON de tool call
+        # Si el texto empieza con { probablemente es JSON de tool call
         if text.startswith('{'):
             return True
-        # Si contiene patrones de tool calls
+        # Si despues de whitespace/newline hay {, tambien es JSON
+        # Esto captura casos donde el modelo genera: "\n{" o "  {"
+        stripped = text.lstrip()
+        if stripped.startswith('{'):
+            return True
+        # Si contiene patrones de tool calls en cualquier parte
         tool_indicators = ['"accion"', '"pensamiento"', '"params"', '"respuesta_final"',
                           '"abrir_', '"ejecutar_', '"leer_', '"escribir_', '"buscar_"']
         for indicator in tool_indicators:
             if indicator in text:
                 return True
+        # Si el texto es corto y parece inicio de JSON
+        if len(text) < 5 and text in ['{', '"', '\n', '\r']:
+            return True
         return False
 
     def _detect_tool_calling_support(self):

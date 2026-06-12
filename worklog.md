@@ -279,3 +279,47 @@ Stage Summary:
 - TODO funciona correctamente - proyecto listo para producción
 - 120 tests pasan, 19 herramientas con schemas, 13 módulos importan OK
 - Pendiente: revocar token de GitHub expuesto en remote URL
+
+---
+Task ID: 11
+Agent: Main Agent
+Task: Fix embedding dimension mismatch (768 vs 384) and raw JSON output bugs
+
+Work Log:
+- Diagnosed two critical bugs from user reports:
+  1. "Collection expecting embedding with dimension of 768, got 384" - ChromaDB created with nomic-embed-text (768-dim) but all-minilm (384-dim) being used
+  2. Raw JSON `{"pensamiento":...}` shown as text instead of executing tools
+- Fixed chroma_store.py (ChromaVectorStore):
+  - Added `_validate_collection_dimension()`: post-init validation that tests a dummy query against the collection
+  - Added `_force_recreate_collection()`: robust collection recreation helper
+  - `add()`: replaced `except InvalidArgumentError` with catch-all Exception + retry loop (MAX_RECREATE_RETRIES=2)
+  - `add()`: dynamic _embedding_dim update when first embedding is received
+  - `add()`: fallback to save without embedding if all retries fail (no data loss)
+  - `search()`: dynamic _embedding_dim update + broader exception catching
+  - `_is_duplicate()`: dimension check before query + catch dimension errors
+  - `_handle_dimension_error()`: improved logging + try/except on collection recreation
+- Fixed triple_memory.py (TripleMemory):
+  - `remember()`: wrapped in try/except - embedding errors no longer crash agent
+  - `recall()`: wrapped in try/except - returns [] on error
+  - `add_conversation()`: wrapped long_term.add in try/except for old messages
+  - `get_context_for()`: each context source wrapped in individual try/except
+- Fixed react.py (ReactAgent):
+  - `_looks_like_tool_json()`: now detects JSON after whitespace/newlines, short JSON starters
+  - `_clean_json_leak()`: more aggressive cleanup of partial JSON at start/end of text
+  - Added SAFETY CHECK in `run_stream()`: catches JSON tool calls in final response text
+  - Added SAFETY CHECK in `run()`: catches JSON tool calls in response text, converts to tool execution
+  - `_react_with_tools()`: now parses JSON in content when model doesn't use native function calling
+- Fixed llm.py (OllamaClient):
+  - `_detect_embed_model()`: saves/loads embedding model from persistent cache file
+  - Added `_load_embed_model_cache()` and `_save_embed_model_cache()` methods
+  - `get_embedding()`: now tries fallback embedding models if primary fails
+  - Added `_try_get_embedding()`: isolated embedding request per model
+  - Automatic embed_model update when fallback succeeds
+- Synced all 4 modified files to AgentLocal and download backup copies
+
+Stage Summary:
+- Embedding dimension mismatch: 3-layer fix (proactive validation at init, catch-all at runtime, persistence across sessions)
+- Raw JSON output: 4-layer fix (better detection, safety checks in both run() and run_stream(), JSON parsing in _react_with_tools)
+- Memory resilience: all memory operations now wrapped in try/except, agent never crashes from embedding errors
+- Files modified: chroma_store.py, triple_memory.py, react.py, llm.py
+- All fixes synced to 3 locations: agente_v14/, AgentLocal/agente_v14/, download/agente_v14/

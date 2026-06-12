@@ -70,11 +70,14 @@ class TripleMemory:
             removed = self.short_term[:len(self.short_term) - MAX_CONVERSATION_MEMORY * 2]
             for msg in removed:
                 if msg["role"] == "assistant" and len(msg["content"]) > 50:
-                    self.long_term.add(
-                        msg["content"][:500],
-                        metadata={"type": "conversation", "role": msg["role"]},
-                        skip_embedding=SKIP_EMBED_ON_INTERACTION
-                    )
+                    try:
+                        self.long_term.add(
+                            msg["content"][:500],
+                            metadata={"type": "conversation", "role": msg["role"]},
+                            skip_embedding=SKIP_EMBED_ON_INTERACTION
+                        )
+                    except Exception as e:
+                        logger.debug(f"Error guardando mensaje viejo en memoria: {e}")
             self.short_term = self.short_term[-(MAX_CONVERSATION_MEMORY * 2):]
 
         # Auto-save cada 5 mensajes
@@ -89,16 +92,23 @@ class TripleMemory:
         Args:
             fast: Si True, salta el calculo de embedding (mas rapido).
                   La entrada solo aparecera en busquedas por texto.
+        v3: Catch de errores para que NUNCA crashee el agente.
         """
-        # Todos los backends ahora soportan skip_embedding nativamente:
-        # - VectorStore (vectorstore.py)
-        # - ChromaVectorStore (chroma_store.py)
-        # - SimpleVectorStore (chroma_store.py fallback)
-        return self.long_term.add(text, metadata=metadata, skip_embedding=fast)
+        try:
+            return self.long_term.add(text, metadata=metadata, skip_embedding=fast)
+        except Exception as e:
+            logger.warning(f"Error guardando en memoria a largo plazo (no critico): {e}")
+            return None
 
     def recall(self, query, limit=5):
-        """Recupera recuerdos relevantes de la memoria a largo plazo."""
-        return self.long_term.search(query, limit=limit)
+        """Recupera recuerdos relevantes de la memoria a largo plazo.
+        v3: Catch de errores para que NUNCA crashee el agente.
+        """
+        try:
+            return self.long_term.search(query, limit=limit)
+        except Exception as e:
+            logger.warning(f"Error buscando en memoria a largo plazo (no critico): {e}")
+            return []
 
     def set_task(self, task):
         self.working["current_task"] = task
@@ -122,56 +132,70 @@ class TripleMemory:
         self.working["last_success"] = success
 
     def get_context_for(self, query):
-        """Construye contexto enriquecido combinando las 3 memorias."""
+        """Construye contexto enriquecido combinando las 3 memorias.
+        v3: Catch de errores en cada paso para que NUNCA crashee el agente.
+        """
         context_parts = []
         budget_remaining = MAX_CONTEXT_CHARS
 
         # 1. Memoria de Trabajo - max 800 chars
-        if self.working["current_task"]:
-            work_context = f"TAREA ACTUAL: {self.working['current_task']}"
-            if self.working["task_steps"]:
-                steps_text = "\n".join([
-                    f"  - {s['step']}: {s['result']}"
-                    for s in self.working["task_steps"][-5:]
-                ])
-                work_context += f"\nPASOS REALIZADOS:\n{steps_text}"
-            if self.working["last_error"]:
-                work_context += f"\nULTIMO ERROR: {self.working['last_error']}"
-            if self.working["notes"]:
-                work_context += f"\nNOTAS: {'; '.join(self.working['notes'][-3:])}"
+        try:
+            if self.working["current_task"]:
+                work_context = f"TAREA ACTUAL: {self.working['current_task']}"
+                if self.working["task_steps"]:
+                    steps_text = "\n".join([
+                        f"  - {s['step']}: {s['result']}"
+                        for s in self.working["task_steps"][-5:]
+                    ])
+                    work_context += f"\nPASOS REALIZADOS:\n{steps_text}"
+                if self.working["last_error"]:
+                    work_context += f"\nULTIMO ERROR: {self.working['last_error']}"
+                if self.working["notes"]:
+                    work_context += f"\nNOTAS: {'; '.join(self.working['notes'][-3:])}"
 
-            work_text = work_context[:800]
-            context_parts.append(work_text)
-            budget_remaining -= len(work_text)
+                work_text = work_context[:800]
+                context_parts.append(work_text)
+                budget_remaining -= len(work_text)
+        except Exception as e:
+            logger.debug(f"Error construyendo contexto de trabajo: {e}")
 
         # 2. Correcciones aprendidas - max 400 chars
-        corrections = learning.get_corrections_for(query)
-        if corrections and budget_remaining > 200:
-            corr_text = "\n".join([
-                f"  - NO hagas '{c['wrong_action']}'. Haz '{c['correct_action']}'"
-                for c in corrections[-3:]
-            ])
-            corr_full = f"CORRECCIONES:\n{corr_text}"[:400]
-            context_parts.append(corr_full)
-            budget_remaining -= len(corr_full)
+        try:
+            corrections = learning.get_corrections_for(query)
+            if corrections and budget_remaining > 200:
+                corr_text = "\n".join([
+                    f"  - NO hagas '{c['wrong_action']}'. Haz '{c['correct_action']}'"
+                    for c in corrections[-3:]
+                ])
+                corr_full = f"CORRECCIONES:\n{corr_text}"[:400]
+                context_parts.append(corr_full)
+                budget_remaining -= len(corr_full)
+        except Exception as e:
+            logger.debug(f"Error obteniendo correcciones: {e}")
 
         # 3. Memoria a Largo Plazo - budget restante
-        if budget_remaining > 200:
-            recall_results = self.recall(query, limit=3)
-            if recall_results:
-                knowledge_text = "\n".join([
-                    f"  - [{r.get('score', 0):.2f}] {r['text'][:150]}"
-                    for r in recall_results
-                ])
-                knowledge_full = f"CONOCIMIENTO RELEVANTE:\n{knowledge_text}"
-                context_parts.append(knowledge_full[:budget_remaining])
+        try:
+            if budget_remaining > 200:
+                recall_results = self.recall(query, limit=3)
+                if recall_results:
+                    knowledge_text = "\n".join([
+                        f"  - [{r.get('score', 0):.2f}] {r['text'][:150]}"
+                        for r in recall_results
+                    ])
+                    knowledge_full = f"CONOCIMIENTO RELEVANTE:\n{knowledge_text}"
+                    context_parts.append(knowledge_full[:budget_remaining])
+        except Exception as e:
+            logger.debug(f"Error obteniendo conocimiento: {e}")
 
         # 4. Resumen si conversacion larga
-        if len(self.short_term) > 10:
-            summary = self._get_conversation_summary()
-            if summary:
-                summary_text = f"RESUMEN: {summary}"[:300]
-                context_parts.append(summary_text)
+        try:
+            if len(self.short_term) > 10:
+                summary = self._get_conversation_summary()
+                if summary:
+                    summary_text = f"RESUMEN: {summary}"[:300]
+                    context_parts.append(summary_text)
+        except Exception as e:
+            logger.debug(f"Error generando resumen: {e}")
 
         return "\n\n".join(context_parts) if context_parts else ""
 
