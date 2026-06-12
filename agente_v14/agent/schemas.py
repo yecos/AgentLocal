@@ -155,6 +155,9 @@ HERRAMIENTAS DISPONIBLES:
 --- BROWSER AUTOMATION (Playwright) ---
 - navegador_web(accion, url?, selector?, texto?, tipo_extract?, campos_formulario?, direccion_scroll?, script_js?, completa?, esperar?, presionar_enter?, ruta_destino?) - Automatiza navegador web REAL con Playwright. Acciones: navigate, click, type, screenshot, extract, fill_form, wait, scroll, evaluate, pdf, download, get_page_info. MAS POTENTE que navegar_web.
 
+--- DOCKER SANDBOX ---
+- ejecutar_en_contenedor(codigo, lenguaje?, timeout?, permitir_red?, directorio_trabajo?) - Ejecuta codigo en contenedor Docker aislado. Mas seguro que ejecutar_codigo. Si Docker no esta disponible, hace fallback automatico al sandbox local.
+
 REGLAS IMPORTANTES:
 - Si el usuario pide abrir un SITIO WEB (YouTube, Google, Netflix, etc.), usa abrir_url, NO abrir_aplicacion.
 - abrir_aplicacion es solo para programas de escritorio (Chrome, Word, WhatsApp, etc.).

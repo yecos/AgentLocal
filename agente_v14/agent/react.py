@@ -33,6 +33,13 @@ try:
 except Exception:
     ORCHESTRATOR_AVAILABLE = False
 
+# Importar enriquecimiento de skills con fallback graceful
+try:
+    from tools.skill_loader import enrich_prompt_with_skills
+    SKILLS_ENRICHMENT_AVAILABLE = True
+except Exception:
+    SKILLS_ENRICHMENT_AVAILABLE = False
+
 
 class ReactAgent:
     """Motor ReAct: Piensa -> Actua -> Observa -> Piensa de nuevo."""
@@ -608,6 +615,15 @@ class ReactAgent:
                 f"Contexto previo: {json.dumps(results[-3:], ensure_ascii=False) if results else 'Ninguno'}"
             )
 
+            # Enriquecer prompt de subtarea con contexto de skills relevantes
+            if SKILLS_ENRICHMENT_AVAILABLE:
+                try:
+                    skills_context = enrich_prompt_with_skills(next_task.description, "")
+                    if skills_context:
+                        task_prompt += f"\n\n--- CONTEXTO DE SKILLS PARA SUBTAREA ---\n{skills_context}"
+                except Exception:
+                    pass  # No dejar que el enriquecimiento rompa la ejecucion planificada
+
             try:
                 result = self.run(task_prompt)
                 # self.run devuelve (respuesta, thinking_log)
@@ -716,6 +732,15 @@ class ReactAgent:
                 f"Descripcion: {next_task.description}\n"
                 f"Contexto previo: {json.dumps(results[-3:], ensure_ascii=False) if results else 'Ninguno'}"
             )
+
+            # Enriquecer prompt de subtarea (streaming) con contexto de skills relevantes
+            if SKILLS_ENRICHMENT_AVAILABLE:
+                try:
+                    skills_context = enrich_prompt_with_skills(next_task.description, "")
+                    if skills_context:
+                        task_prompt += f"\n\n--- CONTEXTO DE SKILLS PARA SUBTAREA ---\n{skills_context}"
+                except Exception:
+                    pass  # No dejar que el enriquecimiento rompa la ejecucion planificada
 
             try:
                 result = self.run(task_prompt)
@@ -1231,6 +1256,13 @@ class ReactAgent:
                 system_content += f"\n\n--- CONOCIMIENTO WEB APRENDIDO ---\n{web_knowledge}"
         except Exception:
             pass
+
+        # Enrich system prompt con conocimiento de skills relevantes
+        if SKILLS_ENRICHMENT_AVAILABLE:
+            try:
+                system_content = enrich_prompt_with_skills(new_message, system_content)
+            except Exception:
+                pass  # No dejar que el enriquecimiento de skills rompa el agente
 
         messages = [{"role": "system", "content": system_content}]
 

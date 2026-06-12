@@ -736,6 +736,49 @@ def navegador_web(accion: str, url: str = "", selector: str = "", texto: str = "
     )
 
 
+# --- Docker Sandbox ---
+
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "ejecutar_en_contenedor",
+        "description": "Ejecuta codigo dentro de un contenedor Docker aislado. Mas seguro que ejecutar_codigo. Si Docker no esta disponible, hace fallback al sandbox local automaticamente.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "codigo": {"type": "string", "description": "Codigo fuente a ejecutar"},
+                "lenguaje": {"type": "string", "description": "Lenguaje: python, javascript, bash (default: python)"},
+                "timeout": {"type": "integer", "description": "Timeout en segundos (default: 60)"},
+                "permitir_red": {"type": "boolean", "description": "Permitir acceso a red en el contenedor (default: false)"},
+                "directorio_trabajo": {"type": "string", "description": "Directorio de trabajo montado en el contenedor (opcional)"}
+            },
+            "required": ["codigo"]
+        }
+    }
+})
+def ejecutar_en_contenedor(codigo: str, lenguaje: str = "python", timeout: int = 60,
+                           permitir_red: bool = False, directorio_trabajo: str = "") -> str:
+    """Ejecuta codigo dentro de un contenedor Docker aislado."""
+    from .docker_sandbox import execute_in_container
+    result = execute_in_container(
+        code=codigo,
+        language=lenguaje,
+        timeout=timeout,
+        working_dir=directorio_trabajo or None,
+        allow_network=permitir_red,
+    )
+    if result.get("success"):
+        output = f"EXITO (docker, tiempo: {result.get('duration', 0):.2f}s)"
+        if result.get("stdout"):
+            output += f"\nSTDOUT:\n{result['stdout'][:2000]}"
+        return output
+    else:
+        output = f"ERROR (docker, exit code: {result.get('exit_code', -1)})"
+        if result.get("stderr"):
+            output += f"\nSTDERR:\n{result['stderr'][:1000]}"
+        return output
+
+
 # ============================================================
 # CARGAR SKILLS DINAMICAMENTE
 # ============================================================
