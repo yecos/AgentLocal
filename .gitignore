@@ -45,3 +45,4 @@ signaltrade*.json
 
 # Skills design templates (too large for repo)
 skills/design/
+AgentLocal/
