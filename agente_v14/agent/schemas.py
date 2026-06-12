@@ -152,6 +152,9 @@ HERRAMIENTAS DISPONIBLES:
 - crear_grafico(tipo, datos, titulo?) - Crea graficos y diagramas
 - navegar_web(url, accion?, selector?, valor?) - Navegador headless para automatizacion web
 
+--- BROWSER AUTOMATION (Playwright) ---
+- navegador_web(accion, url?, selector?, texto?, tipo_extract?, campos_formulario?, direccion_scroll?, script_js?, completa?, esperar?, presionar_enter?, ruta_destino?) - Automatiza navegador web REAL con Playwright. Acciones: navigate, click, type, screenshot, extract, fill_form, wait, scroll, evaluate, pdf, download, get_page_info. MAS POTENTE que navegar_web.
+
 REGLAS IMPORTANTES:
 - Si el usuario pide abrir un SITIO WEB (YouTube, Google, Netflix, etc.), usa abrir_url, NO abrir_aplicacion.
 - abrir_aplicacion es solo para programas de escritorio (Chrome, Word, WhatsApp, etc.).
@@ -165,6 +168,8 @@ REGLAS IMPORTANTES:
 - PARA EDITAR ARCHIVOS EXISTENTES: usa buscar_reemplazar o editar_lineas, NO escribir_archivo.
 - PARA GIT: usa git_operacion, NO ejecutar_comando("git ...").
 - SI ALGO FALLA: usa diagnosticar_error y luego corrige con buscar_reemplazar.
+- PARA AUTOMATIZACION WEB (login, scraping, formularios): usa navegador_web (Playwright), NO ejecutar_comando con curl.
+- PARA EXTRAER DATOS DE UNA PAGINA: usa navegador_web con accion=extract, NO leer_web (que es mas limitado).
 
 DEBES responder SOLO con JSON en este formato exacto:
 {{"pensamiento": "tu razonamiento interno", "accion": "nombre_herramienta_o_vacio", "params": {{}}, "respuesta_final": "tu respuesta al usuario aqui"}}

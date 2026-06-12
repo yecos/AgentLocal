@@ -79,11 +79,25 @@ except Exception as e:
     bridge_logger.warning(f"No se pudo importar tools.error_recovery: {e}")
     ERROR_RECOVERY_AVAILABLE = False
 
+try:
+    from agent.orchestrator import get_orchestrator
+    ORCHESTRATOR_AVAILABLE = True
+except Exception as e:
+    bridge_logger.warning(f"No se pudo importar agent.orchestrator: {e}")
+    ORCHESTRATOR_AVAILABLE = False
+
+try:
+    from tools.browser_automation import browser_automation, cleanup_browser
+    BROWSER_AVAILABLE = True
+except Exception as e:
+    bridge_logger.warning(f"No se pudo importar tools.browser_automation: {e}")
+    BROWSER_AVAILABLE = False
+
 # --- App ---
 app = FastAPI(
     title="ZAI Agent Bridge",
-    version="16.0.0",
-    description="Bridge API v16 - ReAct Agent con tools, planner, skills y error recovery",
+    version="17.0.0",
+    description="Bridge API v17 - ReAct Agent con orchestrator, browser, plan, skills y error recovery",
 )
 
 app.add_middleware(
@@ -171,7 +185,9 @@ async def startup_event():
         f"Bridge listo - Agente: {'OK' if AGENT_AVAILABLE else 'NO'}, "
         f"Tools: {tool_count() if TOOLS_AVAILABLE else 0}, "
         f"Skills: {'OK' if SKILLS_AVAILABLE else 'NO'}, "
-        f"Planner: {'OK' if PLANNER_AVAILABLE else 'NO'}"
+        f"Planner: {'OK' if PLANNER_AVAILABLE else 'NO'}, "
+        f"Orchestrator: {'OK' if ORCHESTRATOR_AVAILABLE else 'NO'}, "
+        f"Browser: {'OK' if BROWSER_AVAILABLE else 'NO'}"
     )
 
 
@@ -230,7 +246,7 @@ async def status():
         ],
         "modelCount": len(models),
         "uptime": uptime,
-        "version": "v16",
+        "version": "v17",
         "skills": skills_info,
     }
 
@@ -323,7 +339,7 @@ async def health():
         "status": "ok",
         "agent": AGENT_AVAILABLE,
         "busy": _busy,
-        "version": "v16",
+        "version": "v17",
         "tools": tool_count() if TOOLS_AVAILABLE else 0,
     }
 
@@ -459,6 +475,91 @@ async def plan_advance(request: PlanAdvanceRequest):
 
 
 # ============================================================
+# RUTAS v17 - ORCHESTRATOR
+# ============================================================
+
+class OrchestrateRequest(BaseModel):
+    plan: dict
+    strategy: Optional[str] = "adaptive"
+    max_parallel: Optional[int] = 3
+
+@app.post("/api/orchestrate")
+async def orchestrate(request: OrchestrateRequest):
+    """Ejecuta un plan usando el orchestrador multi-agente."""
+    if not ORCHESTRATOR_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Orchestrator no disponible")
+    
+    orchestrator = get_orchestrator()
+    orchestrator._max_parallel = request.max_parallel
+    orchestrator._strategy = request.strategy
+    
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, lambda: orchestrator.orchestrate(request.plan))
+    return result
+
+
+@app.get("/api/orchestrator/status")
+async def orchestrator_status():
+    """Estado del orchestrador."""
+    if not ORCHESTRATOR_AVAILABLE:
+        return {"available": False}
+    orchestrator = get_orchestrator()
+    return {"available": True, **orchestrator.get_status()}
+
+
+# ============================================================
+# RUTAS v17 - BROWSER
+# ============================================================
+
+class BrowserRequest(BaseModel):
+    action: str
+    url: Optional[str] = ""
+    selector: Optional[str] = ""
+    text: Optional[str] = ""
+    extract_type: Optional[str] = "text"
+    full_page: Optional[bool] = False
+    timeout: Optional[int] = 5000
+    script: Optional[str] = ""
+    output_path: Optional[str] = ""
+
+@app.post("/api/browser")
+async def browser_action(request: BrowserRequest):
+    """Ejecuta una accion del navegador automatizado."""
+    if not BROWSER_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Browser automation no disponible. Instala: pip install playwright && playwright install chromium")
+    
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, lambda: browser_automation(
+        accion=request.action,
+        url=request.url,
+        selector=request.selector,
+        text=request.text,
+        extract_type=request.extract_type,
+        full_page=request.full_page,
+        timeout=request.timeout,
+        script=request.script,
+        output_path=request.output_path,
+    ))
+    return {"success": True, "action": request.action, "result": result[:3000]}
+
+
+@app.get("/api/browser/status")
+async def browser_status():
+    """Estado del navegador."""
+    if not BROWSER_AVAILABLE:
+        return {"available": False}
+    try:
+        from tools.browser_automation import _browser_manager
+        return {
+            "available": True,
+            "browser_active": _browser_manager._browser is not None,
+            "page_active": _browser_manager._page is not None,
+        }
+    except Exception:
+        return {"available": True, "browser_active": False, "page_active": False}
+
+
+# ============================================================
 # RUTAS v16 - ERRORS
 # ============================================================
 
@@ -534,13 +635,15 @@ async def _stream_agent_threaded(agent: ReactAgent, message: str):
 if __name__ == "__main__":
     import uvicorn
     print("=" * 60)
-    print("  ZAI Agent Bridge API v16.0")
+    print("  ZAI Agent Bridge API v17.0")
     print("  Puerto: 8000")
     print("  Agente:", "DISPONIBLE" if AGENT_AVAILABLE else "NO DISPONIBLE")
     print("  Herramientas:", tool_count() if TOOLS_AVAILABLE else 0)
     print("  Skills:", "DISPONIBLE" if SKILLS_AVAILABLE else "NO DISPONIBLE")
     print("  Planificador:", "DISPONIBLE" if PLANNER_AVAILABLE else "NO DISPONIBLE")
     print("  Error Recovery:", "DISPONIBLE" if ERROR_RECOVERY_AVAILABLE else "NO DISPONIBLE")
+    print("  Orchestrator:", "DISPONIBLE" if ORCHESTRATOR_AVAILABLE else "NO DISPONIBLE")
+    print("  Browser (Playwright):", "DISPONIBLE" if BROWSER_AVAILABLE else "NO DISPONIBLE")
     print("  Threading: ACTIVADO (no bloquea event loop)")
     print("=" * 60)
     uvicorn.run(app, host="0.0.0.0", port=8000)

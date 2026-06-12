@@ -26,6 +26,13 @@ from agent.schemas import SYSTEM_PROMPT, JSON_TOOLS_PROMPT
 from agent.metacognition import Metacognition
 from utils.metrics import get_metrics
 
+# Importar orquestador con fallback graceful
+try:
+    from agent.orchestrator import Orchestrator, get_orchestrator
+    ORCHESTRATOR_AVAILABLE = True
+except Exception:
+    ORCHESTRATOR_AVAILABLE = False
+
 
 class ReactAgent:
     """Motor ReAct: Piensa -> Actua -> Observa -> Piensa de nuevo."""
@@ -33,6 +40,12 @@ class ReactAgent:
     # Rate limiting: max llamadas a la misma herramienta por conversacion
     MAX_SAME_TOOL_CALLS = 5
     MAX_TOTAL_TOOL_CALLS = 12
+
+    # Palabras clave para detectar tareas complejas que se benefician de planificacion
+    _COMPLEX_TASK_KEYWORDS = [
+        "construir", "crear app", "desarrollar", "automatizar", "implementar",
+        "build", "create app", "desarrolla", "hazme una app", "proyecto"
+    ]
 
     def __init__(self, memory=None):
         self.memory = memory or TripleMemory()
@@ -42,6 +55,7 @@ class ReactAgent:
         self._models_cache = None  # Cache de modelos para no llamar API cada vez
         self._tool_call_counts = {}  # Rate limiting por herramienta
         self._total_tool_calls = 0   # Total de tool calls en esta conversacion
+        self.orchestrator = get_orchestrator() if ORCHESTRATOR_AVAILABLE else None
 
     def _log(self, message, category="info"):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -267,6 +281,20 @@ class ReactAgent:
         }
 
         messages = self._build_messages(user_message)
+
+        # *** NUEVO: Deteccion de tareas complejas - sugerir planificacion ***
+        if self._is_complex_task(user_message):
+            self._log("Tarea compleja detectada: sugiriendo planificacion_tarea", "info")
+            # Inyectar hint en el system prompt para que el agente considere planificar
+            plan_hint = (
+                "\n\n[NOTA DEL SISTEMA]: Esta parece una tarea compleja. "
+                "Considera usar la herramienta 'planificar_tarea' primero para descomponer "
+                "el problema en subtareas antes de ejecutar. Esto mejorara la calidad del resultado."
+            )
+            for msg in messages:
+                if msg["role"] == "system":
+                    msg["content"] += plan_hint
+                    break
 
         if self.supports_tool_calling is None:
             self.supports_tool_calling = self._detect_tool_calling_support()
@@ -537,6 +565,208 @@ class ReactAgent:
             "data": "Alcance el limite de iteraciones. Puede que necesites ser mas especifico.",
             "thinking_log": self.thinking_log,
             "meta_status": self.metacognition.get_status(),
+        }
+
+    # ----------------------------------------------------------
+    # DETECCION DE TAREAS COMPLEJAS
+    # ----------------------------------------------------------
+    def _is_complex_task(self, message: str) -> bool:
+        """Detecta si un mensaje parece una tarea compleja que se beneficia de planificacion."""
+        msg_lower = message.lower()
+        return any(kw in msg_lower for kw in self._COMPLEX_TASK_KEYWORDS)
+
+    # ----------------------------------------------------------
+    # RUN PLANNED (ejecucion con planificacion y orquestacion)
+    # ----------------------------------------------------------
+    def run_planned(self, message: str) -> str:
+        """Ejecuta una tarea compleja usando planificacion y orquestacion."""
+        from tools.task_planner import get_planner
+
+        planner = get_planner()
+        plan = planner.smart_decompose(message)
+
+        # Validar plan
+        validation = planner.validate_plan(plan)
+        if not validation["valid"]:
+            # Fallback a ejecucion normal
+            self._log("Plan invalido, fallback a ejecucion normal", "warning")
+            return self.run(message)
+
+        # Ejecutar plan
+        results = []
+        while True:
+            next_task = plan.get_next_task()
+            if not next_task:
+                break
+
+            plan.mark_in_progress(next_task.id)
+
+            # Ejecutar la subtarea
+            task_prompt = (
+                f"Ejecuta esta subtarea: {next_task.title}\n"
+                f"Descripcion: {next_task.description}\n"
+                f"Contexto previo: {json.dumps(results[-3:], ensure_ascii=False) if results else 'Ninguno'}"
+            )
+
+            try:
+                result = self.run(task_prompt)
+                # self.run devuelve (respuesta, thinking_log)
+                if isinstance(result, tuple):
+                    result = result[0]
+                plan.mark_completed(next_task.id, result)
+                results.append({"task": next_task.title, "result": result[:500]})
+                planner._save_plan(plan)
+            except Exception as e:
+                plan.mark_failed(next_task.id, str(e))
+                planner._save_plan(plan)
+                # Intentar continuar con la siguiente subtarea
+
+        # Retornar resumen
+        progress = plan.get_progress()
+        summary = f"Plan completado: {progress['completed']}/{progress['total']} tareas\n\n"
+        for r in results:
+            summary += f"- {r['task']}: {r['result'][:200]}\n"
+        return summary
+
+    # ----------------------------------------------------------
+    # RUN PLANNED STREAM (ejecucion planificada con streaming)
+    # ----------------------------------------------------------
+    def run_planned_stream(self, message: str):
+        """Ejecuta una tarea compleja con planificacion, emitiendo eventos de streaming."""
+        try:
+            from tools.task_planner import get_planner
+        except Exception as e:
+            # Si task_planner no esta disponible, fallback a run_stream
+            self._log(f"task_planner no disponible: {e}, fallback a run_stream", "warning")
+            yield from self.run_stream(message)
+            return
+
+        planner = get_planner()
+
+        # Emitir evento de inicio de planificacion
+        yield {
+            "type": "plan_update",
+            "data": {
+                "phase": "decomposing",
+                "message": "Analizando tarea compleja y creando plan...",
+                "task": message[:100],
+            }
+        }
+
+        try:
+            plan = planner.smart_decompose(message)
+        except Exception as e:
+            self._log(f"Error al descomponer tarea: {e}", "error")
+            yield from self.run_stream(message)
+            return
+
+        # Validar plan
+        validation = planner.validate_plan(plan)
+        if not validation["valid"]:
+            self._log("Plan invalido, fallback a ejecucion normal (streaming)", "warning")
+            yield {
+                "type": "plan_update",
+                "data": {
+                    "phase": "invalid",
+                    "message": "No se pudo crear un plan valido. Ejecutando normalmente...",
+                }
+            }
+            yield from self.run_stream(message)
+            return
+
+        # Emitir plan creado
+        progress = plan.get_progress()
+        yield {
+            "type": "plan_update",
+            "data": {
+                "phase": "plan_created",
+                "message": f"Plan creado: {progress['total']} subtareas",
+                "total_tasks": progress['total'],
+                "tasks": [
+                    {"id": t.id, "title": t.title, "status": t.status.value if hasattr(t.status, 'value') else str(t.status)}
+                    for t in plan.tasks
+                ],
+            }
+        }
+
+        # Ejecutar plan
+        results = []
+        while True:
+            next_task = plan.get_next_task()
+            if not next_task:
+                break
+
+            plan.mark_in_progress(next_task.id)
+
+            # Emitir evento de subtarea iniciada
+            yield {
+                "type": "plan_update",
+                "data": {
+                    "phase": "task_started",
+                    "message": f"Ejecutando: {next_task.title}",
+                    "task_id": next_task.id,
+                    "task_title": next_task.title,
+                    "progress": f"{len(results) + 1}/{progress['total']}",
+                }
+            }
+
+            # Ejecutar la subtarea
+            task_prompt = (
+                f"Ejecuta esta subtarea: {next_task.title}\n"
+                f"Descripcion: {next_task.description}\n"
+                f"Contexto previo: {json.dumps(results[-3:], ensure_ascii=False) if results else 'Ninguno'}"
+            )
+
+            try:
+                result = self.run(task_prompt)
+                # self.run devuelve (respuesta, thinking_log)
+                if isinstance(result, tuple):
+                    result = result[0]
+                plan.mark_completed(next_task.id, result)
+                results.append({"task": next_task.title, "result": result[:500]})
+                planner._save_plan(plan)
+
+                # Emitir resultado de subtarea
+                yield {
+                    "type": "text",
+                    "data": f"✅ {next_task.title}: {result[:200]}\n\n"
+                }
+
+            except Exception as e:
+                plan.mark_failed(next_task.id, str(e))
+                planner._save_plan(plan)
+
+                yield {
+                    "type": "plan_update",
+                    "data": {
+                        "phase": "task_failed",
+                        "message": f"Subtarea fallo: {next_task.title} - {str(e)[:100]}",
+                        "task_id": next_task.id,
+                    }
+                }
+                # Intentar continuar con la siguiente subtarea
+
+        # Emitir resumen final
+        progress = plan.get_progress()
+        summary = f"Plan completado: {progress['completed']}/{progress['total']} tareas\n\n"
+        for r in results:
+            summary += f"- {r['task']}: {r['result'][:200]}\n"
+
+        yield {
+            "type": "plan_update",
+            "data": {
+                "phase": "completed",
+                "message": summary[:500],
+                "completed": progress['completed'],
+                "total": progress['total'],
+            }
+        }
+
+        yield {
+            "type": "done",
+            "data": summary,
+            "thinking_log": self.thinking_log,
+            "meta_status": self.metacognition.get_status() if hasattr(self, 'metacognition') else {},
         }
 
     # ----------------------------------------------------------

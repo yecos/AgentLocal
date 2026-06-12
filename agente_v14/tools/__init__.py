@@ -686,6 +686,56 @@ def diagnosticar_error(mensaje_error: str, herramienta: str = "",
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
+# --- Browser Automation (Playwright) ---
+
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "navegador_web",
+        "description": "Automatiza un navegador web real con Playwright. Navega, hace click, escribe, toma screenshots, extrae datos, llena formularios, ejecuta JavaScript. Mucho mas potente que abrir_url o navegar_web.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "accion": {"type": "string", "description": "Accion: navigate, click, type, screenshot, extract, fill_form, wait, scroll, evaluate, pdf, download, get_page_info, start, stop"},
+                "url": {"type": "string", "description": "URL para navigate/download"},
+                "selector": {"type": "string", "description": "Selector CSS del elemento (para click, type, extract, wait)"},
+                "texto": {"type": "string", "description": "Texto a escribir (para type)"},
+                "tipo_extract": {"type": "string", "description": "Tipo de extraccion: text, html, href, src, value, all_links, all_images (default: text)"},
+                "campos_formulario": {"type": "string", "description": "Campos para fill_form en JSON: [{selector, value}]"},
+                "direccion_scroll": {"type": "string", "description": "Direccion scroll: up, down, left, right (default: down)"},
+                "script_js": {"type": "string", "description": "JavaScript a ejecutar (para evaluate)"},
+                "completa": {"type": "boolean", "description": "Screenshot completa (default: false)"},
+                "esperar": {"type": "integer", "description": "Timeout en milisegundos (default: 5000)"},
+                "presionar_enter": {"type": "boolean", "description": "Presionar Enter despues de escribir (default: false)"},
+                "ruta_destino": {"type": "string", "description": "Ruta de destino para pdf/download"}
+            },
+            "required": ["accion"]
+        }
+    }
+})
+def navegador_web(accion: str, url: str = "", selector: str = "", texto: str = "",
+                  tipo_extract: str = "text", campos_formulario: str = "",
+                  direccion_scroll: str = "down", script_js: str = "",
+                  completa: bool = False, esperar: int = 5000,
+                  presionar_enter: bool = False, ruta_destino: str = "") -> str:
+    """Automatiza un navegador web real con Playwright."""
+    from .browser_automation import browser_automation
+    return browser_automation(
+        accion=accion,
+        url=url,
+        selector=selector,
+        text=texto,
+        extract_type=tipo_extract,
+        fields_json=campos_formulario,
+        direction=direccion_scroll,
+        script=script_js,
+        full_page=completa,
+        timeout=esperar,
+        press_enter=presionar_enter,
+        output_path=ruta_destino,
+    )
+
+
 # ============================================================
 # CARGAR SKILLS DINAMICAMENTE
 # ============================================================
