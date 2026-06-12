@@ -186,6 +186,26 @@ class ExecutionPlan:
                 return task
         return None
 
+    def _dependencies_met(self, task_id: str) -> bool:
+        """Verifica si todas las dependencias de una tarea estan completadas."""
+        task = self.tasks.get(task_id)
+        if not task:
+            return False
+        if not task.dependencies:
+            return True
+        return all(
+            self.tasks.get(dep_id, Task("")).status == TaskStatus.COMPLETED
+            for dep_id in task.dependencies
+            if dep_id in self.tasks
+        )
+
+    def get_ready_tasks(self) -> list[Task]:
+        """Obtiene todas las tareas pendientes cuyas dependencias estan completadas."""
+        return [
+            task for task in self.tasks.values()
+            if task.status == TaskStatus.PENDING and self._dependencies_met(task.id)
+        ]
+
     def get_task(self, task_id: str) -> Optional[Task]:
         return self.tasks.get(task_id)
 

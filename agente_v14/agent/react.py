@@ -610,40 +610,102 @@ class ReactAgent:
         # Ejecutar plan
         results = []
         while True:
-            next_task = plan.get_next_task()
-            if not next_task:
+            # Obtener todas las tareas listas (pendientes con dependencias resueltas)
+            ready_tasks = plan.get_ready_tasks()
+            if not ready_tasks:
                 break
 
-            plan.mark_in_progress(next_task.id)
+            # --- EJECUCION PARALELA: si hay 2+ tareas listas y el Orchestrator esta disponible ---
+            if len(ready_tasks) >= 2 and ORCHESTRATOR_AVAILABLE and self.orchestrator:
+                # Limitar a maximo 3 tareas en paralelo
+                parallel_tasks = ready_tasks[:3]
+                parallel_titles = [t.title for t in parallel_tasks]
+                self._log(
+                    f"Ejecutando {len(parallel_tasks)} tareas en paralelo: {parallel_titles}",
+                    "info"
+                )
 
-            # Ejecutar la subtarea
-            task_prompt = (
-                f"Ejecuta esta subtarea: {next_task.title}\n"
-                f"Descripcion: {next_task.description}\n"
-                f"Contexto previo: {json.dumps(results[-3:], ensure_ascii=False) if results else 'Ninguno'}"
-            )
+                # Marcar todas como in_progress
+                for t in parallel_tasks:
+                    plan.mark_in_progress(t.id)
 
-            # Enriquecer prompt de subtarea con contexto de skills relevantes
-            if SKILLS_ENRICHMENT_AVAILABLE:
+                # Delegar al Orchestrator
+                parallel_result = self._execute_parallel_tasks(parallel_tasks, plan, results)
+
+                if parallel_result:
+                    # Procesar resultados paralelos
+                    for task in parallel_tasks:
+                        task_result = parallel_result.get(task.id, "")
+                        if task_result and not task_result.startswith("ERROR:"):
+                            plan.mark_completed(task.id, task_result)
+                            results.append({"task": task.title, "result": task_result[:500]})
+                        else:
+                            error_msg = task_result if task_result else "Resultado vacio"
+                            plan.mark_failed(task.id, error_msg)
+                    planner._save_plan(plan)
+                else:
+                    # Fallback: ejecutar la primera tarea secuencialmente
+                    self._log("Fallback a ejecucion secuencial tras fallo del Orchestrator", "warning")
+                    next_task = parallel_tasks[0]
+
+                    task_prompt = (
+                        f"Ejecuta esta subtarea: {next_task.title}\n"
+                        f"Descripcion: {next_task.description}\n"
+                        f"Contexto previo: {json.dumps(results[-3:], ensure_ascii=False) if results else 'Ninguno'}"
+                    )
+
+                    if SKILLS_ENRICHMENT_AVAILABLE:
+                        try:
+                            skills_context = enrich_prompt_with_skills(next_task.description, "")
+                            if skills_context:
+                                task_prompt += f"\n\n--- CONTEXTO DE SKILLS PARA SUBTAREA ---\n{skills_context}"
+                        except Exception:
+                            pass
+
+                    try:
+                        result = self.run(task_prompt)
+                        if isinstance(result, tuple):
+                            result = result[0]
+                        plan.mark_completed(next_task.id, result)
+                        results.append({"task": next_task.title, "result": result[:500]})
+                        planner._save_plan(plan)
+                    except Exception as e:
+                        plan.mark_failed(next_task.id, str(e))
+                        planner._save_plan(plan)
+
+            # --- EJECUCION SECUENCIAL: si solo hay 1 tarea lista o no hay Orchestrator ---
+            else:
+                next_task = ready_tasks[0]
+                plan.mark_in_progress(next_task.id)
+
+                # Ejecutar la subtarea
+                task_prompt = (
+                    f"Ejecuta esta subtarea: {next_task.title}\n"
+                    f"Descripcion: {next_task.description}\n"
+                    f"Contexto previo: {json.dumps(results[-3:], ensure_ascii=False) if results else 'Ninguno'}"
+                )
+
+                # Enriquecer prompt de subtarea con contexto de skills relevantes
+                if SKILLS_ENRICHMENT_AVAILABLE:
+                    try:
+                        skills_context = enrich_prompt_with_skills(next_task.description, "")
+                        if skills_context:
+                            task_prompt += f"\n\n--- CONTEXTO DE SKILLS PARA SUBTAREA ---\n{skills_context}"
+                    except Exception:
+                        pass  # No dejar que el enriquecimiento rompa la ejecucion planificada
+
                 try:
-                    skills_context = enrich_prompt_with_skills(next_task.description, "")
-                    if skills_context:
-                        task_prompt += f"\n\n--- CONTEXTO DE SKILLS PARA SUBTAREA ---\n{skills_context}"
-                except Exception:
-                    pass  # No dejar que el enriquecimiento rompa la ejecucion planificada
-
-            try:
-                result = self.run(task_prompt)
-                # self.run devuelve (respuesta, thinking_log)
-                if isinstance(result, tuple):
-                    result = result[0]
-                plan.mark_completed(next_task.id, result)
-                results.append({"task": next_task.title, "result": result[:500]})
-                planner._save_plan(plan)
-            except Exception as e:
-                plan.mark_failed(next_task.id, str(e))
-                planner._save_plan(plan)
-                # Intentar continuar con la siguiente subtarea
+                    result = self.run(task_prompt)
+                    # self.run devuelve (respuesta, thinking_log)
+                    if isinstance(result, tuple):
+                        result = result[0]
+                    plan.mark_completed(next_task.id, result)
+                    results.append({"task": next_task.title, "result": result[:500]})
+                    planner._save_plan(plan)
+                except Exception as e:
+                    plan.mark_failed(next_task.id, str(e))
+                    planner._save_plan(plan)
+                    # Intentar continuar con la siguiente subtarea
 
         # Retornar resumen
         progress = plan.get_progress()
@@ -651,6 +713,57 @@ class ReactAgent:
         for r in results:
             summary += f"- {r['task']}: {r['result'][:200]}\n"
         return summary
+
+    # ----------------------------------------------------------
+    # EJECUCION PARALELA DE TAREAS (via Orchestrator)
+    # ----------------------------------------------------------
+    def _execute_parallel_tasks(self, tasks, plan, results):
+        """
+        Ejecuta multiples tareas independientes en paralelo usando el Orchestrator.
+
+        Args:
+            tasks: Lista de objetos Task con status=pending y dependencias resueltas
+            plan: ExecutionPlan al que pertenecen las tareas
+            results: Lista acumulada de resultados previos
+
+        Returns:
+            Dict {task_id: result} con los resultados de cada tarea,
+            o None si fallo y se debe hacer fallback a secuencial.
+        """
+        if not self.orchestrator or not ORCHESTRATOR_AVAILABLE:
+            self._log("Orchestrator no disponible para ejecucion paralela", "warning")
+            return None
+
+        # Crear descripciones de sub-tareas para el orchestrator
+        subtask_descriptions = []
+        for task in tasks:
+            subtask_descriptions.append({
+                "id": task.id,
+                "description": f"{task.title}: {task.description}",
+                "context": json.dumps(results[-3:], ensure_ascii=False) if results else "",
+            })
+
+        self._log(
+            f"Delegando {len(tasks)} tareas al Orchestrator en paralelo: "
+            f"{[t.title for t in tasks]}",
+            "info"
+        )
+
+        # Usar orchestrator para ejecutar en paralelo
+        try:
+            orch_result = self.orchestrator.execute_parallel(
+                descriptions=subtask_descriptions,
+                agent_run_fn=self.run,  # Pasar el metodo run del propio agente
+            )
+            if orch_result:
+                self._log(
+                    f"Orchestrator completo {len(orch_result)}/{len(tasks)} tareas en paralelo",
+                    "info"
+                )
+            return orch_result
+        except Exception as e:
+            self._log(f"Orchestrator parallel fallo: {e}, fallback a secuencial", "warning")
+            return None
 
     # ----------------------------------------------------------
     # RUN PLANNED STREAM (ejecucion planificada con streaming)
@@ -716,68 +829,181 @@ class ReactAgent:
         # Ejecutar plan
         results = []
         while True:
-            next_task = plan.get_next_task()
-            if not next_task:
+            # Obtener todas las tareas listas (pendientes con dependencias resueltas)
+            ready_tasks = plan.get_ready_tasks()
+            if not ready_tasks:
                 break
 
-            plan.mark_in_progress(next_task.id)
+            # --- EJECUCION PARALELA: si hay 2+ tareas listas y el Orchestrator esta disponible ---
+            if len(ready_tasks) >= 2 and ORCHESTRATOR_AVAILABLE and self.orchestrator:
+                # Limitar a maximo 3 tareas en paralelo para no sobrecargar
+                parallel_tasks = ready_tasks[:3]
+                parallel_titles = [t.title for t in parallel_tasks]
+                self._log(
+                    f"Ejecutando {len(parallel_tasks)} tareas en paralelo: {parallel_titles}",
+                    "info"
+                )
 
-            # Emitir evento de subtarea iniciada
-            yield {
-                "type": "plan_update",
-                "data": {
-                    "phase": "task_started",
-                    "message": f"Ejecutando: {next_task.title}",
-                    "task_id": next_task.id,
-                    "task_title": next_task.title,
-                    "progress": f"{len(results) + 1}/{progress['total']}",
-                }
-            }
+                # Marcar todas como in_progress ANTES de delegar
+                for t in parallel_tasks:
+                    plan.mark_in_progress(t.id)
 
-            # Ejecutar la subtarea
-            task_prompt = (
-                f"Ejecuta esta subtarea: {next_task.title}\n"
-                f"Descripcion: {next_task.description}\n"
-                f"Contexto previo: {json.dumps(results[-3:], ensure_ascii=False) if results else 'Ninguno'}"
-            )
-
-            # Enriquecer prompt de subtarea (streaming) con contexto de skills relevantes
-            if SKILLS_ENRICHMENT_AVAILABLE:
-                try:
-                    skills_context = enrich_prompt_with_skills(next_task.description, "")
-                    if skills_context:
-                        task_prompt += f"\n\n--- CONTEXTO DE SKILLS PARA SUBTAREA ---\n{skills_context}"
-                except Exception:
-                    pass  # No dejar que el enriquecimiento rompa la ejecucion planificada
-
-            try:
-                result = self.run(task_prompt)
-                # self.run devuelve (respuesta, thinking_log)
-                if isinstance(result, tuple):
-                    result = result[0]
-                plan.mark_completed(next_task.id, result)
-                results.append({"task": next_task.title, "result": result[:500]})
-                planner._save_plan(plan)
-
-                # Emitir resultado de subtarea
-                yield {
-                    "type": "text",
-                    "data": f"✅ {next_task.title}: {result[:200]}\n\n"
-                }
-
-            except Exception as e:
-                plan.mark_failed(next_task.id, str(e))
-                planner._save_plan(plan)
-
+                # Emitir evento de ejecucion paralela
                 yield {
                     "type": "plan_update",
                     "data": {
-                        "phase": "task_failed",
-                        "message": f"Subtarea fallo: {next_task.title} - {str(e)[:100]}",
-                        "task_id": next_task.id,
+                        "phase": "parallel",
+                        "message": f"Ejecutando en paralelo: {', '.join(parallel_titles)}",
+                        "tasks": parallel_titles,
+                        "task_ids": [t.id for t in parallel_tasks],
+                        "progress": f"{len(results) + 1}-{len(results) + len(parallel_tasks)}/{progress['total']}",
                     }
                 }
-                # Intentar continuar con la siguiente subtarea
+
+                # Delegar al Orchestrator
+                parallel_result = self._execute_parallel_tasks(parallel_tasks, plan, results)
+
+                if parallel_result:
+                    # Procesar resultados paralelos
+                    for task in parallel_tasks:
+                        task_result = parallel_result.get(task.id, "")
+                        if task_result and not task_result.startswith("ERROR:"):
+                            plan.mark_completed(task.id, task_result)
+                            results.append({"task": task.title, "result": task_result[:500]})
+                            yield {
+                                "type": "text",
+                                "data": f"✅ {task.title}: {task_result[:200]}\n\n"
+                            }
+                        else:
+                            error_msg = task_result if task_result else "Resultado vacio"
+                            plan.mark_failed(task.id, error_msg)
+                            yield {
+                                "type": "plan_update",
+                                "data": {
+                                    "phase": "task_failed",
+                                    "message": f"Subtarea paralela fallo: {task.title} - {error_msg[:100]}",
+                                    "task_id": task.id,
+                                }
+                            }
+                    planner._save_plan(plan)
+                else:
+                    # Fallback: ejecutar las tareas secuencialmente (la primera de las paralelas)
+                    self._log("Fallback a ejecucion secuencial tras fallo del Orchestrator", "warning")
+                    next_task = parallel_tasks[0]
+                    # Resetear las que no vamos a ejecutar ahora a pending
+                    for t in parallel_tasks[1:]:
+                        t.status = plan.tasks[t.id].status  # quedan in_progress, se retomaran
+
+                    # Ejecutar la primera tarea secuencialmente
+                    task_prompt = (
+                        f"Ejecuta esta subtarea: {next_task.title}\n"
+                        f"Descripcion: {next_task.description}\n"
+                        f"Contexto previo: {json.dumps(results[-3:], ensure_ascii=False) if results else 'Ninguno'}"
+                    )
+
+                    if SKILLS_ENRICHMENT_AVAILABLE:
+                        try:
+                            skills_context = enrich_prompt_with_skills(next_task.description, "")
+                            if skills_context:
+                                task_prompt += f"\n\n--- CONTEXTO DE SKILLS PARA SUBTAREA ---\n{skills_context}"
+                        except Exception:
+                            pass
+
+                    yield {
+                        "type": "plan_update",
+                        "data": {
+                            "phase": "task_started",
+                            "message": f"Ejecutando (secuencial fallback): {next_task.title}",
+                            "task_id": next_task.id,
+                            "task_title": next_task.title,
+                            "progress": f"{len(results) + 1}/{progress['total']}",
+                        }
+                    }
+
+                    try:
+                        result = self.run(task_prompt)
+                        if isinstance(result, tuple):
+                            result = result[0]
+                        plan.mark_completed(next_task.id, result)
+                        results.append({"task": next_task.title, "result": result[:500]})
+                        planner._save_plan(plan)
+                        yield {
+                            "type": "text",
+                            "data": f"✅ {next_task.title}: {result[:200]}\n\n"
+                        }
+                    except Exception as e:
+                        plan.mark_failed(next_task.id, str(e))
+                        planner._save_plan(plan)
+                        yield {
+                            "type": "plan_update",
+                            "data": {
+                                "phase": "task_failed",
+                                "message": f"Subtarea fallo: {next_task.title} - {str(e)[:100]}",
+                                "task_id": next_task.id,
+                            }
+                        }
+
+            # --- EJECUCION SECUENCIAL: si solo hay 1 tarea lista o no hay Orchestrator ---
+            else:
+                next_task = ready_tasks[0]
+                plan.mark_in_progress(next_task.id)
+
+                # Emitir evento de subtarea iniciada
+                yield {
+                    "type": "plan_update",
+                    "data": {
+                        "phase": "task_started",
+                        "message": f"Ejecutando: {next_task.title}",
+                        "task_id": next_task.id,
+                        "task_title": next_task.title,
+                        "progress": f"{len(results) + 1}/{progress['total']}",
+                    }
+                }
+
+                # Ejecutar la subtarea
+                task_prompt = (
+                    f"Ejecuta esta subtarea: {next_task.title}\n"
+                    f"Descripcion: {next_task.description}\n"
+                    f"Contexto previo: {json.dumps(results[-3:], ensure_ascii=False) if results else 'Ninguno'}"
+                )
+
+                # Enriquecer prompt de subtarea (streaming) con contexto de skills relevantes
+                if SKILLS_ENRICHMENT_AVAILABLE:
+                    try:
+                        skills_context = enrich_prompt_with_skills(next_task.description, "")
+                        if skills_context:
+                            task_prompt += f"\n\n--- CONTEXTO DE SKILLS PARA SUBTAREA ---\n{skills_context}"
+                    except Exception:
+                        pass  # No dejar que el enriquecimiento rompa la ejecucion planificada
+
+                try:
+                    result = self.run(task_prompt)
+                    # self.run devuelve (respuesta, thinking_log)
+                    if isinstance(result, tuple):
+                        result = result[0]
+                    plan.mark_completed(next_task.id, result)
+                    results.append({"task": next_task.title, "result": result[:500]})
+                    planner._save_plan(plan)
+
+                    # Emitir resultado de subtarea
+                    yield {
+                        "type": "text",
+                        "data": f"✅ {next_task.title}: {result[:200]}\n\n"
+                    }
+
+                except Exception as e:
+                    plan.mark_failed(next_task.id, str(e))
+                    planner._save_plan(plan)
+
+                    yield {
+                        "type": "plan_update",
+                        "data": {
+                            "phase": "task_failed",
+                            "message": f"Subtarea fallo: {next_task.title} - {str(e)[:100]}",
+                            "task_id": next_task.id,
+                        }
+                    }
+                    # Intentar continuar con la siguiente subtarea
 
         # Emitir resumen final
         progress = plan.get_progress()

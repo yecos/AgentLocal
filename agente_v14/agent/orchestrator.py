@@ -669,6 +669,104 @@ class Orchestrator:
         return 0
 
     # ============================================================
+    # EJECUCION PARALELA VIA CALLBACK (para ReactAgent)
+    # ============================================================
+
+    def execute_parallel(self, descriptions: list[dict], agent_run_fn=None) -> Optional[dict]:
+        """
+        Ejecuta multiples tareas independientes en paralelo usando ThreadPoolExecutor.
+
+        A diferencia de orchestrate(), este metodo no crea sub-agentes propios
+        sino que delega la ejecucion a una funcion callback (tipicamente
+        ReactAgent.run). Esto permite que las tareas se beneficien de todo
+        el motor ReAct (memoria, metacognicion, herramientas, etc.).
+
+        Args:
+            descriptions: Lista de dicts, cada uno con:
+                - "id": Identificador de la tarea
+                - "description": Descripcion completa de la tarea a ejecutar
+                - "context": Contexto previo opcional (JSON string)
+            agent_run_fn: Funcion callable que recibe un prompt (str) y retorna
+                          un resultado (str o tuple). Si es None, usa el LLM directo.
+
+        Returns:
+            Dict {task_id: result} con los resultados de cada tarea,
+            o None si hubo un error y se debe hacer fallback a secuencial.
+        """
+        if not descriptions or len(descriptions) < 2:
+            logger.debug("[Orchestrator] execute_parallel: menos de 2 tareas, no vale la pena")
+            return None
+
+        results: dict[str, str] = {}
+        max_workers = min(len(descriptions), self._max_parallel)
+
+        logger.info(
+            f"[Orchestrator] execute_parallel: ejecutando {len(descriptions)} tareas "
+            f"en paralelo (max_workers={max_workers})"
+        )
+
+        def _run_single(desc: dict) -> tuple[str, str]:
+            """Ejecuta una sola tarea y retorna (task_id, result)."""
+            task_id = desc.get("id", "unknown")
+            description = desc.get("description", "")
+            context = desc.get("context", "")
+
+            prompt = description
+            if context:
+                prompt = f"Contexto previo:\n{context}\n\n{description}"
+
+            try:
+                if agent_run_fn:
+                    result = agent_run_fn(prompt)
+                    # ReactAgent.run puede devolver tuple (respuesta, thinking_log)
+                    if isinstance(result, tuple):
+                        result = result[0]
+                    return (task_id, str(result) if result else "")
+                else:
+                    # Fallback: usar LLM directo
+                    if ollama is None:
+                        return (task_id, "ERROR: LLM no disponible")
+                    messages = [
+                        {"role": "system", "content": "Eres un agente especializado. Ejecuta la tarea de forma concisa y completa."},
+                        {"role": "user", "content": prompt},
+                    ]
+                    llm_result = ollama.generate(messages)
+                    return (task_id, str(llm_result) if llm_result else "")
+            except Exception as e:
+                logger.error(f"[Orchestrator] execute_parallel: tarea {task_id} fallo: {e}")
+                return (task_id, f"ERROR: {e}")
+
+        try:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(_run_single, desc): desc
+                    for desc in descriptions
+                }
+
+                for future in as_completed(futures):
+                    desc = futures[future]
+                    task_id = desc.get("id", "unknown")
+                    try:
+                        tid, result = future.result()
+                        results[tid] = result
+                        logger.info(f"[Orchestrator] execute_parallel: tarea {tid} completada ({len(result)} chars)")
+                    except Exception as e:
+                        logger.error(f"[Orchestrator] execute_parallel: future de {task_id} fallo: {e}")
+                        results[task_id] = f"ERROR: {e}"
+
+            logger.info(
+                f"[Orchestrator] execute_parallel: completadas {len(results)}/{len(descriptions)} tareas"
+            )
+            return results
+
+        except Exception as e:
+            logger.error(f"[Orchestrator] execute_parallel fallo: {e}")
+            logger.debug(traceback.format_exc())
+            return None
+
+    # ============================================================
     # EJECUCION DE HERRAMIENTAS
     # ============================================================
 
