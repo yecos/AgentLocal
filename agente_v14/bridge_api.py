@@ -1,9 +1,11 @@
 """
 =============================================================
-AGENTE v14 - Bridge FastAPI para la interfaz web
+AGENTE v16 - Bridge FastAPI para la interfaz web
 =============================================================
 Expone el agente ReAct completo (tools, memory, streaming)
 como API REST para la interfaz Next.js.
+
+v16: Nuevos endpoints para tools, planner, skills, y db.
 
 Ejecutar: python bridge_api.py
 Puerto: 8000
@@ -18,6 +20,7 @@ import time
 import queue
 import threading
 import traceback
+import logging
 
 # Agregar directorio del agente al path
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +33,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 
+# --- Logger del bridge ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] bridge: %(message)s",
+)
+bridge_logger = logging.getLogger("bridge")
+
 # --- Importar agente ---
 try:
     from agent import ReactAgent
@@ -37,11 +47,44 @@ try:
     from llm import ollama
     AGENT_AVAILABLE = True
 except Exception as e:
-    print(f"[WARN] No se pudo importar el agente: {e}")
+    bridge_logger.warning(f"No se pudo importar el agente: {e}")
     AGENT_AVAILABLE = False
 
+# --- Importar herramientas v16 ---
+try:
+    from tools.registry import TOOL_FUNCTIONS, TOOL_SCHEMAS, tool_count, list_tools
+    TOOLS_AVAILABLE = True
+except Exception as e:
+    bridge_logger.warning(f"No se pudo importar tools.registry: {e}")
+    TOOLS_AVAILABLE = False
+
+try:
+    from tools.skill_loader import get_skills_status, list_available_skills
+    SKILLS_AVAILABLE = True
+except Exception as e:
+    bridge_logger.warning(f"No se pudo importar tools.skill_loader: {e}")
+    SKILLS_AVAILABLE = False
+
+try:
+    from tools.task_planner import get_planner
+    PLANNER_AVAILABLE = True
+except Exception as e:
+    bridge_logger.warning(f"No se pudo importar tools.task_planner: {e}")
+    PLANNER_AVAILABLE = False
+
+try:
+    from tools.error_recovery import get_error_history
+    ERROR_RECOVERY_AVAILABLE = True
+except Exception as e:
+    bridge_logger.warning(f"No se pudo importar tools.error_recovery: {e}")
+    ERROR_RECOVERY_AVAILABLE = False
+
 # --- App ---
-app = FastAPI(title="ZAI Agent Bridge", version="1.0.0")
+app = FastAPI(
+    title="ZAI Agent Bridge",
+    version="16.0.0",
+    description="Bridge API v16 - ReAct Agent con tools, planner, skills y error recovery",
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -54,7 +97,7 @@ app.add_middleware(
 # --- Singleton del agente ---
 _agent: Optional[ReactAgent] = None
 _start_time = time.time()
-_busy = False  # Flag: el agente esta procesando
+_busy = False
 
 
 def get_agent() -> ReactAgent:
@@ -62,9 +105,10 @@ def get_agent() -> ReactAgent:
     global _agent
     if _agent is None:
         if not AGENT_AVAILABLE:
-            raise HTTPException(status_code=503, detail="Agente no disponible. Verifica que Ollama esté corriendo.")
+            raise HTTPException(status_code=503, detail="Agente no disponible. Verifica que Ollama este corriendo.")
         memory = TripleMemory()
         _agent = ReactAgent(memory=memory)
+        bridge_logger.info("Instancia del agente creada")
     return _agent
 
 
@@ -81,13 +125,71 @@ class ChatResponse(BaseModel):
     tool_calls: list
     meta_status: dict
 
+class ToolExecuteRequest(BaseModel):
+    tool_name: str
+    params: dict = {}
 
-# --- Routes ---
+class PlanRequest(BaseModel):
+    goal: str
+    task_type: Optional[str] = None
+
+class PlanAdvanceRequest(BaseModel):
+    result: str = ""
+
+
+# ============================================================
+# STARTUP / SHUTDOWN EVENTS
+# ============================================================
+
+@app.on_event("startup")
+async def startup_event():
+    """Carga inicial de skills y planes al arrancar."""
+    bridge_logger.info("Iniciando Bridge API v16...")
+
+    # Auto-cargar skills
+    if SKILLS_AVAILABLE:
+        try:
+            from tools.skill_loader import load_all_skills
+            result = load_all_skills()
+            bridge_logger.info(
+                f"Skills cargados: {result.get('loaded', 0)} herramientas, "
+                f"{result.get('reference', 0)} referencia, "
+                f"{result.get('errors', 0)} errores"
+            )
+        except Exception as e:
+            bridge_logger.error(f"Error cargando skills al inicio: {e}")
+
+    # Cargar planes existentes
+    if PLANNER_AVAILABLE:
+        try:
+            planner = get_planner()
+            bridge_logger.info("Planificador inicializado y planes cargados")
+        except Exception as e:
+            bridge_logger.error(f"Error inicializando planificador: {e}")
+
+    bridge_logger.info(
+        f"Bridge listo - Agente: {'OK' if AGENT_AVAILABLE else 'NO'}, "
+        f"Tools: {tool_count() if TOOLS_AVAILABLE else 0}, "
+        f"Skills: {'OK' if SKILLS_AVAILABLE else 'NO'}, "
+        f"Planner: {'OK' if PLANNER_AVAILABLE else 'NO'}"
+    )
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Limpieza al apagar."""
+    bridge_logger.info("Bridge API v16 apagandose...")
+    global _agent
+    _agent = None
+
+
+# ============================================================
+# RUTAS ORIGINALES (v14 heritage)
+# ============================================================
 
 @app.get("/api/status")
 async def status():
     """Estado del sistema."""
-    # Verificar Ollama
     ollama_ok = False
     models = []
     try:
@@ -101,10 +203,22 @@ async def status():
 
     uptime = int(time.time() - _start_time)
 
+    skills_info = {}
+    if SKILLS_AVAILABLE:
+        try:
+            skills_info = get_skills_status()
+        except Exception:
+            skills_info = {"loaded": False}
+
     return {
         "connected": ollama_ok,
         "agent_available": AGENT_AVAILABLE,
+        "tools_available": TOOLS_AVAILABLE,
+        "skills_available": SKILLS_AVAILABLE,
+        "planner_available": PLANNER_AVAILABLE,
+        "error_recovery_available": ERROR_RECOVERY_AVAILABLE,
         "busy": _busy,
+        "tool_count": tool_count() if TOOLS_AVAILABLE else 0,
         "models": [
             {
                 "name": m.get("name", ""),
@@ -116,6 +230,8 @@ async def status():
         ],
         "modelCount": len(models),
         "uptime": uptime,
+        "version": "v16",
+        "skills": skills_info,
     }
 
 
@@ -162,7 +278,6 @@ async def chat(request: ChatRequest):
             }
         )
     else:
-        # Modo sin streaming - correr en thread para no bloquear
         loop = asyncio.get_event_loop()
         response, thinking_log = await loop.run_in_executor(None, agent.run, request.message)
         return ChatResponse(
@@ -171,110 +286,6 @@ async def chat(request: ChatRequest):
             tool_calls=[],
             meta_status=agent.metacognition.get_status() if hasattr(agent, 'metacognition') else {},
         )
-
-
-def _agent_runner(agent: ReactAgent, message: str, q: queue.Queue):
-    """
-    Corre agent.run_stream() en un thread separado.
-    Pone cada evento en la queue para que el async generator lo consuma.
-    Esto evita bloquear el event loop de FastAPI.
-    """
-    global _busy
-    _busy = True
-    try:
-        for event in agent.run_stream(message):
-            q.put(event)
-        # Senal de fin
-        q.put(None)
-    except Exception as e:
-        print(f"[ERROR] _agent_runner: {e}")
-        traceback.print_exc()
-        q.put({"type": "error", "data": str(e)})
-        q.put(None)
-    finally:
-        _busy = False
-
-
-async def _stream_agent_threaded(agent: ReactAgent, message: str):
-    """
-    Genera eventos SSE desde el agente ReAct SIN bloquear el event loop.
-    Usa un thread separado para correr el generador sincrono.
-    """
-    q = queue.Queue()
-
-    # Iniciar el generador sincrono en un thread
-    thread = threading.Thread(
-        target=_agent_runner,
-        args=(agent, message, q),
-        daemon=True,
-    )
-    thread.start()
-
-    try:
-        while True:
-            # Esperar evento de la queue sin bloquear el event loop
-            event = await asyncio.get_event_loop().run_in_executor(None, q.get)
-
-            # None = fin del stream
-            if event is None:
-                break
-
-            event_type = event.get("type", "text")
-            event_data = event.get("data", "")
-
-            if event_type == "text":
-                yield f"data: {json.dumps({'type': 'text', 'data': event_data}, ensure_ascii=False)}\n\n"
-
-            elif event_type == "thinking":
-                thinking_info = {
-                    "type": "thinking",
-                    "data": event_data if isinstance(event_data, dict) else {"message": str(event_data)},
-                }
-                yield f"data: {json.dumps(thinking_info, ensure_ascii=False)}\n\n"
-
-            elif event_type == "tool_start":
-                tool_info = {
-                    "type": "tool_start",
-                    "data": {
-                        "name": event_data.get("name", "unknown") if isinstance(event_data, dict) else str(event_data),
-                        "arguments": event_data.get("arguments", {}) if isinstance(event_data, dict) else {},
-                    }
-                }
-                yield f"data: {json.dumps(tool_info, ensure_ascii=False)}\n\n"
-
-            elif event_type == "tool_result":
-                result_info = {
-                    "type": "tool_result",
-                    "data": {
-                        "tool": event_data.get("tool", {}) if isinstance(event_data, dict) else {},
-                        "result": str(event_data.get("result", ""))[:500] if isinstance(event_data, dict) else str(event_data)[:500],
-                    }
-                }
-                yield f"data: {json.dumps(result_info, ensure_ascii=False)}\n\n"
-
-            elif event_type == "meta":
-                meta_info = {
-                    "type": "meta",
-                    "data": event_data,
-                }
-                yield f"data: {json.dumps(meta_info, ensure_ascii=False)}\n\n"
-
-            elif event_type == "done":
-                done_info = {
-                    "type": "done",
-                    "data": event_data if isinstance(event_data, str) else "",
-                    "thinking_log": event.get("thinking_log", []),
-                    "meta_status": event.get("meta_status", {}),
-                }
-                yield f"data: {json.dumps(done_info, ensure_ascii=False)}\n\n"
-
-            elif event_type == "error":
-                yield f"data: {json.dumps({'type': 'error', 'data': str(event_data)}, ensure_ascii=False)}\n\n"
-
-    except Exception as e:
-        print(f"[ERROR] _stream_agent_threaded: {e}")
-        traceback.print_exc()
-        yield f"data: {json.dumps({'type': 'error', 'data': f'Stream error: {str(e)}'}, ensure_ascii=False)}\n\n"
 
 
 @app.post("/api/chat/simple")
@@ -307,8 +318,215 @@ async def chat_simple(request: ChatRequest):
 
 @app.get("/api/health")
 async def health():
-    """Health check - rapido, nunca bloquea."""
-    return {"status": "ok", "agent": AGENT_AVAILABLE, "busy": _busy}
+    """Health check."""
+    return {
+        "status": "ok",
+        "agent": AGENT_AVAILABLE,
+        "busy": _busy,
+        "version": "v16",
+        "tools": tool_count() if TOOLS_AVAILABLE else 0,
+    }
+
+
+# ============================================================
+# RUTAS v16 - TOOLS
+# ============================================================
+
+@app.get("/api/tools")
+async def tools_list():
+    """Lista todas las herramientas registradas."""
+    if not TOOLS_AVAILABLE:
+        return {"tools": [], "count": 0}
+
+    tools_info = []
+    for name in list_tools():
+        from tools.registry import get_tool_metadata
+        meta = get_tool_metadata(name)
+        tools_info.append({
+            "name": name,
+            "description": meta.get("description", "") if meta else "",
+            "has_schema": meta.get("schema") is not None if meta else False,
+        })
+
+    return {
+        "tools": tools_info,
+        "count": len(tools_info),
+        "categories": {
+            "basicas": ["ejecutar_comando", "leer_archivo", "escribir_archivo", "listar_archivos",
+                         "abrir_aplicacion", "abrir_url", "buscar_youtube", "generar_codigo",
+                         "buscar_en_archivos", "procesos_activos", "matar_proceso"],
+            "web": ["buscar_web", "leer_web", "buscar_web_profundo"],
+            "planificacion": ["planificar_tarea"],
+            "ejecucion": ["ejecutar_codigo", "ejecutar_archivo", "ejecutar_tests"],
+            "edicion": ["buscar_reemplazar", "editar_lineas", "insertar_en_linea"],
+            "git": ["git_operacion"],
+            "base_datos": ["base_de_datos"],
+            "diagnostico": ["diagnosticar_error"],
+            "memoria": ["configurar_perfil", "crear_nota", "ver_notas", "analizar_imagen"],
+        }
+    }
+
+
+@app.post("/api/tools/execute")
+async def tools_execute(request: ToolExecuteRequest):
+    """Ejecuta una herramienta directamente."""
+    if not TOOLS_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Sistema de herramientas no disponible")
+
+    func = TOOL_FUNCTIONS.get(request.tool_name)
+    if not func:
+        raise HTTPException(status_code=404, detail=f"Herramienta no encontrada: {request.tool_name}")
+
+    try:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, lambda: func(**request.params))
+        return {"success": True, "tool": request.tool_name, "result": str(result)[:3000]}
+    except Exception as e:
+        bridge_logger.error(f"Error ejecutando herramienta {request.tool_name}: {e}")
+        traceback.print_exc()
+        return {"success": False, "tool": request.tool_name, "error": str(e)}
+
+
+# ============================================================
+# RUTAS v16 - SKILLS
+# ============================================================
+
+@app.get("/api/skills")
+async def skills_list():
+    """Lista los skills disponibles."""
+    if not SKILLS_AVAILABLE:
+        return {"skills": [], "loaded": False}
+    return {"skills": list_available_skills(), "status": get_skills_status()}
+
+
+@app.post("/api/skills/reload")
+async def skills_reload():
+    """Recarga los skills desde disco."""
+    if not SKILLS_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Skill loader no disponible")
+    from tools.skill_loader import load_all_skills
+    result = load_all_skills()
+    bridge_logger.info(f"Skills recargados: {result.get('loaded', 0)} herramientas, {result.get('errors', 0)} errores")
+    return result
+
+
+# ============================================================
+# RUTAS v16 - PLAN
+# ============================================================
+
+@app.post("/api/plan")
+async def plan_create(request: PlanRequest):
+    """Crea un plan de ejecucion."""
+    if not PLANNER_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Planificador no disponible")
+    planner = get_planner()
+    plan = planner.create_plan(request.goal, task_type=request.task_type)
+    bridge_logger.info(f"Plan creado: {plan.id} - {request.goal} ({len(plan.tasks)} tareas)")
+    return {
+        "plan_id": plan.id, "goal": plan.goal,
+        "total_tasks": len(plan.tasks), "status": plan.status.value,
+        "progress": plan.get_progress(),
+        "tasks": [t.to_dict() for t in plan.tasks.values()],
+    }
+
+
+@app.get("/api/plan")
+async def plan_get():
+    """Obtiene el plan activo actual."""
+    if not PLANNER_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Planificador no disponible")
+    planner = get_planner()
+    plan = planner.get_active_plan()
+    if not plan:
+        return {"active": False, "message": "No hay plan activo"}
+    return {
+        "active": True, "plan_id": plan.id, "goal": plan.goal,
+        "status": plan.status.value, "progress": plan.get_progress(),
+        "tasks": [t.to_dict() for t in plan.tasks.values()],
+    }
+
+
+@app.post("/api/plan/advance")
+async def plan_advance(request: PlanAdvanceRequest):
+    """Avanza el plan activo."""
+    if not PLANNER_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Planificador no disponible")
+    planner = get_planner()
+    next_task = planner.advance_plan(request.result)
+    if next_task:
+        return {"completed": False, "next_task": next_task.to_dict(), "progress": planner.get_progress()}
+    return {"completed": True, "message": "Plan completado", "progress": planner.get_progress()}
+
+
+# ============================================================
+# RUTAS v16 - ERRORS
+# ============================================================
+
+@app.get("/api/errors")
+async def errors_history():
+    """Historial de errores."""
+    if not ERROR_RECOVERY_AVAILABLE:
+        return {"errors": [], "total": 0}
+    history = get_error_history()
+    return {"total": len(history._history), "recent": history._history[-20:]}
+
+
+# ============================================================
+# STREAMING HELPERS
+# ============================================================
+
+def _agent_runner(agent: ReactAgent, message: str, q: queue.Queue):
+    """Ejecuta el agente en un thread separado para no bloquear el event loop."""
+    global _busy
+    _busy = True
+    try:
+        for event in agent.run_stream(message):
+            q.put(event)
+        q.put(None)
+    except Exception as e:
+        bridge_logger.error(f"Error en _agent_runner: {e}")
+        traceback.print_exc()
+        q.put({"type": "error", "data": str(e)})
+        q.put(None)
+    finally:
+        _busy = False
+
+
+async def _stream_agent_threaded(agent: ReactAgent, message: str):
+    """Stream eventos del agente usando un thread y una queue."""
+    q = queue.Queue()
+    thread = threading.Thread(target=_agent_runner, args=(agent, message, q), daemon=True)
+    thread.start()
+
+    try:
+        while True:
+            event = await asyncio.get_event_loop().run_in_executor(None, q.get)
+            if event is None:
+                break
+
+            event_type = event.get("type", "text")
+            event_data = event.get("data", "")
+
+            if event_type == "text":
+                yield f"data: {json.dumps({'type': 'text', 'data': event_data}, ensure_ascii=False)}\n\n"
+            elif event_type == "thinking":
+                yield f"data: {json.dumps({'type': 'thinking', 'data': event_data if isinstance(event_data, dict) else {'message': str(event_data)}}, ensure_ascii=False)}\n\n"
+            elif event_type == "tool_start":
+                yield f"data: {json.dumps({'type': 'tool_start', 'data': {'name': event_data.get('name', 'unknown') if isinstance(event_data, dict) else str(event_data), 'arguments': event_data.get('arguments', {}) if isinstance(event_data, dict) else {}}}, ensure_ascii=False)}\n\n"
+            elif event_type == "tool_result":
+                yield f"data: {json.dumps({'type': 'tool_result', 'data': {'tool': event_data.get('tool', {}) if isinstance(event_data, dict) else {}, 'result': str(event_data.get('result', ''))[:500] if isinstance(event_data, dict) else str(event_data)[:500]}}, ensure_ascii=False)}\n\n"
+            elif event_type == "plan_update":
+                yield f"data: {json.dumps({'type': 'plan_update', 'data': event_data}, ensure_ascii=False)}\n\n"
+            elif event_type == "meta":
+                yield f"data: {json.dumps({'type': 'meta', 'data': event_data}, ensure_ascii=False)}\n\n"
+            elif event_type == "done":
+                yield f"data: {json.dumps({'type': 'done', 'data': event_data if isinstance(event_data, str) else '', 'thinking_log': event.get('thinking_log', []), 'meta_status': event.get('meta_status', {})}, ensure_ascii=False)}\n\n"
+            elif event_type == "error":
+                yield f"data: {json.dumps({'type': 'error', 'data': str(event_data)}, ensure_ascii=False)}\n\n"
+    except Exception as e:
+        bridge_logger.error(f"Error en _stream_agent_threaded: {e}")
+        traceback.print_exc()
+        yield f"data: {json.dumps({'type': 'error', 'data': f'Stream error: {str(e)}'}, ensure_ascii=False)}\n\n"
 
 
 # --- Main ---
@@ -316,9 +534,13 @@ async def health():
 if __name__ == "__main__":
     import uvicorn
     print("=" * 60)
-    print("  ZAI Agent Bridge API v2.0")
+    print("  ZAI Agent Bridge API v16.0")
     print("  Puerto: 8000")
     print("  Agente:", "DISPONIBLE" if AGENT_AVAILABLE else "NO DISPONIBLE")
+    print("  Herramientas:", tool_count() if TOOLS_AVAILABLE else 0)
+    print("  Skills:", "DISPONIBLE" if SKILLS_AVAILABLE else "NO DISPONIBLE")
+    print("  Planificador:", "DISPONIBLE" if PLANNER_AVAILABLE else "NO DISPONIBLE")
+    print("  Error Recovery:", "DISPONIBLE" if ERROR_RECOVERY_AVAILABLE else "NO DISPONIBLE")
     print("  Threading: ACTIVADO (no bloquea event loop)")
     print("=" * 60)
     uvicorn.run(app, host="0.0.0.0", port=8000)
