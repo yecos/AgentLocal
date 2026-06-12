@@ -279,3 +279,30 @@ Stage Summary:
 - TODO funciona correctamente - proyecto listo para producción
 - 120 tests pasan, 19 herramientas con schemas, 13 módulos importan OK
 - Pendiente: revocar token de GitHub expuesto en remote URL
+---
+Task ID: v18-implementation
+Agent: Main Agent
+Task: Implement v18 features - Scaffolding, Deployment, Model Router, Orchestrator, Prisma Routes, Env Manager, Feedback
+
+Work Log:
+- Created project_scaffold.py: 7 templates (nextjs_app, express_api, python_cli, python_api, react_app, fullstack_nextjs, python_package)
+- Created model_router.py: intelligent model selection by task type (chat/code/vision/embedding)
+- Created deployment_tool.py: deploy to local, docker, vercel, ssh with auto-detection
+- Created env_manager.py: manage venvs, pip/npm install, detect project environments, run in env
+- Created user_feedback.py: track thumbs up/down, ratings, pattern detection, improvement prompts
+- Registered 6 new tools in __init__.py: crear_proyecto, listar_plantillas, desplegar_proyecto, opciones_despliegue, detener_despliegue, info_modelos, gestionar_entorno, registrar_feedback, stats_feedback
+- Updated system prompt to v18 with new tool categories and rules
+- Integrated Model Router import in react.py with graceful fallback
+- Added Orchestrator parallel execution: _execute_parallel_tasks(), execute_parallel() in orchestrator.py
+- Added get_ready_tasks() and _dependencies_met() to task_planner.py
+- Modified run_planned/run_planned_stream to delegate parallelizable tasks
+- Created 13 Prisma API routes: conversations, plans, tasks, projects, memory, skills, notes, config, stats
+- Updated src/lib/db.ts with proper PrismaClient singleton
+- 3 git pushes: v18, v18.1, v18.2
+
+Stage Summary:
+- Total tools: 42 (was 33 before)
+- v18 push: Scaffolding + Deployment + Model Router (6 new tools)
+- v18.1 push: Orchestrator parallel + 13 Prisma API routes
+- v18.2 push: Environment Manager + User Feedback (3 new tools)
+- All features verified and working
