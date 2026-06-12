@@ -22,7 +22,7 @@ from datetime import datetime
 
 from config import (
     REPOS_DIR, MAX_REACT_ITERATIONS, MAX_CONVERSATION_MEMORY, logger,
-    USER_PROFILE_FILE
+    USER_PROFILE_FILE, UNLIMITED_TOOLS, MODEL_CACHE_TTL_SECONDS
 )
 from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS
 from memory.triple_memory import TripleMemory, learning
@@ -64,7 +64,7 @@ class ReactAgent:
     """Motor ReAct: Piensa -> Actua -> Observa -> Piensa de nuevo."""
 
     # Rate limiting: max llamadas a la misma herramienta por conversacion
-    MAX_SAME_TOOL_CALLS = 5
+    MAX_SAME_TOOL_CALLS = 8  # v20: subido de 5 a 8
     MAX_TOTAL_TOOL_CALLS = 30  # v20: subido de 12 a 30 para tareas complejas
 
     # v20: Numero maximo de herramientas a enviar al modelo.
@@ -166,6 +166,7 @@ class ReactAgent:
         self.supports_tool_calling = None
         self.metacognition = Metacognition()
         self._models_cache = None  # Cache de modelos para no llamar API cada vez
+        self._models_cache_time = 0  # v20: Timestamp del ultimo refresh de modelos
         self._tool_call_counts = {}  # Rate limiting por herramienta
         self._total_tool_calls = 0   # Total de tool calls en esta conversacion
         self.orchestrator = get_orchestrator() if ORCHESTRATOR_AVAILABLE else None
@@ -404,8 +405,10 @@ class ReactAgent:
                             "content": f"[Contexto adicional relevante]:\n{extra_context[:500]}\n\nUsa esta informacion si es relevante."
                         })
             
-            # *** NUEVO: AUTO-BUSQUEDA WEB cuando la confianza baja y no se ha buscado ***
-            if self.metacognition.confidence < 0.5 and iteration > 0:
+            # *** NUEVO: AUTO-BUSQUEDA WEB cuando la confianza de CONOCIMIENTO baja ***
+            # v20 FIX: Antes se usaba confidence general (baja con errores de ejecucion).
+            # Ahora solo se busca web cuando el agente no sabe algo (knowledge_confidence).
+            if self.metacognition.knowledge_confidence < 0.4 and iteration > 0:
                 web_tools = ["buscar_web", "buscar_web_profundo", "leer_web"]
                 already_searched = any(t in self.metacognition.tool_history for t in web_tools)
                 
@@ -647,13 +650,13 @@ class ReactAgent:
                     }
                 }
 
-            # *** NUEVO: AUTO-BUSQUEDA WEB en streaming cuando confianza baja ***
-            if self.metacognition.confidence < 0.5 and iteration > 0:
+            # *** v20: AUTO-BUSQUEDA WEB cuando knowledge_confidence baja (streaming) ***
+            if self.metacognition.knowledge_confidence < 0.4 and iteration > 0:
                 web_tools = ["buscar_web", "buscar_web_profundo", "leer_web"]
                 already_searched = any(t in self.metacognition.tool_history for t in web_tools)
                 
                 if not already_searched:
-                    self._log("Confianza baja (streaming): ejecutando busqueda web automatica", "cloud")
+                    self._log("Confianza de conocimiento baja (streaming): ejecutando busqueda web", "cloud")
                     yield {"type": "tool_start", "data": {"name": "buscar_web", "params": {"consulta": user_message}}}
                     try:
                         search_result = TOOL_FUNCTIONS["buscar_web"](consulta=user_message)
@@ -673,14 +676,14 @@ class ReactAgent:
                                 iteration=iteration, action_type="tool_call",
                                 tool_name="buscar_web", result_summary=search_result[:100]
                             )
-                            self.metacognition.confidence = min(0.7, self.metacognition.confidence + 0.2)
+                            self.metacognition.knowledge_confidence = min(0.7, self.metacognition.knowledge_confidence + 0.2)
                         else:
                             self._log("Busqueda web automatica sin resultados", "warning")
                     except Exception as e:
                         self._log(f"Error en busqueda web automatica: {e}", "error")
                 
-                elif "buscar_web_profundo" not in self.metacognition.tool_history and self.metacognition.confidence < 0.4:
-                    self._log("Confianza muy baja tras busqueda: ejecutando busqueda profunda", "cloud")
+                elif "buscar_web_profundo" not in self.metacognition.tool_history and self.metacognition.knowledge_confidence < 0.3:
+                    self._log("Conocimiento insuficiente tras busqueda: ejecutando busqueda profunda", "cloud")
                     yield {"type": "tool_start", "data": {"name": "buscar_web_profundo", "params": {"consulta": user_message}}}
                     try:
                         deep_result = TOOL_FUNCTIONS["buscar_web_profundo"](consulta=user_message)
@@ -696,7 +699,7 @@ class ReactAgent:
                                 metadata={"type": "web_search_deep", "query": user_message[:50]},
                                 fast=True
                             )
-                            self.metacognition.confidence = min(0.7, self.metacognition.confidence + 0.15)
+                            self.metacognition.knowledge_confidence = min(0.7, self.metacognition.knowledge_confidence + 0.15)
                     except Exception as e:
                         self._log(f"Error en busqueda profunda automatica: {e}", "error")
 
@@ -1615,8 +1618,10 @@ class ReactAgent:
                 break
 
             if self._tool_call_counts[tool_name] > self.MAX_SAME_TOOL_CALLS:
-                self._log(f"Rate limit: {tool_name} llamada {self._tool_call_counts[tool_name]} veces (max {self.MAX_SAME_TOOL_CALLS})", "warning")
-                continue
+                # v20: Herramientas en UNLIMITED_TOOLS no tienen limite de repeticion
+                if tool_name not in UNLIMITED_TOOLS:
+                    self._log(f"Rate limit: {tool_name} llamada {self._tool_call_counts[tool_name]} veces (max {self.MAX_SAME_TOOL_CALLS})", "warning")
+                    continue
 
             filtered_calls.append(tc)
 
@@ -1886,9 +1891,12 @@ class ReactAgent:
     # ----------------------------------------------------------
     def _build_messages(self, new_message):
         """Construye la lista de mensajes con contexto enriquecido (optimizado)."""
-        # Cache de modelos para evitar llamada API en cada mensaje
-        if self._models_cache is None:
+        # Cache de modelos con TTL (v20: refresh cada MODEL_CACHE_TTL_SECONDS)
+        import time as _time
+        now = _time.time()
+        if self._models_cache is None or (now - self._models_cache_time) > MODEL_CACHE_TTL_SECONDS:
             self._models_cache = ollama._fetch_available_models() or [ollama.model or "desconocido"]
+            self._models_cache_time = now
         models = self._models_cache
 
         # *** v19: Detectar si el modelo es pequeño y usar prompt compacto ***
@@ -2204,59 +2212,71 @@ class ReactAgent:
 
     def _looks_like_tool_json(self, text):
         """Detecta si el texto parece ser JSON de tool call (no respuesta al usuario).
-        v3: Mas robusto - detecta JSON que empieza despues de whitespace o texto corto.
+        v20: Menos agresivo - solo retorna True si hay indicadores fuertes
+        de tool call JSON, no solo porque empiece con '{'.
+        Un texto como '{"api": "response"}' no debe suprimirse.
         """
         text = text.strip()
         if not text:
             return False
-        # Si el texto empieza con { probablemente es JSON de tool call
-        if text.startswith('{'):
-            return True
-        # Si despues de whitespace/newline hay {, tambien es JSON
-        # Esto captura casos donde el modelo genera: "\n{" o "  {"
-        stripped = text.lstrip()
-        if stripped.startswith('{'):
-            return True
-        # Si contiene patrones de tool calls en cualquier parte
+        # Si el texto empieza con { Y contiene campos de tool call, es JSON de tool
         tool_indicators = ['"accion"', '"pensamiento"', '"params"', '"respuesta_final"',
-                          '"abrir_', '"ejecutar_', '"leer_', '"escribir_', '"buscar_"']
-        for indicator in tool_indicators:
-            if indicator in text:
-                return True
-        # Si el texto es corto y parece inicio de JSON
-        if len(text) < 5 and text in ['{', '"', '\n', '\r']:
-            return True
+                          '"_multi_tool_calls"']
+        if text.startswith('{') or text.lstrip().startswith('{'):
+            # Solo suprimir si tiene indicadores de tool call JSON
+            for indicator in tool_indicators:
+                if indicator in text:
+                    return True
+            # Si es JSON pero sin indicadores de tool, NO suprimir
+            # (puede ser una respuesta legitima con formato JSON)
+            return False
         return False
 
     def _detect_tool_calling_support(self):
-        """Detecta si el modelo soporta function calling nativo."""
+        """Detecta si el modelo soporta function calling nativo.
+        v20: Prioriza test real sobre hardcoded model names.
+        """
         ollama.detect_models()
         if ollama.model:
             model_lower = ollama.model.lower()
-            # Modelos que SI soportan tool calling nativo
-            if "qwen3" in model_lower:
-                return True
-            if "qwen2.5-coder" in model_lower:
-                return True
-            # Modelos que NO soportan tool calling
+            # Modelos que NO soportan tool calling (hardcoded como fallback rapido)
             if any(x in model_lower for x in ["qwen2.5:14b", "qwen2.5:32b", "llama3.1"]):
                 return False
-        # Test rapido
+        # v20: Test real - intentar function calling con un schema de prueba.
+        # Esto funciona para cualquier modelo, incluyendo fine-tunes y custom.
         try:
             import ollama as ollama_lib
+            test_schema = [{
+                "type": "function",
+                "function": {
+                    "name": "_test_ping",
+                    "description": "Test de function calling - no ejecutar",
+                    "parameters": {"type": "object", "properties": {}, "required": []}
+                }
+            }]
             for host in ['http://localhost:11434', 'http://127.0.0.1:11434']:
                 try:
                     client = ollama_lib.Client(host=host)
+                    # Si el modelo soporta tools, Ollama NO lanza error
+                    # Si no soporta, lanza error o ignora tools
                     client.chat(
                         model=ollama.model,
-                        messages=[{"role": "user", "content": "hi"}],
-                        tools=[TOOL_SCHEMAS[0]]
+                        messages=[{"role": "user", "content": "test"}],
+                        tools=test_schema,
+                        options={"num_predict": 1}  # Minimo output para test rapido
                     )
+                    # Si llegamos aqui sin error, el modelo acepta tools
                     return True
-                except Exception:
+                except Exception as e:
+                    err_msg = str(e).lower()
+                    # Si el error dice que no soporta tools, es definitivo
+                    if "tool" in err_msg or "function" in err_msg:
+                        return False
+                    # Otros errores (conexion) -> probar otro host
                     continue
         except Exception:
             pass
+        # Fallback: no pudimos determinar, asumir que no
         return False
 
     def _save_interaction(self, user_message, final_response):

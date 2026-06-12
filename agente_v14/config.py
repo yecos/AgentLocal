@@ -63,8 +63,10 @@ EMBED_MODEL_CANDIDATES = ["nomic-embed-text", "mxbai-embed-large", "all-minilm"]
 # LIMITES
 # ============================================================
 MAX_REACT_ITERATIONS = 15        # Max vueltas del bucle ReAct (v20: subido de 8 a 15 para tareas complejas)
+MAX_TOTAL_TOOL_CALLS = 30        # Max tool calls totales por sesión (v20: subido de 12 a 30)
+MAX_SAME_TOOL_CALLS = 8          # Max llamadas a la misma herramienta (v20: subido de 5 a 8)
 MAX_CONVERSATION_MEMORY = 15     # Mensajes de contexto que recuerda (reducido de 20)
-MAX_CONTEXT_CHARS = 2000         # Budget de chars para contexto enriquecido (reducido de 3000)
+MAX_CONTEXT_CHARS = 3000         # Budget de chars para contexto enriquecido (v20: subido de 2000 a 3000)
 MAX_FILE_READ = 8000             # Max chars al leer un archivo
 MAX_TOOL_OUTPUT = 3000           # Max chars en salida de herramienta
 MAX_EMBED_CACHE = 200            # Maximo entradas en cache de embeddings
@@ -72,19 +74,36 @@ MAX_VECTORS_IN_MEMORY = 500      # Maximo vectores cargados en RAM
 CONNECTION_CACHE_DAYS = 7        # Dias que se guarda la conexion Ollama cacheada
 
 # ============================================================
+# HERRAMIENTAS SIN LIMITE DE REPETICION (v20)
+# ============================================================
+# Estas herramientas pueden llamarse mas de MAX_SAME_TOOL_CALLS veces
+# porque son esenciales para investigacion y lectura de archivos.
+UNLIMITED_TOOLS = {
+    "buscar_web", "leer_web", "buscar_web_profundo",
+    "leer_archivo", "listar_archivos", "buscar_en_archivos",
+}
+
+# ============================================================
+# AUTO-BUSQUEDA WEB (v20)
+# ============================================================
+KNOWLEDGE_CONFIDENCE_THRESHOLD = 0.4   # Bajo esto, buscar web si el agente no sabe
+EXECUTION_CONFIDENCE_THRESHOLD = 0.2   # Bajo esto, el agente tiene problemas de ejecucion
+
+# ============================================================
 # RENDIMIENTO
 # ============================================================
 SKIP_EMBED_ON_INTERACTION = True  # Saltar embedding al guardar interacciones (mas rapido)
 USE_STREAMING = True              # Usar streaming por defecto
 GPU_CHECK_ON_START = True         # Verificar GPU al iniciar el agente
+MODEL_CACHE_TTL_SECONDS = 300    # v20: Refresh de lista de modelos cada 5 minutos
 
 # ============================================================
 # TIMEOUTS
 # ============================================================
 DEFAULT_TIMEOUT = 90             # Segundos para comandos normales (reducido)
 LONG_TIMEOUT = 300               # Segundos para install/build/docker
-LLM_TIMEOUT_SMALL = 90           # Timeout para modelos <=8b (reducido de 120)
-LLM_TIMEOUT_LARGE = 150          # Timeout para modelos >=14b (reducido de 180)
+LLM_TIMEOUT_SMALL = 60           # v20: Timeout para modelos <=8b (reducido de 90, GPU es mas rapida)
+LLM_TIMEOUT_LARGE = 120          # v20: Timeout para modelos >=14b (reducido de 150)
 EMBED_TIMEOUT = 10               # Timeout para embeddings (reducido de 15)
 WEB_TIMEOUT = 10                 # Timeout para busquedas web
 
