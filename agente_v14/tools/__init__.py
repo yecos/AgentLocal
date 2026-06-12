@@ -2,6 +2,8 @@
 Registro centralizado de herramientas.
 El agente importa TOOL_FUNCTIONS y TOOL_SCHEMAS desde aqui.
 
+v16: + Skill Loader, Task Planner, Code Executor, File Editor,
+     Git Tool, Database Tool, Error Recovery.
 v14.5: Usa registry.py con decorator @tool para registro automatico.
 Las herramientas de sub-modulos se registran manualmente con register_tool()
 hasta que se migren al decorator. Las herramientas inline usan @tool.
@@ -250,8 +252,465 @@ def ver_notas() -> str:
 
 
 # ============================================================
+# HERRAMIENTAS v16 - NUEVAS CAPACIDADES AGENTICAS
+# ============================================================
+
+# --- Ejecucion de Codigo ---
+
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "ejecutar_codigo",
+        "description": "Ejecuta codigo de forma segura con captura de stdout/stderr y timeout. Soporta Python, JavaScript, TypeScript, Bash. Retorna resultado con exit code, output, y errores.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "codigo": {"type": "string", "description": "Codigo fuente a ejecutar"},
+                "lenguaje": {"type": "string", "description": "Lenguaje: python, javascript, typescript, bash"},
+                "timeout": {"type": "integer", "description": "Timeout en segundos (default: 60)"},
+                "directorio_trabajo": {"type": "string", "description": "Directorio de trabajo (opcional)"}
+            },
+            "required": ["codigo", "lenguaje"]
+        }
+    }
+})
+def ejecutar_codigo(codigo: str, lenguaje: str = "python", timeout: int = 60,
+                    directorio_trabajo: str = "") -> str:
+    """Ejecuta codigo de forma segura con captura de output."""
+    from .code_executor import execute_code
+    result = execute_code(
+        code=codigo,
+        language=lenguaje,
+        timeout=timeout,
+        working_dir=directorio_trabajo or None,
+    )
+    output = []
+    if result.success:
+        output.append(f"EXITO (exit code: {result.exit_code}, tiempo: {result.duration:.2f}s)")
+    else:
+        output.append(f"ERROR (exit code: {result.exit_code}, tiempo: {result.duration:.2f}s)")
+    if result.stdout:
+        output.append(f"STDOUT:\n{result.stdout[:2000]}")
+    if result.stderr:
+        output.append(f"STDERR:\n{result.stderr[:1000]}")
+    return "\n".join(output) if output else "Sin salida"
+
+
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "ejecutar_archivo",
+        "description": "Ejecuta un archivo existente (.py, .js, .ts, .sh) de forma segura con timeout y captura de output.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ruta": {"type": "string", "description": "Ruta al archivo a ejecutar"},
+                "timeout": {"type": "integer", "description": "Timeout en segundos (default: 60)"},
+                "argumentos": {"type": "string", "description": "Argumentos adicionales separados por espacio"}
+            },
+            "required": ["ruta"]
+        }
+    }
+})
+def ejecutar_archivo(ruta: str, timeout: int = 60, argumentos: str = "") -> str:
+    """Ejecuta un archivo existente de forma segura."""
+    from .code_executor import execute_file
+    args = argumentos.split() if argumentos else None
+    result = execute_file(filepath=ruta, timeout=timeout, args=args)
+    output = []
+    if result.success:
+        output.append(f"EXITO (tiempo: {result.duration:.2f}s)")
+    else:
+        output.append(f"ERROR (exit code: {result.exit_code}, tiempo: {result.duration:.2f}s)")
+    if result.stdout:
+        output.append(f"STDOUT:\n{result.stdout[:2000]}")
+    if result.stderr:
+        output.append(f"STDERR:\n{result.stderr[:1000]}")
+    return "\n".join(output) if output else "Sin salida"
+
+
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "ejecutar_tests",
+        "description": "Ejecuta los tests de un proyecto. Auto-detecta el framework (pytest, jest, vitest, mocha). Retorna resultados con passed/failed counts.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ruta_proyecto": {"type": "string", "description": "Ruta al proyecto"},
+                "framework": {"type": "string", "description": "Framework de tests: pytest, jest, vitest, mocha (auto-detectar si vacio)"},
+                "ruta_test": {"type": "string", "description": "Ruta especifica de test (opcional)"},
+                "timeout": {"type": "integer", "description": "Timeout en segundos (default: 120)"}
+            },
+            "required": ["ruta_proyecto"]
+        }
+    }
+})
+def ejecutar_tests(ruta_proyecto: str, framework: str = "", ruta_test: str = "",
+                   timeout: int = 120) -> str:
+    """Ejecuta los tests de un proyecto."""
+    from .code_executor import run_tests
+    result = run_tests(
+        project_path=ruta_proyecto,
+        test_framework=framework or None,
+        test_path=ruta_test or None,
+        timeout=timeout,
+    )
+    output = []
+    if result.success:
+        output.append(f"TESTS PASARON (tiempo: {result.duration:.2f}s)")
+    else:
+        output.append(f"TESTS FALLARON (exit code: {result.exit_code}, tiempo: {result.duration:.2f}s)")
+    if result.stdout:
+        output.append(result.stdout[:3000])
+    if result.stderr and not result.success:
+        output.append(f"ERRORES:\n{result.stderr[:1000]}")
+    return "\n".join(output) if output else "Sin salida"
+
+
+# --- Edicion Incremental de Archivos ---
+
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "buscar_reemplazar",
+        "description": "Busca y reemplaza texto en un archivo sin reescribirlo completo. Crea backup automatico. Soporta regex. Mas eficiente que escribir_archivo para ediciones pequenas.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ruta": {"type": "string", "description": "Ruta del archivo"},
+                "buscar": {"type": "string", "description": "Texto o patron a buscar"},
+                "reemplazar": {"type": "string", "description": "Texto de reemplazo"},
+                "usar_regex": {"type": "boolean", "description": "Usar expresiones regulares (default: false)"},
+                "case_sensitive": {"type": "boolean", "description": "Busqueda sensible a mayusculas (default: true)"},
+                "max_reemplazos": {"type": "integer", "description": "Maximo de reemplazos (0 = todos)"}
+            },
+            "required": ["ruta", "buscar", "reemplazar"]
+        }
+    }
+})
+def buscar_reemplazar(ruta: str, buscar: str, reemplazar: str,
+                      usar_regex: bool = False, case_sensitive: bool = True,
+                      max_reemplazos: int = 0) -> str:
+    """Busca y reemplaza texto en un archivo de forma incremental."""
+    from .file_editor import search_and_replace
+    result = search_and_replace(
+        filepath=ruta, search=buscar, replace=reemplazar,
+        use_regex=usar_regex, case_sensitive=case_sensitive,
+        max_replacements=max_reemplazos,
+    )
+    if result["success"]:
+        msg = result.get("message", "OK")
+        if result.get("diff"):
+            return f"{msg}\n\nDiff:\n{result['diff'][:1000]}"
+        return msg
+    return f"ERROR: {result.get('error', 'Error desconocido')}"
+
+
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "editar_lineas",
+        "description": "Reemplaza un rango de lineas en un archivo. Mas preciso que buscar_reemplazar para cambios en lineas especificas. Crea backup automatico.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ruta": {"type": "string", "description": "Ruta del archivo"},
+                "linea_inicio": {"type": "integer", "description": "Linea de inicio (1-indexed, inclusiva)"},
+                "linea_fin": {"type": "integer", "description": "Linea de fin (1-indexed, inclusiva)"},
+                "nuevo_contenido": {"type": "string", "description": "Nuevo contenido para el rango de lineas"}
+            },
+            "required": ["ruta", "linea_inicio", "linea_fin", "nuevo_contenido"]
+        }
+    }
+})
+def editar_lineas(ruta: str, linea_inicio: int, linea_fin: int,
+                  nuevo_contenido: str) -> str:
+    """Reemplaza un rango de lineas en un archivo."""
+    from .file_editor import edit_lines
+    result = edit_lines(
+        filepath=ruta, start_line=linea_inicio, end_line=linea_fin,
+        new_content=nuevo_contenido,
+    )
+    if result["success"]:
+        msg = result.get("message", "OK")
+        if result.get("diff"):
+            return f"{msg}\n\nDiff:\n{result['diff'][:1000]}"
+        return msg
+    return f"ERROR: {result.get('error', 'Error desconocido')}"
+
+
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "insertar_en_linea",
+        "description": "Inserta contenido antes o despues de una linea especifica en un archivo. No reemplaza lineas existentes.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ruta": {"type": "string", "description": "Ruta del archivo"},
+                "linea": {"type": "integer", "description": "Numero de linea de referencia (1-indexed)"},
+                "contenido": {"type": "string", "description": "Contenido a insertar"},
+                "posicion": {"type": "string", "description": "Posicion: 'before' o 'after' (default: 'after')"}
+            },
+            "required": ["ruta", "linea", "contenido"]
+        }
+    }
+})
+def insertar_en_linea(ruta: str, linea: int, contenido: str,
+                      posicion: str = "after") -> str:
+    """Inserta contenido en una posicion especifica del archivo."""
+    from .file_editor import insert_at_line
+    result = insert_at_line(
+        filepath=ruta, line_number=linea, content=contenido, position=posicion,
+    )
+    if result["success"]:
+        return result.get("message", "OK")
+    return f"ERROR: {result.get('error', 'Error desconocido')}"
+
+
+# --- Git Tool ---
+
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "git_operacion",
+        "description": "Ejecuta operaciones Git de forma estructurada. Soporta: status, diff, add, commit, branch, log, push, pull, stash, init. No usa ejecutar_comando — parsea y valida cada operacion.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "operacion": {"type": "string", "description": "Operacion: status, diff, add, commit, branch, log, push, pull, stash, init"},
+                "ruta_repo": {"type": "string", "description": "Ruta al repositorio (default: directorio de trabajo)"},
+                "mensaje": {"type": "string", "description": "Mensaje para commit o stash"},
+                "branch": {"type": "string", "description": "Nombre del branch (para branch/push/pull)"},
+                "archivos": {"type": "string", "description": "Archivos para add (separados por coma, o 'all')"},
+                "accion_branch": {"type": "string", "description": "Para branch: list, create, switch, delete"},
+                "accion_stash": {"type": "string", "description": "Para stash: save, list, pop, drop"},
+                "staged": {"type": "boolean", "description": "Para diff: mostrar solo staged (default: false)"},
+                "count": {"type": "integer", "description": "Para log: numero de commits (default: 10)"}
+            },
+            "required": ["operacion"]
+        }
+    }
+})
+def git_operacion(operacion: str, ruta_repo: str = "", mensaje: str = "",
+                  branch: str = "", archivos: str = "",
+                  accion_branch: str = "list", accion_stash: str = "save",
+                  staged: bool = False, count: int = 10) -> str:
+    """Ejecuta operaciones Git de forma estructurada."""
+    from . import git_tool as gt
+
+    path = ruta_repo or None
+    op = operacion.lower().strip()
+
+    if op == "status":
+        result = gt.git_status(path)
+    elif op == "diff":
+        result = gt.git_diff(path, staged=staged)
+    elif op == "add":
+        files = [f.strip() for f in archivos.split(",")] if archivos and archivos != "all" else None
+        result = gt.git_add(path, files=files, all_changes=archivos == "all" or not archivos)
+    elif op == "commit":
+        result = gt.git_commit(path, message=mensaje or None, add_all=False)
+    elif op == "branch":
+        result = gt.git_branch(path, action=accion_branch, branch_name=branch or None)
+    elif op == "log":
+        result = gt.git_log(path, count=count)
+    elif op == "push":
+        result = gt.git_push(path, branch=branch or None)
+    elif op == "pull":
+        result = gt.git_pull(path, branch=branch or None)
+    elif op == "stash":
+        result = gt.git_stash(path, action=accion_stash, message=mensaje)
+    elif op == "init":
+        result = gt.git_init(path)
+    else:
+        return f"Operacion no soportada: {op}. Usa: status, diff, add, commit, branch, log, push, pull, stash, init"
+
+    if result.get("success"):
+        # Formatear resultado para el agente
+        return json.dumps(result, ensure_ascii=False, indent=2, default=str)[:2000]
+    return f"ERROR: {result.get('error', 'Error desconocido')}"
+
+
+# --- Database Tool ---
+
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "base_de_datos",
+        "description": "Operaciones de base de datos: conectar, consultar, listar tablas, describir estructura, crear tablas, exportar datos. Soporta SQLite, PostgreSQL, MySQL.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "accion": {"type": "string", "description": "Accion: conectar, consultar, tablas, describir, crear_tabla, exportar"},
+                "ruta_db": {"type": "string", "description": "Ruta a la base de datos (SQLite) o connection string"},
+                "tipo_db": {"type": "string", "description": "Tipo: sqlite, postgres, mysql (default: sqlite)"},
+                "query": {"type": "string", "description": "Query SQL (para accion=consultar)"},
+                "tabla": {"type": "string", "description": "Nombre de tabla (para describir, exportar, crear_tabla)"},
+                "columnas": {"type": "string", "description": "Columnas para crear_tabla en formato JSON: [{name, type, primary_key}]"},
+                "formato_exportacion": {"type": "string", "description": "Formato para exportar: json o csv (default: json)"},
+                "limit": {"type": "integer", "description": "Maximo de filas a retornar (default: 100)"}
+            },
+            "required": ["accion"]
+        }
+    }
+})
+def base_de_datos(accion: str, ruta_db: str = "", tipo_db: str = "sqlite",
+                  query: str = "", tabla: str = "", columnas: str = "",
+                  formato_exportacion: str = "json", limit: int = 100) -> str:
+    """Operaciones de base de datos."""
+    from . import database_tool as db
+
+    accion = accion.lower().strip()
+
+    if accion == "conectar":
+        result = db.db_connect(ruta_db or ":memory:", tipo_db)
+    elif accion == "consultar":
+        if not query:
+            return "ERROR: Se requiere query SQL"
+        result = db.db_query(query, db_path=ruta_db or None, limit=limit)
+    elif accion == "tablas":
+        result = db.db_tables(db_path=ruta_db or None)
+    elif accion == "describir":
+        if not tabla:
+            return "ERROR: Se requiere nombre de tabla"
+        result = db.db_describe(tabla, db_path=ruta_db or None)
+    elif accion == "crear_tabla":
+        if not tabla or not columnas:
+            return "ERROR: Se requiere nombre de tabla y columnas (JSON)"
+        try:
+            cols = json.loads(columnas)
+        except Exception:
+            return "ERROR: columnas debe ser JSON valido: [{\"name\": \"id\", \"type\": \"INTEGER\", \"primary_key\": true}]"
+        result = db.db_create_table(tabla, cols, db_path=ruta_db or None)
+    elif accion == "exportar":
+        if not tabla:
+            return "ERROR: Se requiere nombre de tabla"
+        result = db.db_export(tabla, output_format=formato_exportacion, db_path=ruta_db or None)
+    else:
+        return f"Accion no soportada: {accion}. Usa: conectar, consultar, tablas, describir, crear_tabla, exportar"
+
+    if result.get("success"):
+        return json.dumps(result, ensure_ascii=False, indent=2, default=str)[:2000]
+    return f"ERROR: {result.get('error', 'Error desconocido')}"
+
+
+# --- Task Planner ---
+
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "planificar_tarea",
+        "description": "Descompone una tarea compleja en subtareas ejecutables con dependencias. Usa templates para tareas comunes (web_app, script, automation, analysis). Retorna un plan con progreso.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "objetivo": {"type": "string", "description": "Objetivo o tarea compleja a descomponer"},
+                "tipo": {"type": "string", "description": "Tipo de tarea: web_app, script, automation, analysis, project_setup (auto-detectar si vacio)"},
+                "avanzar": {"type": "boolean", "description": "Si true, marca la tarea actual como completada y avanza a la siguiente"},
+                "resultado_tarea": {"type": "string", "description": "Resultado de la tarea actual (para avanzar)"},
+                "ver_progreso": {"type": "boolean", "description": "Si true, muestra el progreso del plan actual"}
+            },
+            "required": ["objetivo"]
+        }
+    }
+})
+def planificar_tarea(objetivo: str, tipo: str = "", avanzar: bool = False,
+                     resultado_tarea: str = "", ver_progreso: bool = False) -> str:
+    """Descompone tareas complejas en subtareas ejecutables."""
+    from .task_planner import get_planner
+
+    planner = get_planner()
+
+    if ver_progreso:
+        progress = planner.get_progress()
+        return json.dumps(progress, ensure_ascii=False, indent=2)
+
+    if avanzar:
+        next_task = planner.advance_plan(resultado_tarea)
+        if next_task:
+            return json.dumps({
+                "message": "Tarea completada. Siguiente tarea:",
+                "task": next_task.to_dict(),
+                "progress": planner.get_progress(),
+            }, ensure_ascii=False, indent=2, default=str)
+        else:
+            return json.dumps({
+                "message": "Plan completado o no hay mas tareas",
+                "progress": planner.get_progress(),
+            }, ensure_ascii=False, indent=2)
+
+    # Crear nuevo plan
+    plan = planner.create_plan(objetivo, task_type=tipo or None)
+    return json.dumps({
+        "plan_id": plan.id,
+        "goal": plan.goal,
+        "total_tasks": len(plan.tasks),
+        "first_task": plan.get_next_task().to_dict() if plan.get_next_task() else None,
+        "all_tasks": [t.to_dict() for t in plan.tasks.values()],
+    }, ensure_ascii=False, indent=2, default=str)
+
+
+# --- Error Recovery ---
+
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "diagnosticar_error",
+        "description": "Diagnostica un error y sugiere correcciones automaticas. Clasifica el error, identifica causa raiz, y propone pasos de recuperacion.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "mensaje_error": {"type": "string", "description": "Mensaje de error a diagnosticar"},
+                "herramienta": {"type": "string", "description": "Nombre de la herramienta que fallo (opcional)"},
+                "contexto": {"type": "string", "description": "Contexto adicional en formato JSON (opcional)"}
+            },
+            "required": ["mensaje_error"]
+        }
+    }
+})
+def diagnosticar_error(mensaje_error: str, herramienta: str = "",
+                       contexto: str = "") -> str:
+    """Diagnostica un error y sugiere correcciones."""
+    from .error_recovery import diagnose_error
+
+    ctx = {}
+    if contexto:
+        try:
+            ctx = json.loads(contexto)
+        except Exception:
+            ctx = {"raw_context": contexto}
+
+    result = diagnose_error(mensaje_error, herramienta, ctx)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+# ============================================================
+# CARGAR SKILLS DINAMICAMENTE
+# ============================================================
+
+def load_skills():
+    """Carga los skills disponibles como herramientas del agente."""
+    try:
+        from .skill_loader import load_all_skills
+        result = load_all_skills()
+        logger.info(f"[Tools] Skills cargados: {result['loaded']} herramientas, {result.get('reference', 0)} referencia")
+        return result
+    except Exception as e:
+        logger.warning(f"[Tools] Error cargando skills: {e}")
+        return {"loaded": 0, "errors": 1, "error_details": [str(e)]}
+
+
+# ============================================================
 # REGISTRAR SUB-MODULOS AL FINAL
 # (Debe ejecutarse despues de que registry.py tenga sus dicts limpios
 #  y despues de definir las herramientas inline con @tool)
 # ============================================================
 _register_submodule_tools()
+
+# Cargar skills al importar (si es posible)
+try:
+    load_skills()
+except Exception:
+    pass

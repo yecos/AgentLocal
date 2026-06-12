@@ -1,55 +1,87 @@
-# Agente Local Autonomo v15
+# Agente Local Autonomo v16
 
-Agente de IA autonomo que vive en tu computadora. Usa Ollama localmente (sin API keys, sin cloud) con arquitectura modular ReAct + Triple Memory + Visibilidad de Pensamiento.
+Agente de IA autonomo que vive en tu computadora. Usa Ollama localmente (sin API keys, sin cloud) con arquitectura modular ReAct + Triple Memory + Planificacion + Ejecucion + Edicion Incremental.
 
 ## Que hace
 
+- **Planifica** tareas complejas y las descompone en subtareas
+- **Ejecuta codigo** y tests para verificar que funciona
+- **Construye apps** completas paso a paso
+- **Edita archivos** de forma incremental (no reescribe todo)
+- **Opera Git** de forma estructurada (status, commit, push, etc.)
+- **Consulta bases de datos** (SQLite, PostgreSQL, MySQL)
+- **Diagnostica errores** y se autocorrige
 - Ejecuta comandos, lee y escribe archivos
 - Abre aplicaciones de escritorio y paginas web
 - Genera codigo completo (juegos, paginas web, scripts)
 - Clona repos, instala dependencias, analiza proyectos
 - Busca en archivos y en internet
 - Aprende de correcciones y memoriza interacciones
-- **Muestra su proceso de pensamiento en tiempo real** (v15)
-- **Terminal de ejecucion visible** — ves todo lo que ejecuta (v15)
+- **30+ Skills** conectados (imagenes, documentos, voz, etc.)
+- Muestra su proceso de pensamiento en tiempo real
 
-## Novedades v15
+## Novedades v16
 
-### 💭 Panel de Proceso de Pensamiento
-Ahora puedes ver COMO piensa el agente paso a paso:
-- Recibiendo pregunta
-- Buscando en memoria
-- Decidiendo usar herramientas
-- Observando resultados
-- Generando respuesta final
-- Nivel de confianza en cada paso
+### 🧠 Planificador de Tareas
+Descompone tareas complejas en subtareas con dependencias:
+- Templates para: web_app, script, automation, analysis, project_setup
+- Progreso tracking y avance automatico
+- Re-planificacion cuando algo falla
 
-### 💻 Terminal de Ejecucion
-Panel tipo terminal que muestra:
-- Que herramienta se ejecuta y con que parametros
-- Resultados de cada ejecucion
-- Errores en rojo, exitos en verde
+### ⚡ Ejecucion y Testing de Codigo
+- Ejecuta Python, JavaScript, TypeScript, Bash en sandbox
+- Captura stdout/stderr con timeout
+- Auto-detecta y ejecuta tests (pytest, jest, vitest)
+- Loop: generar → ejecutar → diagnosticar → corregir → verificar
+
+### ✏️ Edicion Incremental de Archivos
+- `buscar_reemplazar`: search-and-replace sin reescribir todo
+- `editar_lineas`: reemplazar rango de lineas especificas
+- `insertar_en_linea`: insertar antes/despues de una linea
+- Preview de diffs y backup automatico
+
+### 🔧 Git como Herramienta de Primera Clase
+- `git_operacion`: status, diff, add, commit, branch, log, push, pull, stash
+- Parseo estructurado de salida
+- Auto-commit con mensajes generados
+
+### 💾 Base de Datos como Herramienta
+- SQLite, PostgreSQL, MySQL
+- Conectar, consultar, listar tablas, describir estructura
+- Crear tablas, exportar datos (JSON/CSV)
+
+### 🔗 Skill Loader (30+ Skills Conectados)
+- web-search, web-reader, image-generation, image-search
+- LLM, VLM, TTS, ASR, image-edit, video-understand
+- docx, pdf, pptx, xlsx, charts
+- agent-browser (navegacion headless)
+
+### 🛡️ Error Recovery Chain
+- Diagnostico automatico de errores
+- Clasificacion (timeout, permisos, dependencia, sintaxis, etc.)
+- Correcciones automaticas cuando es posible
+- Historial de errores para aprendizaje
 
 ### Arquitectura completa
 
 ```
 Usuario pregunta
        ↓
-  1. ¿Ya se la respuesta? ← Memoria Triple (corto/largo plazo + trabajo)
-     └─ Si → Responde directo
+  1. ¿Tarea compleja? → PLANIFICAR (planificar_tarea)
+     └─ Si → Crear plan con subtareas → Ejecutar paso a paso
      └─ No → Paso 2
-  2. 💭 PENSAR ← Modelo (Qwen/Ollama)
+  2. ¿Ya se la respuesta? ← Memoria Triple (corto/largo plazo + trabajo)
+     └─ Si → Responde directo
+     └─ No → Paso 3
+  3. 💭 PENSAR ← Modelo (Qwen/Ollama)
      "Necesito buscar X..."
-  3. 🔧 ACTUAR ← Herramientas (19 herramientas)
-     buscar_web("X")
-     ejecutar_comando("...")
-     leer_archivo("/ruta")
-  4. 👁 OBSERVAR + METACOGNICION
-     ¿Es suficiente? ¿Confianza baja? → Buscar mas
-     ¿Bucle detectado? → Cambiar estrategia
-     └─ No → Volver a paso 2
-     └─ Si → Paso 5
-  5. ✅ RESPONDER + APRENDER ← Guardar en memoria
+  4. 🔧 ACTUAR ← Herramientas (30+ herramientas)
+     buscar_web("X") / ejecutar_codigo("...") / buscar_reemplazar("...")
+  5. 👁 OBSERVAR + METACOGNICION
+     ¿Funciono? ¿Error? → diagnosticar_error → corregir → reintentar
+     ¿Es suficiente? → Si, responder
+     └─ No → Volver a paso 3
+  6. ✅ RESPONDER + APRENDER ← Guardar en memoria
 ```
 
 ## Interfaces
@@ -104,20 +136,26 @@ agente_v14/
   app.py               # Entry point Streamlit
   config.py            # Configuracion centralizada
   llm.py               # Cliente Ollama (singleton, cache, dual model)
-  start.bat            # Script de inicio Windows
-  start.sh             # Script de inicio Linux/Mac
-  requirements.txt     # Dependencias Python
+  bridge_api.py        # FastAPI REST bridge para Next.js
   agent/
     react.py           # Motor ReAct (piensa-actua-observa)
-    schemas.py         # System prompt y tool schemas
+    schemas.py         # System prompt y tool schemas (v16)
+    metacognition.py   # Auto-evaluacion + loop detection
   tools/
     sistema.py         # ejecutar_comando, procesos_activos, matar_proceso
     archivos.py        # leer, escribir, listar, buscar en archivos
     apps.py            # abrir_aplicacion, abrir_url, buscar_youtube
     proyecto.py        # analizar_proyecto, clonar_repositorio, instalar_dependencias
     codigo.py          # generar_codigo (usa LLM)
-    web.py             # buscar_web (DuckDuckGo)
-    schemas.py         # Esquemas de function calling
+    web.py             # buscar_web (DuckDuckGo), leer_web
+    registry.py        # @tool decorator para registro automatico
+    skill_loader.py    # 🆕 Carga skills como herramientas (30+)
+    task_planner.py    # 🆕 Planificador de tareas jerarquico
+    code_executor.py   # 🆕 Sandbox de ejecucion + testing
+    file_editor.py     # 🆕 Edicion incremental (buscar_reemplazar, editar_lineas)
+    git_tool.py        # 🆕 Git como herramienta de primera clase
+    database_tool.py   # 🆕 Operaciones de base de datos
+    error_recovery.py  # 🆕 Diagnostico y correccion de errores
   memory/
     triple_memory.py   # Triple memoria (corto/largo plazo + trabajo)
     vectorstore.py     # Vector store con embeddings Ollama
@@ -125,10 +163,25 @@ agente_v14/
   utils/
     security.py        # Validacion de comandos peligrosos, path traversal
     helpers.py         # Funciones utilitarias compartidas
+    metrics.py         # Metricas de rendimiento
+skills/                # 🆕 30+ skills conectados via Skill Loader
+  web-search/          # Busqueda web via API
+  image-generation/    # Generacion de imagenes con IA
+  docx/                # Creacion de documentos Word
+  pdf/                 # Creacion de PDFs
+  pptx/                # Presentaciones PowerPoint
+  xlsx/                # Hojas de calculo Excel
+  charts/              # Graficos y diagramas
+  agent-browser/       # Navegador headless
+  TTS/                 # Texto a voz
+  ASR/                 # Voz a texto
+  VLM/                 # Vision AI
+  ... y mas
 ```
 
-## Herramientas disponibles
+## Herramientas disponibles (30+)
 
+### Basicas (v14)
 | Herramienta | Descripcion |
 |---|---|
 | `ejecutar_comando` | Ejecuta comandos en la terminal |
@@ -146,15 +199,51 @@ agente_v14/
 | `procesos_activos` | Lista procesos corriendo |
 | `matar_proceso` | Termina un proceso por PID o nombre |
 | `buscar_web` | Busca en internet (DuckDuckGo) |
+| `leer_web` | Lee contenido de paginas web |
+| `buscar_web_profundo` | Busqueda profunda con lectura auto |
 
-## Opciones del script de inicio
+### Nuevas v16 - Planificacion y Ejecucion
+| Herramienta | Descripcion |
+|---|---|
+| `planificar_tarea` | Descompone tareas complejas en subtareas |
+| `ejecutar_codigo` | Ejecuta Python/JS/TS/Bash en sandbox |
+| `ejecutar_archivo` | Ejecuta un archivo existente |
+| `ejecutar_tests` | Ejecuta tests (pytest, jest, vitest) |
 
-```
-start.bat           # Inicio completo con verificacion
-start.bat --skip    # Inicio rapido (sin verificar)
-start.bat --check   # Solo verificar, no iniciar
-start.bat --install # Instalar/actualizar dependencias
-```
+### Nuevas v16 - Edicion
+| Herramienta | Descripcion |
+|---|---|
+| `buscar_reemplazar` | Search-and-replace sin reescribir todo |
+| `editar_lineas` | Reemplazar rango de lineas |
+| `insertar_en_linea` | Insertar antes/despues de una linea |
+
+### Nuevas v16 - Git y DB
+| Herramienta | Descripcion |
+|---|---|
+| `git_operacion` | Git estructurado (status, commit, push, etc.) |
+| `base_de_datos` | SQLite/Postgres/MySQL operaciones |
+
+### Nuevas v16 - Diagnostico
+| Herramienta | Descripcion |
+|---|---|
+| `diagnosticar_error` | Diagnostica errores y sugiere correcciones |
+
+### Nuevas v16 - Skills (via z-ai-web-dev-sdk)
+| Herramienta | Descripcion |
+|---|---|
+| `buscar_web_api` | Busqueda web via API |
+| `generar_imagen` | Genera imagenes con IA |
+| `buscar_imagen` | Busca imagenes en internet |
+| `consultar_llm` | Consulta LLM externo |
+| `analizar_imagen_api` | Vision AI |
+| `texto_a_voz` | TTS |
+| `voz_a_texto` | STT |
+| `crear_documento` | Word (.docx) |
+| `crear_pdf` | PDF |
+| `crear_presentacion` | PowerPoint (.pptx) |
+| `crear_hoja_calculo` | Excel (.xlsx) |
+| `crear_grafico` | Graficos y diagramas |
+| `navegar_web` | Navegador headless |
 
 ## Seguridad
 
@@ -162,6 +251,8 @@ start.bat --install # Instalar/actualizar dependencias
 - Proteccion contra path traversal
 - Confirmacion requerida para comandos destructivos
 - Solo acceso a archivos dentro de directorios permitidos
+- Sandboxed code execution con timeout
+- Backup automatico antes de editar archivos
 
 ## Modelos recomendados
 
