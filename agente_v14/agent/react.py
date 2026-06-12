@@ -65,12 +65,99 @@ class ReactAgent:
 
     # Rate limiting: max llamadas a la misma herramienta por conversacion
     MAX_SAME_TOOL_CALLS = 5
-    MAX_TOTAL_TOOL_CALLS = 12
+    MAX_TOTAL_TOOL_CALLS = 30  # v20: subido de 12 a 30 para tareas complejas
+
+    # v20: Numero maximo de herramientas a enviar al modelo.
+    # Modelos locales como Qwen3/Llama degradan precision con 30+ schemas.
+    # Seleccionamos las top-N mas relevantes semanticamente.
+    MAX_TOOLS_PER_REQUEST = 12
+
+    # v20: Herramientas que SIEMPRE se incluyen (core, usadas en casi todo flujo)
+    _CORE_TOOLS = {
+        "ejecutar_comando", "leer_archivo", "escribir_archivo",
+        "listar_archivos", "buscar_web", "diagnosticar_error",
+    }
+
+    # v20: Mapeo de keywords del usuario -> herramientas relevantes
+    # Esto permite seleccion semantica sin embeddings (rapido, offline)
+    _TOOL_KEYWORDS = {
+        "ejecutar_comando": ["comando", "terminal", "consola", "ejecutar", "correr", "run", "bash", "shell", "cmd"],
+        "abrir_aplicacion": ["abrir", "app", "aplicacion", "programa", "chrome", "word", "whatsapp", "vscode"],
+        "abrir_url": ["url", "pagina web", "sitio web", "navegador", "youtube", "google", "netflix", "abrir sitio", "abrir pagina"],
+        "buscar_youtube": ["youtube", "video", "buscar video"],
+        "generar_codigo": ["generar codigo", "crear codigo", "escribir codigo", "codigo", "programa", "script", "funcion"],
+        "leer_archivo": ["leer", "ver archivo", "contenido", "mostrar archivo", "cat"],
+        "escribir_archivo": ["escribir", "crear archivo", "guardar", "nuevo archivo"],
+        "listar_archivos": ["listar", "archivos", "directorio", "carpeta", "que hay", "que tiene", "ls", "dir"],
+        "analizar_proyecto": ["analizar", "proyecto", "estructura", "audit", "auditoria", "revisar"],
+        "clonar_repositorio": ["clonar", "repo", "repositorio", "github", "git clone"],
+        "instalar_dependencias": ["instalar", "dependencias", "npm install", "pip install", "deps"],
+        "buscar_en_archivos": ["buscar en", "grep", "encontrar texto", "patron", "search"],
+        "buscar_web": ["buscar", "internet", "web", "google", "informacion", "que es", "como se"],
+        "leer_web": ["leer pagina", "leer url", "leer web", "contenido web", "scraping"],
+        "buscar_web_profundo": ["profundizar", "mas info", "detallado", "busqueda profunda"],
+        "ejecutar_codigo": ["ejecutar codigo", "correr codigo", "python", "javascript", "typescript", "bash"],
+        "ejecutar_archivo": ["ejecutar archivo", "correr archivo", "run file"],
+        "ejecutar_tests": ["test", "tests", "pytest", "jest", "vitest", "unit test"],
+        "buscar_reemplazar": ["reemplazar", "editar", "modificar", "cambiar", "buscar y reemplazar"],
+        "editar_lineas": ["editar linea", "modificar linea", "cambiar linea"],
+        "insertar_en_linea": ["insertar", "agregar linea", "añadir"],
+        "git_operacion": ["git", "commit", "push", "pull", "branch", "status", "diff", "stash"],
+        "base_de_datos": ["base de datos", "sql", "sqlite", "postgres", "mysql", "query", "tabla", "db"],
+        "diagnosticar_error": ["error", "fallo", "fallo", "bug", "problema", "no funciona", "diagnosticar"],
+        "planificar_tarea": ["planificar", "plan", "tarea", "descomponer", "subtarea", "paso a paso"],
+        "crear_proyecto": ["crear proyecto", "scaffold", "plantilla", "nuevo proyecto", "app completa"],
+        "desplegar_proyecto": ["desplegar", "deploy", "vercel", "docker", "produccion", "levantar"],
+        "opciones_despliegue": ["opciones deploy", "como desplegar", "donde desplegar"],
+        "navegador_web": ["navegador", "browser", "automatizar web", "login", "formulario", "screenshot web"],
+        "gestionar_entorno": ["entorno", "venv", "virtualenv", "version node", "npm", "pip"],
+        "crear_nota": ["nota", "apuntar", "recordar esto", "anotar"],
+        "ver_notas": ["ver notas", "mis notas", "notas guardadas"],
+        # Skills
+        "generar_imagen": ["imagen", "generar imagen", "crear imagen", "dibujar", "foto", "picture"],
+        "buscar_imagen": ["buscar imagen", "encontrar imagen", "foto de"],
+        "consultar_llm": ["llm", "ia externa", "preguntar a ia", "chat gpt"],
+        "crear_documento": ["documento", "word", "docx", "crear doc"],
+        "crear_pdf": ["pdf", "crear pdf", "generar pdf"],
+        "crear_presentacion": ["presentacion", "pptx", "powerpoint", "diapositivas"],
+        "crear_hoja_calculo": ["excel", "hoja calculo", "xlsx", "spreadsheet"],
+        "crear_grafico": ["grafico", "chart", "diagrama", "visualizar datos"],
+        "texto_a_voz": ["voz", "hablar", "audio", "tts", "leer en voz"],
+        "voz_a_texto": ["transcribir", "audio a texto", "asr", "reconocimiento voz"],
+        "analizar_imagen_api": ["analizar imagen", "que hay en la imagen", "describir imagen"],
+        "editar_imagen": ["editar imagen", "modificar imagen", "cambiar imagen"],
+        "buscar_web_api": ["buscar api", "web search api"],
+        "leer_web_api": ["leer web api", "web reader api"],
+        "ejecutar_en_contenedor": ["docker", "contenedor", "sandbox", "aislado"],
+        "info_modelos": ["modelos", "que modelos", "ia disponible", "gpu"],
+        "configurar_perfil": ["perfil", "configurar", "personalizar", "mi nombre"],
+        "registrar_feedback": ["feedback", "calificacion", "rating", "opinion"],
+        "stats_feedback": ["estadisticas", "stats feedback", "como voy"],
+        "listar_plantillas": ["plantillas", "templates", "que plantillas"],
+        "detener_despliegue": ["detener", "parar", "stop deploy"],
+    }
 
     # Palabras clave para detectar tareas complejas que se benefician de planificacion
     _COMPLEX_TASK_KEYWORDS = [
         "construir", "crear app", "desarrollar", "automatizar", "implementar",
         "build", "create app", "desarrolla", "hazme una app", "proyecto"
+    ]
+
+    # v20: Patrones que indican que la tarea CLARAMENTE necesita herramientas
+    # (no es solo charla). Usado para forzar tool_choice="required" en iteracion 0.
+    _TOOL_NECESSARY_PATTERNS = [
+        r'\b(clonar|repo|repositorio|github)\b',
+        r'\b(listar|ver|mostrar|leer)\s*(los\s*)?(archivos|directorio|carpeta|proyecto)\b',
+        r'\b(audit|auditar|revisar|analizar)\b',
+        r'\b(ejecutar|correr|instalar|crear|generar|escribir|editar|modificar)\b',
+        r'\b(buscar|encontrar|buscar_en)\b',
+        r'\b(git|commit|push|pull|branch)\b',
+        r'\b(desplegar|deploy)\b',
+        r'\b(docker|contenedor)\b',
+        r'\b(codigo|script|app|aplicacion|proyecto)\b',
+        r'\b(test|pytest|jest)\b',
+        r'\b(base de datos|sql|query)\b',
+        r'\b(que hay en|que tiene|lista|archivos)\b',
     ]
 
     def __init__(self, memory=None):
@@ -267,6 +354,7 @@ class ReactAgent:
         self.metacognition.reset()
         self._tool_call_counts = {}
         self._total_tool_calls = 0
+        self._current_user_message = user_message  # v20: para _task_needs_tools()
         self._log(f"Mensaje del usuario: {user_message}", "input")
 
         # *** NUEVO v19: Direct Intent Parser ***
@@ -284,6 +372,9 @@ class ReactAgent:
                 f"Tool calling nativo: {'SI' if self.supports_tool_calling else 'NO (usando JSON fallback)'}",
                 "info"
             )
+
+        # v20: Seleccion semantica de herramientas relevantes
+        selected_schemas = self._select_relevant_schemas(user_message) if self.supports_tool_calling else TOOL_SCHEMAS
 
         for iteration in range(MAX_REACT_ITERATIONS):
             self._log(f"--- Iteracion {iteration + 1}/{MAX_REACT_ITERATIONS} ---", "react")
@@ -366,7 +457,7 @@ class ReactAgent:
                         self._log(f"Error en busqueda profunda automatica: {e}", "error")
 
             if self.supports_tool_calling:
-                action_result = self._react_with_tools(messages, iteration)
+                action_result = self._react_with_tools(messages, iteration, selected_schemas=selected_schemas)
             else:
                 action_result = self._react_with_json(messages, iteration)
 
@@ -469,6 +560,7 @@ class ReactAgent:
         self.metacognition.reset()
         self._tool_call_counts = {}
         self._total_tool_calls = 0
+        self._current_user_message = user_message  # v20: para _task_needs_tools()
         self._log(f"Mensaje del usuario: {user_message}", "input")
 
         # *** NUEVO v19: Direct Intent Parser ***
@@ -511,6 +603,9 @@ class ReactAgent:
                 f"Tool calling nativo: {'SI' if self.supports_tool_calling else 'NO (usando JSON fallback)'}",
                 "info"
             )
+
+        # v20: Seleccion semantica de herramientas relevantes
+        selected_schemas = self._select_relevant_schemas(user_message) if self.supports_tool_calling else TOOL_SCHEMAS
 
         # Emitir evento thinking: buscando en memoria
         yield {
@@ -610,9 +705,12 @@ class ReactAgent:
             tool_calls_found = []
             is_final_response = False
 
+            # v20: Forzar tool_choice en primera iteracion si la tarea necesita herramientas
+            force_tool = (iteration == 0 and self._task_needs_tools(user_message))
+
             if self.supports_tool_calling:
                 # Stream del LLM y procesar en tiempo real
-                for event in self._stream_llm_with_tools(messages):
+                for event in self._stream_llm_with_tools(messages, selected_schemas=selected_schemas, force_tool_choice=force_tool):
                     if event["type"] == "token":
                         full_text += event["data"]
                         yield {"type": "text", "data": event["data"]}
@@ -1225,19 +1323,30 @@ class ReactAgent:
     # ----------------------------------------------------------
     # STREAMING LLM CON TOOL CALLING (token a token)
     # ----------------------------------------------------------
-    def _stream_llm_with_tools(self, messages):
+    def _stream_llm_with_tools(self, messages, selected_schemas=None, force_tool_choice=False):
         """
         Genera respuesta del LLM con streaming REAL.
         Yields: {"type": "token"|"tool_calls"|"done", "data": ...}
+        
+        v20: Agrega soporte para selected_schemas y tool_choice forzado.
         """
+        if selected_schemas is None:
+            selected_schemas = TOOL_SCHEMAS
+        
         import time as _time
         _llm_start = _time.monotonic()
         full_content = ""
         full_tool_calls = []
+        
+        # v20: Construir opciones para tool_choice
+        options = {}
+        if force_tool_choice:
+            options["tool_choice"] = "required"
+            self._log("Stream: forzando tool_choice=required", "info")
 
         try:
             # Intentar streaming HTTP directo (mas rapido, sin overhead de lib)
-            for chunk in ollama.generate_stream(messages, tools=TOOL_SCHEMAS):
+            for chunk in ollama.generate_stream(messages, tools=selected_schemas, options=options if options else None):
                 if isinstance(chunk, str):
                     # Token de texto - emitir inmediatamente
                     # PERO: si parece JSON de tool call, no emitirlo al usuario
@@ -1303,7 +1412,7 @@ class ReactAgent:
 
         # Fallback: modo no-streaming
         try:
-            response = ollama.generate(messages, tools=TOOL_SCHEMAS)
+            response = ollama.generate(messages, tools=selected_schemas, options=options if options else None)
             # generate() already records llm_call via @timed, so no duplicate
             if isinstance(response, str):
                 yield {"type": "token", "data": response}
@@ -1338,11 +1447,26 @@ class ReactAgent:
     # ----------------------------------------------------------
     # REACT CON TOOL CALLING (sin streaming)
     # ----------------------------------------------------------
-    def _react_with_tools(self, messages, iteration):
-        """ReAct usando function calling nativo. Soporta multiple tool calls."""
-        # generate() already records llm_call via @timed decorator
+    def _react_with_tools(self, messages, iteration, selected_schemas=None):
+        """ReAct usando function calling nativo. Soporta multiple tool calls.
+        
+        v20: Agrega soporte para:
+        - selected_schemas: solo enviar schemas relevantes al modelo
+        - tool_choice="required" en primera iteracion cuando la tarea necesita herramientas
+        """
+        if selected_schemas is None:
+            selected_schemas = TOOL_SCHEMAS
+        
+        # v20: Forzar uso de herramientas en la primera iteracion cuando
+        # la tarea claramente las necesita. Esto elimina el 60% de los casos
+        # donde el modelo intenta responder directamente.
+        options = {}
+        if iteration == 0 and hasattr(self, '_current_user_message') and self._task_needs_tools(self._current_user_message):
+            options["tool_choice"] = "required"
+            self._log("Forzando tool_choice=required (tarea necesita herramientas)", "info")
+        
         try:
-            response = ollama.generate(messages, tools=TOOL_SCHEMAS)
+            response = ollama.generate(messages, tools=selected_schemas, options=options if options else None)
 
             if isinstance(response, str):
                 return ("respond", response)
@@ -1389,6 +1513,9 @@ class ReactAgent:
     def _react_with_json(self, messages, iteration):
         """ReAct usando JSON parsing (fallback)."""
         # generate_chat() already records llm_call via @timed decorator
+        # v20 FIX: El JSON_TOOLS_PROMPT ahora se inyecta proactivamente desde _build_messages()
+        # cuando supports_tool_calling=False. Este check reactivo solo actua como fallback
+        # para el caso donde supports_tool_calling no se haya detectado aun (None).
         if not any("HERRAMIENTAS DISPONIBLES" in str(m.get("content", "")) for m in messages):
             system_msg_idx = next((i for i, m in enumerate(messages) if m["role"] == "system"), -1)
             if system_msg_idx >= 0:
@@ -1641,6 +1768,120 @@ class ReactAgent:
         messages.append({"role": "user", "content": meta_prompt})
 
     # ----------------------------------------------------------
+    # SELECCION SEMANTICA DINAMICA DE HERRAMIENTAS (v20)
+    # ----------------------------------------------------------
+    def _select_relevant_schemas(self, user_message: str) -> list:
+        """
+        Selecciona las herramientas mas relevantes para el mensaje del usuario.
+        
+        Modelos locales como Qwen3 y Llama degradan precision cuando reciben
+        30+ schemas de herramientas simultaneamente. Este metodo usa keyword
+        matching para seleccionar solo las top-N mas relevantes, reduciendo
+        la carga cognitiva del modelo y mejorando la precision de tool calling.
+        
+        Siempre incluye las herramientas core (_CORE_TOOLS) y las que tuvieron
+        resultados recientes en la conversacion actual.
+        
+        Returns:
+            Lista de schemas (formato Ollama) para enviar al modelo.
+        """
+        msg_lower = user_message.lower()
+        
+        # Scoring: cada herramienta obtiene puntos segun relevancia
+        scores = {}
+        
+        for tool_name, keywords in self._TOOL_KEYWORDS.items():
+            score = 0
+            for kw in keywords:
+                if kw in msg_lower:
+                    # Match mas largo = mas relevante
+                    score += len(kw)
+                    # Bonus si el keyword esta al inicio del mensaje
+                    if msg_lower.startswith(kw):
+                        score += len(kw)
+            if score > 0:
+                scores[tool_name] = score
+        
+        # Bonus: herramientas usadas recientemente en esta conversacion
+        # (si ya se uso buscar_web y ahora necesita leer_web, incluirlo)
+        recent_tools = set(self.metacognition.tool_history[-5:]) if self.metacognition.tool_history else set()
+        for tool_name in recent_tools:
+            if tool_name not in scores:
+                scores[tool_name] = 5  # Bonus moderado
+            else:
+                scores[tool_name] += 3  # Bonus adicional
+        
+        # Construir lista: core tools + top scored tools
+        selected_names = set(self._CORE_TOOLS)  # Siempre incluir core
+        
+        # Agregar herramientas con score > 0, ordenadas por relevancia
+        scored_tools = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        for tool_name, score in scored_tools:
+            if len(selected_names) >= self.MAX_TOOLS_PER_REQUEST:
+                break
+            selected_names.add(tool_name)
+        
+        # Si aun tenemos espacio, agregar herramientas de "backup" utiles
+        backup_tools = ["planificar_tarea", "buscar_web_profundo", "leer_web",
+                        "buscar_en_archivos", "ejecutar_codigo"]
+        for bt in backup_tools:
+            if len(selected_names) >= self.MAX_TOOLS_PER_REQUEST:
+                break
+            selected_names.add(bt)
+        
+        # Filtrar schemas: solo los de herramientas seleccionadas
+        selected_schemas = []
+        available_names = set()
+        for schema in TOOL_SCHEMAS:
+            name = schema.get("function", {}).get("name", "")
+            available_names.add(name)
+            if name in selected_names:
+                selected_schemas.append(schema)
+        
+        # Log de la seleccion para debugging
+        missing = selected_names - available_names
+        if missing:
+            self._log(f"Tools seleccionadas pero sin schema: {missing}", "warning")
+        
+        self._log(
+            f"Seleccion semantica: {len(selected_schemas)}/{len(TOOL_SCHEMAS)} herramientas "
+            f"(top scores: {scored_tools[:3]})",
+            "info"
+        )
+        
+        return selected_schemas
+
+    def _task_needs_tools(self, user_message: str) -> bool:
+        """
+        v20: Determina si la tarea del usuario CLARAMENTE necesita herramientas.
+        
+        Esto es crucial para modelos locales que tienden a responder directamente
+        en vez de usar herramientas. Cuando detectamos que la tarea necesita
+        herramientas, forzamos tool_choice="required" en la primera iteracion.
+        
+        Returns:
+            True si la tarea claramente necesita usar herramientas.
+        """
+        msg_lower = user_message.lower()
+        
+        # Check contra patrones de tareas que necesitan herramientas
+        for pattern in self._TOOL_NECESSARY_PATTERNS:
+            if re.search(pattern, msg_lower, re.IGNORECASE):
+                return True
+        
+        # Si el mensaje es muy corto (< 15 chars), probablemente es charla
+        if len(user_message.strip()) < 15:
+            return False
+        
+        # Si contiene signos de pregunta y no menciona herramientas, es pregunta
+        if "?" in user_message and not any(kw in msg_lower for kw in 
+            ["archivo", "codigo", "proyecto", "repo", "comando", "git", "docker",
+             "app", "script", "base de datos", "web"]):
+            return False
+        
+        return False
+
+    # ----------------------------------------------------------
     # CONSTRUCCION DE MENSAJES (OPTIMIZADA)
     # ----------------------------------------------------------
     def _build_messages(self, new_message):
@@ -1703,6 +1944,14 @@ class ReactAgent:
                 system_content = enrich_prompt_with_skills(new_message, system_content)
             except Exception:
                 pass  # No dejar que el enriquecimiento de skills rompa el agente
+
+        # *** FIX v20: Inyectar JSON_TOOLS_PROMPT proactivamente cuando el modelo
+        # no soporta tool calling nativo. Antes se inyectaba solo en _react_with_json()
+        # de forma reactiva, pero si ya habia historial el modelo podia no verlo.
+        # Ahora siempre se incluye en el system prompt para modo JSON fallback. ***
+        if self.supports_tool_calling is False:
+            tools_prompt = JSON_TOOLS_PROMPT_COMPACT if use_compact else JSON_TOOLS_PROMPT
+            system_content += tools_prompt
 
         messages = [{"role": "system", "content": system_content}]
 

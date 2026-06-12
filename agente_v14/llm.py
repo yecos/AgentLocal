@@ -370,11 +370,14 @@ class OllamaClient:
         return LLM_TIMEOUT_SMALL
 
     @timed("llm")
-    def generate(self, messages, tools=None, model_override=None, timeout_overwrite=None):
+    def generate(self, messages, tools=None, model_override=None, timeout_overwrite=None, options=None):
         """
         Genera respuesta del LLM. Usa cache de conexion persistente.
         Retorna: str (texto) o dict (respuesta completa con tool_calls).
         Retorna "" si todo falla.
+        
+        v20: Agrega parametro 'options' para soportar tool_choice y otros
+        parametros avanzados de la API de Ollama.
         """
         self.detect_models()
         model = model_override or self.model
@@ -384,7 +387,7 @@ class OllamaClient:
 
         # ---- ESTRATEGIA 1: Probar conexion cacheada ----
         if self.host and self.method:
-            result = self._try_method(self.host, self.method, model, messages, tools, timeout)
+            result = self._try_method(self.host, self.method, model, messages, tools, timeout, options)
             if result is not None:
                 return result
             # Cache fallo, resetear
@@ -402,7 +405,7 @@ class OllamaClient:
         for m in models_to_try:
             for host in hosts:
                 for method in ['client', 'http']:
-                    result = self._try_method(host, method, m, messages, tools, timeout)
+                    result = self._try_method(host, method, m, messages, tools, timeout, options)
                     if result is not None:
                         # Guardar conexion exitosa
                         self.host = host
@@ -518,12 +521,14 @@ class OllamaClient:
     # GENERACION CON STREAMING
     # ----------------------------------------------------------
 
-    def generate_stream(self, messages, tools=None, model_override=None):
+    def generate_stream(self, messages, tools=None, model_override=None, options=None):
         """
         Genera respuesta del LLM con streaming.
         Yields: str (tokens de texto) o dict (resultado final con tool_calls).
         El llamador itera sobre los chunks para streaming en tiempo real.
         Retorna None si todo falla (el llamador debe usar generate() como fallback).
+        
+        v20: Agrega parametro 'options' para soportar tool_choice.
         """
         self.detect_models()
         model = model_override or self.model
@@ -536,13 +541,13 @@ class OllamaClient:
 
         for host in hosts:
             # Intentar streaming HTTP directo (mas rapido)
-            stream = self._try_stream_http(host, model, messages, tools)
+            stream = self._try_stream_http(host, model, messages, tools, options)
             if stream is not None:
                 yield from stream
                 return
 
             # Intentar streaming via client
-            stream = self._try_stream_client(host, model, messages, tools)
+            stream = self._try_stream_client(host, model, messages, tools, options)
             if stream is not None:
                 yield from stream
                 return
@@ -557,7 +562,7 @@ class OllamaClient:
             return
         return
 
-    def _try_stream_http(self, host, model, messages, tools):
+    def _try_stream_http(self, host, model, messages, tools, options=None):
         """Intenta streaming HTTP. Retorna generador o None si falla."""
         try:
             import urllib.request
@@ -568,6 +573,9 @@ class OllamaClient:
             }
             if tools:
                 payload["tools"] = tools
+            # v20: Soportar tool_choice via HTTP
+            if options and options.get("tool_choice"):
+                payload["tool_choice"] = options["tool_choice"]
             data = json.dumps(payload).encode("utf-8")
             req = urllib.request.Request(
                 f"{host}/api/chat",
@@ -624,7 +632,7 @@ class OllamaClient:
             logger.debug(f"HTTP streaming setup failed: {e}")
         return None
 
-    def _try_stream_client(self, host, model, messages, tools):
+    def _try_stream_client(self, host, model, messages, tools, options=None):
         """Intenta streaming via ollama.Client. Retorna generador o None si falla."""
         try:
             import ollama as ollama_lib
@@ -634,10 +642,17 @@ class OllamaClient:
                 full_content = ""
                 full_tool_calls = []
 
+                # v20: Construir kwargs para soportar tool_choice
+                kwargs = {"model": model, "messages": messages}
+                if tools:
+                    kwargs["tools"] = tools
+                if options and options.get("tool_choice"):
+                    kwargs["tool_choice"] = options["tool_choice"]
+
                 if tools:
                     # ollama client no soporta streaming con tools
                     # Usar modo no-streaming y yield todo de golpe
-                    response = client.chat(model=model, messages=messages, tools=tools)
+                    response = client.chat(**kwargs)
                     msg = response.get("message", response)
                     content = msg.get("content", "")
                     tool_calls = msg.get("tool_calls", [])
@@ -679,26 +694,31 @@ class OllamaClient:
     # METODOS INTERNOS
     # ----------------------------------------------------------
 
-    def _try_method(self, host, method, model, messages, tools, timeout):
+    def _try_method(self, host, method, model, messages, tools, timeout, options=None):
         """Intenta una combinacion de host/metodo/modelo. Retorna None si falla."""
         if method == 'client':
-            return self._try_client(host, model, messages, tools, timeout)
+            return self._try_client(host, model, messages, tools, timeout, options)
         elif method == 'http':
-            return self._try_http(host, model, messages, tools, timeout)
+            return self._try_http(host, model, messages, tools, timeout, options)
         return None
 
-    def _try_client(self, host, model, messages, tools, timeout):
+    def _try_client(self, host, model, messages, tools, timeout, options=None):
         """Intenta via ollama.Client."""
         try:
             import ollama
             client = self._get_or_create_client(host)
+            # v20: Construir kwargs para soportar tool_choice
+            kwargs = {"model": model, "messages": messages}
             if tools:
-                response = client.chat(model=model, messages=messages, tools=tools)
+                kwargs["tools"] = tools
+            if options and options.get("tool_choice"):
+                kwargs["tool_choice"] = options["tool_choice"]
+            response = client.chat(**kwargs)
+            if tools:
                 msg = response.get("message", response)
                 if msg.get("content") or msg.get("tool_calls"):
                     return response
             else:
-                response = client.chat(model=model, messages=messages)
                 content = response.get("message", {}).get("content", "")
                 if content:
                     return content
@@ -706,7 +726,7 @@ class OllamaClient:
             logger.debug(f"Client method failed: {e}")
         return None
 
-    def _try_http(self, host, model, messages, tools, timeout):
+    def _try_http(self, host, model, messages, tools, timeout, options=None):
         """Intenta via HTTP directo (sin lib ollama)."""
         try:
             import urllib.request
@@ -717,6 +737,9 @@ class OllamaClient:
             }
             if tools:
                 payload["tools"] = tools
+            # v20: Soportar tool_choice via HTTP
+            if options and options.get("tool_choice"):
+                payload["tool_choice"] = options["tool_choice"]
             data = json.dumps(payload).encode("utf-8")
             req = urllib.request.Request(
                 f"{host}/api/chat",
