@@ -86,20 +86,26 @@ function cleanThinking(text: string): string {
 // ─── Hardware Stats Component ────────────────────────────────────────────────
 
 function HardwareStats() {
-  const [stats, setStats] = useState(() => ({
-    cpu: 20 + Math.floor(Math.random() * 30),
-    mem: 40 + Math.floor(Math.random() * 20),
-    disk: 25 + Math.floor(Math.random() * 20),
-  }));
+  const [stats, setStats] = useState({ cpu: 0, mem: 0, disk: 0 });
+  const hasInitialized = useRef(false);
 
   useEffect(() => {
+    if (!hasInitialized.current) {
+      hasInitialized.current = true;
+    }
+
     const interval = setInterval(() => {
-      setStats((prev) => ({
-        cpu: Math.max(5, Math.min(95, prev.cpu + (Math.random() > 0.5 ? 1 : -1) * Math.floor(Math.random() * 5))),
-        mem: Math.max(30, Math.min(85, prev.mem + (Math.random() > 0.5 ? 1 : -1) * Math.floor(Math.random() * 3))),
-        disk: prev.disk, // disk doesn't change much
-      }));
-    }, 3000);
+      setStats((prev) => {
+        const base = prev.cpu === 0
+          ? { cpu: 20 + Math.floor(Math.random() * 30), mem: 40 + Math.floor(Math.random() * 20), disk: 25 + Math.floor(Math.random() * 20) }
+          : {
+              cpu: Math.max(5, Math.min(95, prev.cpu + (Math.random() > 0.5 ? 1 : -1) * Math.floor(Math.random() * 5))),
+              mem: Math.max(30, Math.min(85, prev.mem + (Math.random() > 0.5 ? 1 : -1) * Math.floor(Math.random() * 3))),
+              disk: prev.disk,
+            };
+        return base;
+      });
+    }, 100);
     return () => clearInterval(interval);
   }, []);
 
@@ -118,12 +124,12 @@ function HardwareStats() {
             <Cpu size={8} className="text-[#444444]" />
             <span className="text-[9px] text-[#444444]">CPU</span>
           </div>
-          <span className="text-[9px] text-[#666666]">{stats.cpu}%</span>
+          <span className="text-[9px] text-[#666666]">{stats.cpu > 0 ? `${stats.cpu}%` : '—'}</span>
         </div>
         <div className="h-[2px] bg-[rgba(255,255,255,0.06)] overflow-hidden">
           <div
             className="h-full bg-[rgba(0,212,255,0.3)] transition-all duration-1000"
-            style={{ width: `${stats.cpu}%` }}
+            style={{ width: stats.cpu > 0 ? `${stats.cpu}%` : '0%' }}
           />
         </div>
       </div>
@@ -133,12 +139,12 @@ function HardwareStats() {
             <MemoryStick size={8} className="text-[#444444]" />
             <span className="text-[9px] text-[#444444]">MEM</span>
           </div>
-          <span className="text-[9px] text-[#666666]">{stats.mem}%</span>
+          <span className="text-[9px] text-[#666666]">{stats.mem > 0 ? `${stats.mem}%` : '—'}</span>
         </div>
         <div className="h-[2px] bg-[rgba(255,255,255,0.06)] overflow-hidden">
           <div
             className="h-full bg-[rgba(0,255,136,0.25)] transition-all duration-1000"
-            style={{ width: `${stats.mem}%` }}
+            style={{ width: stats.mem > 0 ? `${stats.mem}%` : '0%' }}
           />
         </div>
       </div>
@@ -148,12 +154,12 @@ function HardwareStats() {
             <HardDrive size={8} className="text-[#444444]" />
             <span className="text-[9px] text-[#444444]">DISK</span>
           </div>
-          <span className="text-[9px] text-[#666666]">{stats.disk}%</span>
+          <span className="text-[9px] text-[#666666]">{stats.disk > 0 ? `${stats.disk}%` : '—'}</span>
         </div>
         <div className="h-[2px] bg-[rgba(255,255,255,0.06)] overflow-hidden">
           <div
             className="h-full bg-[rgba(255,217,61,0.25)] transition-all duration-1000"
-            style={{ width: `${stats.disk}%` }}
+            style={{ width: stats.disk > 0 ? `${stats.disk}%` : '0%' }}
           />
         </div>
       </div>
