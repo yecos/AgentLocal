@@ -225,6 +225,13 @@ async def _stream_agent_threaded(agent: ReactAgent, message: str):
             if event_type == "text":
                 yield f"data: {json.dumps({'type': 'text', 'data': event_data}, ensure_ascii=False)}\n\n"
 
+            elif event_type == "thinking":
+                thinking_info = {
+                    "type": "thinking",
+                    "data": event_data if isinstance(event_data, dict) else {"message": str(event_data)},
+                }
+                yield f"data: {json.dumps(thinking_info, ensure_ascii=False)}\n\n"
+
             elif event_type == "tool_start":
                 tool_info = {
                     "type": "tool_start",

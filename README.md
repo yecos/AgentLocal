@@ -1,6 +1,6 @@
-# Agente Local Autonomo v14
+# Agente Local Autonomo v15
 
-Agente de IA autonomo que vive en tu computadora. Usa Ollama localmente (sin API keys, sin cloud) con arquitectura modular ReAct + Triple Memory.
+Agente de IA autonomo que vive en tu computadora. Usa Ollama localmente (sin API keys, sin cloud) con arquitectura modular ReAct + Triple Memory + Visibilidad de Pensamiento.
 
 ## Que hace
 
@@ -10,10 +10,60 @@ Agente de IA autonomo que vive en tu computadora. Usa Ollama localmente (sin API
 - Clona repos, instala dependencias, analiza proyectos
 - Busca en archivos y en internet
 - Aprende de correcciones y memoriza interacciones
+- **Muestra su proceso de pensamiento en tiempo real** (v15)
+- **Terminal de ejecucion visible** — ves todo lo que ejecuta (v15)
+
+## Novedades v15
+
+### 💭 Panel de Proceso de Pensamiento
+Ahora puedes ver COMO piensa el agente paso a paso:
+- Recibiendo pregunta
+- Buscando en memoria
+- Decidiendo usar herramientas
+- Observando resultados
+- Generando respuesta final
+- Nivel de confianza en cada paso
+
+### 💻 Terminal de Ejecucion
+Panel tipo terminal que muestra:
+- Que herramienta se ejecuta y con que parametros
+- Resultados de cada ejecucion
+- Errores en rojo, exitos en verde
+
+### Arquitectura completa
+
+```
+Usuario pregunta
+       ↓
+  1. ¿Ya se la respuesta? ← Memoria Triple (corto/largo plazo + trabajo)
+     └─ Si → Responde directo
+     └─ No → Paso 2
+  2. 💭 PENSAR ← Modelo (Qwen/Ollama)
+     "Necesito buscar X..."
+  3. 🔧 ACTUAR ← Herramientas (19 herramientas)
+     buscar_web("X")
+     ejecutar_comando("...")
+     leer_archivo("/ruta")
+  4. 👁 OBSERVAR + METACOGNICION
+     ¿Es suficiente? ¿Confianza baja? → Buscar mas
+     ¿Bucle detectado? → Cambiar estrategia
+     └─ No → Volver a paso 2
+     └─ Si → Paso 5
+  5. ✅ RESPONDER + APRENDER ← Guardar en memoria
+```
+
+## Interfaces
+
+| Interfaz | Comando | Descripcion |
+|---|---|---|
+| **Web (Next.js)** | `npm run dev` | Interfaz web con paneles de pensamiento + terminal |
+| **Bridge API** | `python bridge_api.py` | API REST para conectar el agente con la web |
+| **Streamlit** | `streamlit run app.py` | Interfaz standalone alternativa |
 
 ## Requisitos
 
 - **Python 3.8+**
+- **Node.js 18+** (para la interfaz web)
 - **Ollama** corriendo localmente ([ollama.com](https://ollama.com))
 - Un modelo descargado: `ollama pull qwen3:4b` (recomendado)
 
@@ -22,12 +72,27 @@ Agente de IA autonomo que vive en tu computadora. Usa Ollama localmente (sin API
 ```bash
 # 1. Clonar
 git clone https://github.com/yecos/AgentLocal.git
-cd AgentLocal/agente_v14
+cd AgentLocal
 
-# 2. Instalar dependencias
-pip install streamlit ollama
+# 2. Instalar dependencias Python
+cd agente_v14
+pip install -r requirements.txt
 
-# 3. Iniciar
+# 3. Iniciar Bridge API (conecta agente con web)
+python bridge_api.py
+
+# 4. En otra terminal, iniciar interfaz web
+cd ..
+npm install
+npm run dev
+
+# 5. Abrir http://localhost:3000
+```
+
+### Inicio rapido (solo agente, sin web)
+
+```bash
+cd agente_v14
 start.bat          # Windows
 ./start.sh         # Linux/Mac
 ```

@@ -246,13 +246,25 @@ class ReactAgent:
     def run_stream(self, user_message):
         """
         Bucle ReAct con streaming REAL. Yields cada token al instante.
-        Eventos: {"type": "text"|"tool_start"|"tool_result"|"meta"|"done", "data": ...}
+        Eventos: {"type": "text"|"thinking"|"tool_start"|"tool_result"|"meta"|"done", "data": ...}
+        v15: Agrega evento "thinking" para que la UI muestre el proceso de pensamiento.
         """
         self.thinking_log = []
         self.metacognition.reset()
         self._tool_call_counts = {}
         self._total_tool_calls = 0
         self._log(f"Mensaje del usuario: {user_message}", "input")
+
+        # Emitir evento thinking: recibiendo pregunta
+        yield {
+            "type": "thinking",
+            "data": {
+                "phase": "receiving",
+                "message": f"Recibiendo pregunta: {user_message[:80]}...",
+                "iteration": 0,
+                "confidence": 0.7,
+            }
+        }
 
         messages = self._build_messages(user_message)
 
@@ -263,8 +275,30 @@ class ReactAgent:
                 "info"
             )
 
+        # Emitir evento thinking: buscando en memoria
+        yield {
+            "type": "thinking",
+            "data": {
+                "phase": "memory_search",
+                "message": "Buscando en memoria conocimiento relevante...",
+                "iteration": 0,
+                "confidence": self.metacognition.confidence,
+            }
+        }
+
         for iteration in range(MAX_REACT_ITERATIONS):
             self._log(f"--- Iteracion {iteration + 1}/{MAX_REACT_ITERATIONS} ---", "react")
+
+            # Emitir evento thinking: nueva iteracion
+            yield {
+                "type": "thinking",
+                "data": {
+                    "phase": "iteration_start",
+                    "message": f"Iteracion {iteration + 1}/{MAX_REACT_ITERATIONS}: Pensando como responder...",
+                    "iteration": iteration + 1,
+                    "confidence": self.metacognition.confidence,
+                }
+            }
 
             # *** FIX: Metacognicion ANTES de decidir la accion ***
             meta_prompt = self.metacognition.get_metacognitive_prompt(iteration)
@@ -391,6 +425,16 @@ class ReactAgent:
                             full_text = clean
 
             if is_final_response and not tool_calls_found:
+                # Emitir evento thinking: generando respuesta final
+                yield {
+                    "type": "thinking",
+                    "data": {
+                        "phase": "final_response",
+                        "message": "Tengo suficiente informacion. Generando respuesta final...",
+                        "iteration": iteration + 1,
+                        "confidence": self.metacognition.confidence,
+                    }
+                }
                 # PRIMERO: Evaluar resultado para poblar _last_evaluation
                 reflection = self.metacognition.evaluate_result(
                     user_message, full_text, iteration + 1
@@ -434,6 +478,17 @@ class ReactAgent:
                     self.metacognition.record_iteration(
                         iteration=iteration, action_type="tool_call", tool_name=tc["name"]
                     )
+                    # Emitir evento thinking: decidi usar una herramienta
+                    yield {
+                        "type": "thinking",
+                        "data": {
+                            "phase": "tool_decision",
+                            "message": f"Decidi usar la herramienta: {tc['name']} — buscando informacion o ejecutando accion...",
+                            "iteration": iteration + 1,
+                            "confidence": self.metacognition.confidence,
+                            "tool": tc["name"],
+                        }
+                    }
                     yield {"type": "tool_start", "data": tc}
 
                 results = self._execute_tool_calls(tool_calls_found, messages)
@@ -444,6 +499,19 @@ class ReactAgent:
                         iteration=iteration, action_type="tool_result",
                         tool_name=tc["name"], result_summary=res[:200], had_error=had_error
                     )
+                    # Emitir evento thinking: observando resultado
+                    status = "exitoso" if not had_error else "con error"
+                    yield {
+                        "type": "thinking",
+                        "data": {
+                            "phase": "observation",
+                            "message": f"Observacion: {tc['name']} termino {status}. Analizando si tengo suficiente informacion...",
+                            "iteration": iteration + 1,
+                            "confidence": self.metacognition.confidence,
+                            "tool": tc["name"],
+                            "success": not had_error,
+                        }
+                    }
                     yield {"type": "tool_result", "data": {"tool": tc, "result": res}}
 
                 self._feed_tool_results(tool_calls_found, results, messages)

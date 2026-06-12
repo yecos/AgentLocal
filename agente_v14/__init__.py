@@ -1,2 +1,2 @@
-"""Agente Local Autonomo v14 - Arquitectura Modular."""
-__version__ = "14.0.0"
+"""Agente Local Autonomo v15 - Arquitectura Modular con Visibilidad de Pensamiento."""
+__version__ = "15.0.0"

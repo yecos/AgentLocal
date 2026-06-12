@@ -30,11 +30,31 @@ interface OllamaModel {
   quantization_level: string;
 }
 
+interface ThinkingStep {
+  phase: string;
+  message: string;
+  iteration: number;
+  confidence: number;
+  tool?: string;
+  success?: boolean;
+  timestamp?: string;
+}
+
+interface TerminalLine {
+  type: "command" | "output" | "error";
+  tool: string;
+  params?: Record<string, unknown>;
+  result?: string;
+  timestamp?: string;
+}
+
 interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
   thinking?: string;
+  thinkingSteps?: ThinkingStep[];
+  terminalLines?: TerminalLine[];
   toolCalls?: string[];
   timestamp: number;
   responseTime?: number;
@@ -177,12 +197,16 @@ function ChatMessage({
   isLoading,
   expandedThinking,
   toggleThinking,
+  expandedTerminal,
+  toggleTerminal,
 }: {
   msg: Message;
   isLastAssistant: boolean;
   isLoading: boolean;
   expandedThinking: Record<string, boolean>;
   toggleThinking: (id: string) => void;
+  expandedTerminal: Record<string, boolean>;
+  toggleTerminal: (id: string) => void;
 }) {
   if (msg.role === "user") {
     return (
@@ -196,27 +220,77 @@ function ChatMessage({
 
   const isStreaming = isLastAssistant && isLoading;
   const cleanedThinking = msg.thinking ? cleanThinking(msg.thinking) : "";
+  const hasThinkingSteps = msg.thinkingSteps && msg.thinkingSteps.length > 0;
+  const hasTerminalLines = msg.terminalLines && msg.terminalLines.length > 0;
 
   return (
     <div className="animate-fade-in">
       <div className="max-w-[85%]">
         <div className="border-l border-[rgba(0,212,255,0.2)] pl-3">
-          {/* Thinking section */}
-          {cleanedThinking && (
+
+          {/* ─── Panel de Pensamiento (v15) ─── */}
+          {hasThinkingSteps && (
+            <div className="mb-3 border border-[rgba(0,212,255,0.15)] bg-[rgba(0,212,255,0.03)] rounded-sm">
+              <button
+                onClick={() => toggleThinking(msg.id)}
+                className="w-full flex items-center gap-2 px-2.5 py-1.5 text-[11px] text-[rgba(0,212,255,0.8)] hover:text-[rgba(0,212,255,1)] transition-colors duration-150"
+              >
+                {expandedThinking[msg.id] ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                <span className="font-medium">💭 Proceso de Pensamiento</span>
+                <span className="text-[rgba(0,212,255,0.4)] ml-1">
+                  ({msg.thinkingSteps!.length} pasos)
+                </span>
+                {isStreaming && (
+                  <span className="ml-auto inline-block w-1.5 h-1.5 bg-[rgba(0,212,255,0.6)] rounded-full animate-pulse" />
+                )}
+              </button>
+              {expandedThinking[msg.id] && (
+                <div className="px-2.5 pb-2 space-y-1.5 max-h-64 overflow-y-auto">
+                  {msg.thinkingSteps!.map((step, i) => {
+                    const phaseIcons: Record<string, string> = {
+                      receiving: "📨",
+                      memory_search: "🧠",
+                      iteration_start: "🔄",
+                      tool_decision: "🔧",
+                      observation: "👁",
+                      final_response: "✅",
+                      unknown: "💭",
+                    };
+                    const icon = phaseIcons[step.phase] || "💭";
+                    const confColor = step.confidence >= 0.7
+                      ? "text-[#4ade80]"
+                      : step.confidence >= 0.4
+                        ? "text-[#fbbf24]"
+                        : "text-[#f87171]";
+                    return (
+                      <div key={i} className="flex gap-2 text-[10px] leading-[1.5]">
+                        <span className="text-[#555555] shrink-0 w-12">{step.timestamp}</span>
+                        <span className="shrink-0">{icon}</span>
+                        <div className="min-w-0">
+                          <span className="text-[#888888]">{step.message}</span>
+                          {step.tool && (
+                            <span className="ml-1.5 text-[rgba(0,212,255,0.6)]">[{step.tool}]</span>
+                          )}
+                          <span className={`ml-1.5 ${confColor}`}>{Math.round(step.confidence * 100)}%</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Legacy thinking (model <think/> tags) */}
+          {!hasThinkingSteps && cleanedThinking && (
             <div className="mb-2.5">
               <button
                 onClick={() => toggleThinking(msg.id)}
                 className="flex items-center gap-1 text-[10px] text-[#666666] hover:text-[#999999] transition-colors duration-150"
               >
-                {expandedThinking[msg.id] ? (
-                  <ChevronDown size={10} />
-                ) : (
-                  <ChevronRight size={10} />
-                )}
+                {expandedThinking[msg.id] ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
                 <span>thinking</span>
-                <span className="text-[#555555] ml-1">
-                  ({cleanedThinking.length} chars)
-                </span>
+                <span className="text-[#555555] ml-1">({cleanedThinking.length} chars)</span>
               </button>
               {expandedThinking[msg.id] && (
                 <div className="mt-1.5 text-[11px] leading-[1.6] text-[#555555] max-h-40 overflow-y-auto pr-2 whitespace-pre-wrap border-l border-[rgba(255,255,255,0.06)] pl-2">
@@ -226,7 +300,61 @@ function ChatMessage({
             </div>
           )}
 
-          {/* Tool calls */}
+          {/* ─── Panel de Terminal (v15) ─── */}
+          {hasTerminalLines && (
+            <div className="mb-3 border border-[rgba(255,255,255,0.1)] bg-[rgba(0,0,0,0.4)] rounded-sm">
+              <button
+                onClick={() => toggleTerminal(msg.id)}
+                className="w-full flex items-center gap-2 px-2.5 py-1.5 text-[11px] text-[#58a6ff] hover:text-[#79c0ff] transition-colors duration-150"
+              >
+                {expandedTerminal[msg.id] ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                <span className="font-medium">💻 Terminal de Ejecución</span>
+                <span className="text-[rgba(88,166,255,0.4)] ml-1">
+                  ({msg.terminalLines!.length} lineas)
+                </span>
+                {isStreaming && (
+                  <span className="ml-auto inline-block w-1.5 h-1.5 bg-[#58a6ff] rounded-full animate-pulse" />
+                )}
+              </button>
+              {expandedTerminal[msg.id] && (
+                <div className="px-2.5 pb-2 font-mono text-[10px] leading-[1.6] max-h-64 overflow-y-auto">
+                  {msg.terminalLines!.map((line, i) => {
+                    if (line.type === "command") {
+                      const paramsStr = line.params
+                        ? JSON.stringify(line.params, null, 0).slice(0, 120)
+                        : "";
+                      return (
+                        <div key={i} className="text-[#58a6ff]">
+                          <span className="text-[#555555]">{line.timestamp} </span>
+                          <span className="text-[#4ade80]">$ </span>
+                          <span>{line.tool}</span>
+                          {paramsStr && <span className="text-[#888888]">({paramsStr})</span>}
+                        </div>
+                      );
+                    } else if (line.type === "error") {
+                      return (
+                        <div key={i} className="text-[#f87171]">
+                          <span className="text-[#555555]">{line.timestamp} </span>
+                          <span>✗ </span>
+                          <span>{line.result}</span>
+                        </div>
+                      );
+                    } else {
+                      return (
+                        <div key={i} className="text-[#9ca3af]">
+                          <span className="text-[#555555]">{line.timestamp} </span>
+                          <span className="text-[#4ade80]">→ </span>
+                          <span className="text-[#6b7280]">{line.result}</span>
+                        </div>
+                      );
+                    }
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Tool calls badges */}
           {msg.toolCalls && msg.toolCalls.length > 0 && (
             <div className="flex flex-wrap gap-1.5 mb-2">
               {msg.toolCalls.map((tool, i) => (
@@ -262,6 +390,18 @@ function ChatMessage({
                   <span>~{msg.tokenCount} tokens</span>
                 </>
               ) : null}
+              {hasThinkingSteps && (
+                <>
+                  <span className="text-[#444444]">·</span>
+                  <span>{msg.thinkingSteps!.length} pasos de pensamiento</span>
+                </>
+              )}
+              {hasTerminalLines && (
+                <>
+                  <span className="text-[#444444]">·</span>
+                  <span>{msg.terminalLines!.length} ejecuciones</span>
+                </>
+              )}
             </div>
           )}
         </div>
@@ -292,6 +432,7 @@ export default function ZAIInterface() {
   });
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [expandedThinking, setExpandedThinking] = useState<Record<string, boolean>>({});
+  const [expandedTerminal, setExpandedTerminal] = useState<Record<string, boolean>>({});
   const [isMobile, setIsMobile] = useState(false);
   const [useAgent, setUseAgent] = useState(true);
 
@@ -431,6 +572,8 @@ export default function ZAIInterface() {
       let isThinking = false;
       let toolCalls: string[] = [];
       let tokenCount = 0;
+      let thinkingSteps: ThinkingStep[] = [];
+      let terminalLines: TerminalLine[] = [];
 
       while (true) {
         const { done, value } = await reader.read();
@@ -466,11 +609,43 @@ export default function ZAIInterface() {
                   fullContent += content;
                 }
                 tokenCount++;
+              } else if (parsed.type === "thinking") {
+                // v15: Thinking event from agent
+                const step: ThinkingStep = {
+                  phase: parsed.data?.phase || "unknown",
+                  message: parsed.data?.message || "",
+                  iteration: parsed.data?.iteration || 0,
+                  confidence: parsed.data?.confidence || 0,
+                  tool: parsed.data?.tool,
+                  success: parsed.data?.success,
+                  timestamp: new Date().toLocaleTimeString(),
+                };
+                thinkingSteps = [...thinkingSteps, step];
               } else if (parsed.type === "tool_start") {
                 const toolName = parsed.data?.name || "unknown";
                 toolCalls = [...new Set([...toolCalls, toolName])];
+                // Add terminal command line
+                const termLine: TerminalLine = {
+                  type: "command",
+                  tool: toolName,
+                  params: parsed.data?.arguments || parsed.data?.params,
+                  timestamp: new Date().toLocaleTimeString(),
+                };
+                terminalLines = [...terminalLines, termLine];
               } else if (parsed.type === "tool_result") {
-                // Tool completed - already tracked in toolCalls
+                // Tool completed - add terminal output line
+                const toolName = parsed.data?.tool?.name || "unknown";
+                const resultStr = typeof parsed.data?.result === "string"
+                  ? parsed.data.result.slice(0, 300)
+                  : JSON.stringify(parsed.data?.result).slice(0, 300);
+                const hasError = resultStr.includes("ERROR") || resultStr.includes("Error");
+                const termLine: TerminalLine = {
+                  type: hasError ? "error" : "output",
+                  tool: toolName,
+                  result: resultStr,
+                  timestamp: new Date().toLocaleTimeString(),
+                };
+                terminalLines = [...terminalLines, termLine];
               } else if (parsed.type === "meta") {
                 // Metacognition event - we could display this
               } else if (parsed.type === "done") {
@@ -514,6 +689,8 @@ export default function ZAIInterface() {
                   ...m,
                   content: fullContent,
                   thinking: thinkingContent || undefined,
+                  thinkingSteps: thinkingSteps.length > 0 ? thinkingSteps : undefined,
+                  terminalLines: terminalLines.length > 0 ? terminalLines : undefined,
                   toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
                   tokenCount,
                 }
@@ -684,6 +861,8 @@ export default function ZAIInterface() {
                 isLoading={isLoading}
                 expandedThinking={expandedThinking}
                 toggleThinking={toggleThinking}
+                expandedTerminal={expandedTerminal}
+                toggleTerminal={(id) => setExpandedTerminal(prev => ({...prev, [id]: !prev[id]}))}
               />
             ))}
             <div ref={chatEndRef} />
