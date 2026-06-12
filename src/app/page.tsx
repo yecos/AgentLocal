@@ -115,22 +115,22 @@ function HardwareStats() {
     <div className="space-y-3">
       <div>
         <div className="flex justify-between items-center mb-1">
-          <span className="text-[9px] text-[#444444]">GPU</span>
-          <span className="text-[10px] text-[#666666]">—</span>
+          <span className="text-[10px] text-[#505050]">GPU</span>
+          <span className="text-[11px] text-[#666666]">—</span>
         </div>
-        <div className="text-[8px] text-[#333333]">No GPU detected</div>
+        <div className="text-[9px] text-[#444444]">No GPU detected</div>
       </div>
       <div>
         <div className="flex justify-between items-center mb-1.5">
           <div className="flex items-center gap-1">
-            <Cpu size={8} className="text-[#444444]" />
-            <span className="text-[9px] text-[#444444]">CPU</span>
+            <Cpu size={9} className="text-[#505050]" />
+            <span className="text-[10px] text-[#505050]">CPU</span>
           </div>
-          <span className="text-[9px] text-[#666666]">{stats.cpu > 0 ? `${stats.cpu}%` : '—'}</span>
+          <span className="text-[10px] text-[#666666]">{stats.cpu > 0 ? `${stats.cpu}%` : '—'}</span>
         </div>
-        <div className="h-[2px] bg-[rgba(255,255,255,0.06)] overflow-hidden">
+        <div className="h-[3px] bg-[rgba(255,255,255,0.08)] overflow-hidden">
           <div
-            className="h-full bg-[rgba(0,212,255,0.3)] transition-all duration-1000"
+            className="h-full bg-[rgba(0,212,255,0.4)] transition-all duration-1000"
             style={{ width: stats.cpu > 0 ? `${stats.cpu}%` : '0%' }}
           />
         </div>
@@ -138,14 +138,14 @@ function HardwareStats() {
       <div>
         <div className="flex justify-between items-center mb-1.5">
           <div className="flex items-center gap-1">
-            <MemoryStick size={8} className="text-[#444444]" />
-            <span className="text-[9px] text-[#444444]">MEM</span>
+            <MemoryStick size={9} className="text-[#505050]" />
+            <span className="text-[10px] text-[#505050]">MEM</span>
           </div>
-          <span className="text-[9px] text-[#666666]">{stats.mem > 0 ? `${stats.mem}%` : '—'}</span>
+          <span className="text-[10px] text-[#666666]">{stats.mem > 0 ? `${stats.mem}%` : '—'}</span>
         </div>
-        <div className="h-[2px] bg-[rgba(255,255,255,0.06)] overflow-hidden">
+        <div className="h-[3px] bg-[rgba(255,255,255,0.08)] overflow-hidden">
           <div
-            className="h-full bg-[rgba(0,255,136,0.25)] transition-all duration-1000"
+            className="h-full bg-[rgba(0,255,136,0.35)] transition-all duration-1000"
             style={{ width: stats.mem > 0 ? `${stats.mem}%` : '0%' }}
           />
         </div>
@@ -153,14 +153,14 @@ function HardwareStats() {
       <div>
         <div className="flex justify-between items-center mb-1.5">
           <div className="flex items-center gap-1">
-            <HardDrive size={8} className="text-[#444444]" />
-            <span className="text-[9px] text-[#444444]">DISK</span>
+            <HardDrive size={9} className="text-[#505050]" />
+            <span className="text-[10px] text-[#505050]">DISK</span>
           </div>
-          <span className="text-[9px] text-[#666666]">{stats.disk > 0 ? `${stats.disk}%` : '—'}</span>
+          <span className="text-[10px] text-[#666666]">{stats.disk > 0 ? `${stats.disk}%` : '—'}</span>
         </div>
-        <div className="h-[2px] bg-[rgba(255,255,255,0.06)] overflow-hidden">
+        <div className="h-[3px] bg-[rgba(255,255,255,0.08)] overflow-hidden">
           <div
-            className="h-full bg-[rgba(255,217,61,0.25)] transition-all duration-1000"
+            className="h-full bg-[rgba(255,217,61,0.35)] transition-all duration-1000"
             style={{ width: stats.disk > 0 ? `${stats.disk}%` : '0%' }}
           />
         </div>
@@ -187,7 +187,7 @@ function ChatMessage({
   if (msg.role === "user") {
     return (
       <div className="flex justify-end animate-fade-in">
-        <div className="max-w-[70%] px-3 py-2 border border-[rgba(255,255,255,0.06)] text-[13px] leading-[1.7] text-[#e0e0e0]">
+        <div className="max-w-[70%] px-3.5 py-2.5 border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.02)] text-[15px] leading-[1.7] tracking-[0.01em] text-[#f0f0f0]">
           {msg.content}
         </div>
       </div>
@@ -206,7 +206,7 @@ function ChatMessage({
             <div className="mb-2.5">
               <button
                 onClick={() => toggleThinking(msg.id)}
-                className="flex items-center gap-1 text-[9px] text-[#555555] hover:text-[#888888] transition-colors duration-150"
+                className="flex items-center gap-1 text-[10px] text-[#666666] hover:text-[#999999] transition-colors duration-150"
               >
                 {expandedThinking[msg.id] ? (
                   <ChevronDown size={10} />
@@ -214,12 +214,12 @@ function ChatMessage({
                   <ChevronRight size={10} />
                 )}
                 <span>thinking</span>
-                <span className="text-[#333333] ml-1">
+                <span className="text-[#555555] ml-1">
                   ({cleanedThinking.length} chars)
                 </span>
               </button>
               {expandedThinking[msg.id] && (
-                <div className="mt-1.5 text-[10px] leading-[1.6] text-[#3a3a3a] max-h-40 overflow-y-auto pr-2 whitespace-pre-wrap border-l border-[rgba(255,255,255,0.04)] pl-2">
+                <div className="mt-1.5 text-[11px] leading-[1.6] text-[#555555] max-h-40 overflow-y-auto pr-2 whitespace-pre-wrap border-l border-[rgba(255,255,255,0.06)] pl-2">
                   {cleanedThinking}
                 </div>
               )}
@@ -232,7 +232,7 @@ function ChatMessage({
               {msg.toolCalls.map((tool, i) => (
                 <span
                   key={i}
-                  className="text-[9px] px-1.5 py-0.5 border border-[rgba(0,212,255,0.15)] text-[rgba(0,212,255,0.5)]"
+                  className="text-[10px] px-1.5 py-0.5 border border-[rgba(0,212,255,0.2)] text-[rgba(0,212,255,0.7)]"
                 >
                   [{tool}]
                 </span>
@@ -241,24 +241,24 @@ function ChatMessage({
           )}
 
           {/* Content */}
-          <div className="text-[13px] leading-[1.7] text-[#e0e0e0] whitespace-pre-wrap">
+          <div className="text-[15px] leading-[1.7] tracking-[0.01em] text-[#e0e0e0] whitespace-pre-wrap">
             {msg.content}
             {/* Streaming cursor */}
             {isStreaming && !msg.content && (
-              <span className="inline-block w-[6px] h-[14px] bg-[rgba(0,212,255,0.5)] cursor-blink ml-0.5" />
+              <span className="inline-block w-[7px] h-[16px] bg-[rgba(0,212,255,0.5)] cursor-blink ml-0.5" />
             )}
             {isStreaming && msg.content && (
-              <span className="inline-block w-[5px] h-[13px] bg-[rgba(0,212,255,0.5)] cursor-blink ml-0.5 align-middle" />
+              <span className="inline-block w-[6px] h-[15px] bg-[rgba(0,212,255,0.5)] cursor-blink ml-0.5 align-middle" />
             )}
           </div>
 
           {/* Response metadata */}
           {msg.responseTime && !isStreaming && (
-            <div className="mt-2 text-[9px] text-[#333333] flex items-center gap-2">
+            <div className="mt-2 text-[10px] text-[#555555] flex items-center gap-2">
               <span>{msg.responseTime}ms</span>
               {msg.tokenCount ? (
                 <>
-                  <span className="text-[#222222]">·</span>
+                  <span className="text-[#444444]">·</span>
                   <span>~{msg.tokenCount} tokens</span>
                 </>
               ) : null}
@@ -585,14 +585,14 @@ export default function ZAIInterface() {
             <div className="w-1.5 h-1.5 bg-[rgba(0,212,255,0.4)]" />
             <span className="text-[11px] tracking-[0.3em] text-[#e0e0e0] font-bold">ZAI</span>
           </div>
-          <span className="text-[10px] text-[#1a1a1a]">│</span>
-          <span className="text-[10px] text-[#444444]">{selectedModel}</span>
+          <span className="text-[10px] text-[#333333]">│</span>
+          <span className="text-[11px] text-[#555555]">{selectedModel}</span>
           <div className="flex items-center gap-1.5 ml-1">
             <Circle
               size={5}
               className={status.connected ? "fill-[#00ff88] text-[#00ff88]" : "fill-[#ff3333] text-[#ff3333]"}
             />
-            <span className="text-[9px] text-[#555555] tracking-wider">
+            <span className="text-[10px] text-[#666666] tracking-wider">
               {status.connected ? "CONNECTED" : "OFFLINE"}
             </span>
           </div>
@@ -601,10 +601,10 @@ export default function ZAIInterface() {
           {/* Agent mode toggle */}
           <button
             onClick={() => setUseAgent(!useAgent)}
-            className={`text-[9px] tracking-wider px-2 py-0.5 border transition-colors duration-150 ${
+            className={`text-[10px] tracking-wider px-2.5 py-0.5 border transition-colors duration-150 ${
               useAgent
-                ? "text-[#00d4ff] border-[rgba(0,212,255,0.2)] bg-[rgba(0,212,255,0.05)]"
-                : "text-[#444444] border-[rgba(255,255,255,0.04)] hover:text-[#666666] hover:border-[rgba(255,255,255,0.08)]"
+                ? "text-[#00d4ff] border-[rgba(0,212,255,0.25)] bg-[rgba(0,212,255,0.06)]"
+                : "text-[#555555] border-[rgba(255,255,255,0.06)] hover:text-[#777777] hover:border-[rgba(255,255,255,0.1)]"
             }`}
             title={useAgent ? "Full agent mode (ReAct + Tools)" : "Simple chat mode (no tools)"}
           >
@@ -613,7 +613,7 @@ export default function ZAIInterface() {
           {messages.length > 0 && (
             <button
               onClick={clearChat}
-              className="text-[9px] text-[#444444] hover:text-[#666666] transition-colors px-2 py-0.5 border border-[rgba(255,255,255,0.04)] hover:border-[rgba(255,255,255,0.08)]"
+              className="text-[10px] text-[#555555] hover:text-[#777777] transition-colors px-2 py-0.5 border border-[rgba(255,255,255,0.06)] hover:border-[rgba(255,255,255,0.1)]"
             >
               CLEAR
             </button>
@@ -637,26 +637,26 @@ export default function ZAIInterface() {
             {messages.length === 0 && (
               <div className="flex flex-col items-center justify-center h-full gap-4 animate-fade-in select-none">
                 {/* ASCII-art style logo */}
-                <div className="text-[10px] leading-[1.4] text-[#1a1a1a] tracking-wider">
+                <div className="text-[11px] leading-[1.4] text-[#2a2a2a] tracking-wider">
                   <div>╔══════════════╗</div>
                   <div>║ &nbsp; Z A I &nbsp; &nbsp; &nbsp; ║</div>
                   <div>╚══════════════╝</div>
                 </div>
                 <div className="h-px w-16 bg-[rgba(0,212,255,0.15)]" />
-                <div className="text-[10px] text-[#2a2a2a] max-w-sm text-center leading-[1.7]">
+                <div className="text-[11px] text-[#3a3a3a] max-w-sm text-center leading-[1.7]">
                   Local AI agent interface.
                   <br />
-                  <span className="text-[#222222]">All processing runs on your machine via Ollama.</span>
+                  <span className="text-[#333333]">All processing runs on your machine via Ollama.</span>
                 </div>
                 <div className="flex items-center gap-4 mt-2">
                   <div className="flex items-center gap-1.5">
                     <Circle size={4} className={status.connected ? "fill-[#00ff88] text-[#00ff88]" : "fill-[#ff3333] text-[#ff3333]"} />
-                    <span className="text-[9px] text-[#333333]">
+                    <span className="text-[10px] text-[#444444]">
                       {status.connected ? "OLLAMA CONNECTED" : "OLLAMA OFFLINE"}
                     </span>
                   </div>
-                  <span className="text-[9px] text-[#222222]">│</span>
-                  <span className="text-[9px] text-[#333333]">{selectedModel}</span>
+                  <span className="text-[10px] text-[#333333]">│</span>
+                  <span className="text-[10px] text-[#444444]">{selectedModel}</span>
                 </div>
                 {!status.connected && (
                   <div className="mt-1 px-4 py-2 border border-[rgba(255,51,51,0.15)] text-[9px] text-[#ff3333]">
@@ -682,7 +682,7 @@ export default function ZAIInterface() {
           {/* ─── Input Area ──────────────────────────────────────────────── */}
           <div className="shrink-0 border-t border-[rgba(255,255,255,0.06)]">
             <div className="flex items-end gap-3 px-5 py-3">
-              <div className="text-[10px] text-[#333333] pb-1 select-none">{">"}</div>
+              <div className="text-[12px] text-[#555555] pb-1 select-none">{">"}</div>
               <textarea
                 ref={inputRef}
                 value={input}
@@ -691,7 +691,7 @@ export default function ZAIInterface() {
                 placeholder={status.connected ? "Enter message..." : "Ollama not connected"}
                 disabled={!status.connected}
                 rows={1}
-                className="flex-1 bg-transparent text-[13px] text-[#e0e0e0] placeholder-[#2a2a2a] resize-none outline-none min-h-[20px] max-h-[120px] leading-[1.6] disabled:opacity-20"
+                className="flex-1 bg-transparent text-[15px] text-[#e0e0e0] placeholder-[#3a3a3a] resize-none outline-none min-h-[22px] max-h-[140px] leading-[1.6] disabled:opacity-20"
                 style={{ fontFamily: "inherit" }}
                 onInput={(e) => {
                   const target = e.target as HTMLTextAreaElement;
@@ -739,7 +739,7 @@ export default function ZAIInterface() {
               </div>
               <div className="space-y-2.5">
                 <div className="flex justify-between items-center">
-                  <span className="text-[9px] text-[#3a3a3a]">MODEL</span>
+                  <span className="text-[10px] text-[#505050]">MODEL</span>
                   <select
                     value={selectedModel}
                     onChange={(e) => setSelectedModel(e.target.value)}
@@ -760,11 +760,11 @@ export default function ZAIInterface() {
                   </select>
                 </div>
                 <div className="flex justify-between items-center">
-                  <span className="text-[9px] text-[#3a3a3a]">HOST</span>
-                  <span className="text-[10px] text-[#555555]">localhost:11434</span>
+                  <span className="text-[10px] text-[#505050]">HOST</span>
+                  <span className="text-[11px] text-[#666666]">localhost:11434</span>
                 </div>
                 <div className="flex justify-between items-center">
-                  <span className="text-[9px] text-[#3a3a3a]">STATUS</span>
+                  <span className="text-[10px] text-[#505050]">STATUS</span>
                   <div className="flex items-center gap-1.5">
                     <Circle
                       size={4}
@@ -776,24 +776,24 @@ export default function ZAIInterface() {
                   </div>
                 </div>
                 <div className="flex justify-between items-center">
-                  <span className="text-[9px] text-[#3a3a3a]">UPTIME</span>
-                  <span className="text-[10px] text-[#555555] tabular-nums">{formatUptime(uptime)}</span>
+                  <span className="text-[10px] text-[#505050]">UPTIME</span>
+                  <span className="text-[11px] text-[#666666] tabular-nums">{formatUptime(uptime)}</span>
                 </div>
                 <div className="flex justify-between items-center">
-                  <span className="text-[9px] text-[#3a3a3a]">MODE</span>
-                  <span className={`text-[10px] ${useAgent ? "text-[#00d4ff]" : "text-[#555555]"}`}>
+                  <span className="text-[10px] text-[#505050]">MODE</span>
+                  <span className={`text-[11px] ${useAgent ? "text-[#00d4ff]" : "text-[#666666]"}`}>
                     {useAgent ? "AGENT" : "CHAT"}
                   </span>
                 </div>
                 {useAgent && status.agentAvailable !== undefined && (
                   <div className="flex justify-between items-center">
-                    <span className="text-[9px] text-[#3a3a3a]">BRIDGE</span>
+                    <span className="text-[10px] text-[#505050]">BRIDGE</span>
                     <div className="flex items-center gap-1.5">
                       <Circle
                         size={4}
                         className={status.agentAvailable ? "fill-[#00ff88] text-[#00ff88]" : "fill-[#ff8800] text-[#ff8800]"}
                       />
-                      <span className="text-[10px] text-[#555555]">
+                      <span className="text-[11px] text-[#666666]">
                         {status.agentAvailable ? "Active" : "Inactive"}
                       </span>
                     </div>
@@ -802,44 +802,44 @@ export default function ZAIInterface() {
               </div>
             </section>
 
-            <div className="h-px bg-[rgba(255,255,255,0.03)]" />
+            <div className="h-px bg-[rgba(255,255,255,0.05)]" />
 
             {/* HARDWARE */}
             <section>
               <div className="flex items-center gap-1.5 mb-3">
                 <Cpu size={10} className="text-[#555555]" />
-                <h3 className="text-[9px] tracking-[0.2em] text-[#555555] uppercase">Hardware</h3>
+                <h3 className="text-[10px] tracking-[0.2em] text-[#555555] uppercase">Hardware</h3>
               </div>
               <HardwareStats />
             </section>
 
-            <div className="h-px bg-[rgba(255,255,255,0.03)]" />
+            <div className="h-px bg-[rgba(255,255,255,0.05)]" />
 
             {/* SESSION */}
             <section>
               <div className="flex items-center gap-1.5 mb-3">
                 <Zap size={10} className="text-[#555555]" />
-                <h3 className="text-[9px] tracking-[0.2em] text-[#555555] uppercase">Session</h3>
+                <h3 className="text-[10px] tracking-[0.2em] text-[#555555] uppercase">Session</h3>
               </div>
               <div className="space-y-2.5">
                 <div className="flex justify-between items-center">
                   <div className="flex items-center gap-1">
-                    <MessageSquare size={8} className="text-[#3a3a3a]" />
-                    <span className="text-[9px] text-[#3a3a3a]">MESSAGES</span>
+                    <MessageSquare size={9} className="text-[#505050]" />
+                    <span className="text-[10px] text-[#505050]">MESSAGES</span>
                   </div>
-                  <span className="text-[10px] text-[#e0e0e0] tabular-nums">{sessionStats.messageCount}</span>
+                  <span className="text-[11px] text-[#e0e0e0] tabular-nums">{sessionStats.messageCount}</span>
                 </div>
                 <div className="flex justify-between items-center">
                   <div className="flex items-center gap-1">
-                    <Wrench size={8} className="text-[#3a3a3a]" />
-                    <span className="text-[9px] text-[#3a3a3a]">TOOLS</span>
+                    <Wrench size={9} className="text-[#505050]" />
+                    <span className="text-[10px] text-[#505050]">TOOLS</span>
                   </div>
-                  <span className="text-[10px] text-[#e0e0e0] tabular-nums">{sessionStats.toolsUsed}</span>
+                  <span className="text-[11px] text-[#e0e0e0] tabular-nums">{sessionStats.toolsUsed}</span>
                 </div>
                 <div className="flex justify-between items-center">
                   <div className="flex items-center gap-1">
-                    <Clock size={8} className="text-[#3a3a3a]" />
-                    <span className="text-[9px] text-[#3a3a3a]">AVG RESP</span>
+                    <Clock size={9} className="text-[#505050]" />
+                    <span className="text-[10px] text-[#505050]">AVG RESP</span>
                   </div>
                   <span className="text-[10px] text-[#e0e0e0] tabular-nums">
                     {sessionStats.avgResponseTime > 0 ? `${sessionStats.avgResponseTime}ms` : "—"}
@@ -847,8 +847,8 @@ export default function ZAIInterface() {
                 </div>
                 <div className="flex justify-between items-center">
                   <div className="flex items-center gap-1">
-                    <Activity size={8} className="text-[#3a3a3a]" />
-                    <span className="text-[9px] text-[#3a3a3a]">TOKENS</span>
+                    <Activity size={9} className="text-[#505050]" />
+                    <span className="text-[10px] text-[#505050]">TOKENS</span>
                   </div>
                   <span className="text-[10px] text-[#e0e0e0] tabular-nums">
                     {sessionStats.totalTokens > 0 ? `~${sessionStats.totalTokens}` : "—"}
@@ -857,15 +857,15 @@ export default function ZAIInterface() {
               </div>
             </section>
 
-            <div className="h-px bg-[rgba(255,255,255,0.03)]" />
+            <div className="h-px bg-[rgba(255,255,255,0.05)]" />
 
             {/* MODELS */}
             <section>
               <div className="flex items-center gap-1.5 mb-3">
                 <HardDrive size={10} className="text-[#555555]" />
-                <h3 className="text-[9px] tracking-[0.2em] text-[#555555] uppercase">Models</h3>
+                <h3 className="text-[10px] tracking-[0.2em] text-[#555555] uppercase">Models</h3>
                 {status.connected && (
-                  <span className="text-[8px] text-[#3a3a3a] ml-auto">{status.modelCount}</span>
+                  <span className="text-[9px] text-[#505050] ml-auto">{status.modelCount}</span>
                 )}
               </div>
               <div className="space-y-0.5 max-h-52 overflow-y-auto">
@@ -881,22 +881,22 @@ export default function ZAIInterface() {
                       }`}
                     >
                       <div className="flex justify-between items-center">
-                        <span className={`text-[10px] truncate mr-2 ${model.name === selectedModel ? "text-[#e0e0e0]" : "text-[#555555]"}`}>
+                        <span className={`text-[11px] truncate mr-2 ${model.name === selectedModel ? "text-[#e0e0e0]" : "text-[#666666]"}`}>
                           {model.name}
                         </span>
-                        <span className="text-[8px] text-[#333333] shrink-0">
+                        <span className="text-[9px] text-[#444444] shrink-0">
                           {formatBytes(model.size)}
                         </span>
                       </div>
                       {model.parameter_size !== "unknown" && (
-                        <div className="text-[8px] text-[#2a2a2a] mt-0.5">
+                        <div className="text-[9px] text-[#3a3a3a] mt-0.5">
                           {model.parameter_size} · {model.quantization_level}
                         </div>
                       )}
                     </button>
                   ))
                 ) : (
-                  <div className="text-[9px] text-[#2a2a2a] px-2 py-1">
+                  <div className="text-[10px] text-[#3a3a3a] px-2 py-1">
                     {status.connected ? "No models found" : "Cannot connect to Ollama"}
                   </div>
                 )}
@@ -905,7 +905,7 @@ export default function ZAIInterface() {
 
             {/* Footer */}
             <div className="pt-6">
-              <div className="text-[7px] text-[#1a1a1a] text-center tracking-[0.4em] uppercase">
+              <div className="text-[8px] text-[#333333] text-center tracking-[0.4em] uppercase">
                 ZAI Agent Interface v0.1
               </div>
             </div>
