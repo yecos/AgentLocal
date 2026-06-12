@@ -340,7 +340,12 @@ class ReactAgent:
             for chunk in ollama.generate_stream(messages, tools=TOOL_SCHEMAS):
                 if isinstance(chunk, str):
                     # Token de texto - emitir inmediatamente
+                    # PERO: si parece JSON de tool call, no emitirlo al usuario
                     full_content += chunk
+                    # Detectar si el contenido es JSON de herramienta
+                    if self._looks_like_tool_json(full_content):
+                        continue  # Acumular sin emitir
+                    # Si antes se acumulaba JSON pero ya no, limpiar
                     yield {"type": "token", "data": chunk}
                 elif isinstance(chunk, dict):
                     # Resultado final con tool_calls
@@ -365,8 +370,28 @@ class ReactAgent:
                         yield {"type": "done", "data": False}
                         return
 
-            # Si llegamos aqui sin tool_calls, es respuesta final
+            # Si llegamos aqui sin tool_calls, verificar si el contenido es JSON de herramientas
             if full_content:
+                # Si el contenido acumulado era JSON de tool calls (no se emitio),
+                # parsearlo y ejecutar como tool calls
+                if self._looks_like_tool_json(full_content):
+                    parsed = self._parse_json(full_content)
+                    if parsed:
+                        # Verificar si son multiples tool calls
+                        if parsed.get("_multi_tool_calls") and parsed.get("tool_calls"):
+                            yield {"type": "tool_calls", "data": parsed["tool_calls"]}
+                            yield {"type": "done", "data": False}
+                            return
+                        accion = parsed.get("accion", "").strip()
+                        if accion and accion in TOOL_FUNCTIONS:
+                            yield {"type": "tool_calls", "data": [{"name": accion, "params": parsed.get("params", {})}]}
+                            yield {"type": "done", "data": False}
+                            return
+                    # Si no se pudo parsear como tool call, emitir el texto limpio
+                    clean = self._clean_json_leak(full_content)
+                    if clean != full_content:
+                        # El texto era JSON, emitir version limpia
+                        yield {"type": "token", "data": clean}
                 _llm_elapsed = (_time.monotonic() - _llm_start) * 1000.0
                 get_metrics().record_llm_call(_llm_elapsed)
                 yield {"type": "done", "data": True}
@@ -468,7 +493,11 @@ class ReactAgent:
                 clean = self._clean_json_leak(response)
                 return ("respond", clean)
 
-            # 1. Si hay respuesta_final con contenido, usarla
+            # 1. Si hay _multi_tool_calls, ejecutar todas las herramientas
+            if parsed.get("_multi_tool_calls") and parsed.get("tool_calls"):
+                return ("tool_calls", parsed["tool_calls"])
+
+            # 2. Si hay respuesta_final con contenido, usarla
             respuesta_final = parsed.get("respuesta_final", "").strip()
             if respuesta_final:
                 return ("respond", respuesta_final)
@@ -480,7 +509,7 @@ class ReactAgent:
             if pensamiento:
                 self._log(f"Pensamiento: {pensamiento}", "thinking")
 
-            # 2. Si hay accion valida, ejecutar herramienta
+            # 3. Si hay accion valida, ejecutar herramienta
             if accion and accion in TOOL_FUNCTIONS:
                 # Si tambien hay pensamiento, inyectarlo como contexto
                 if pensamiento:
@@ -778,7 +807,6 @@ class ReactAgent:
         patterns = [
             r'```json\s*(.*?)\s*```',
             r'```\s*(.*?)\s*```',
-            r'(\{[\s\S]*\})',
         ]
         for pattern in patterns:
             match = re.search(pattern, text, re.DOTALL)
@@ -787,7 +815,80 @@ class ReactAgent:
                     return json.loads(match.group(1))
                 except Exception:
                     continue
+        # Intentar parsear multiples JSONs en el texto
+        # Cada JSON es una accion separada del ReAct
+        jsons = self._extract_all_jsons(text)
+        if len(jsons) == 1:
+            return jsons[0]
+        elif len(jsons) > 1:
+            # Multiples JSONs = multiples tool calls
+            # Combinar en una lista de tool calls
+            tool_calls = []
+            for j in jsons:
+                accion = j.get("accion", "").strip()
+                if accion:
+                    tool_calls.append({"name": accion, "params": j.get("params", {})})
+            if tool_calls:
+                # Retornar formato especial para multiples tool calls
+                return {"_multi_tool_calls": True, "tool_calls": tool_calls}
+            return jsons[0]  # Fallback al primer JSON
+        # Ultimo intento: buscar un solo objeto JSON
+        match = re.search(r'(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})', text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except Exception:
+                pass
         return None
+
+    def _extract_all_jsons(self, text):
+        """Extrae todos los objetos JSON validos de un texto."""
+        results = []
+        # Buscar secuencias que parezcan JSON
+        i = 0
+        while i < len(text):
+            # Encontrar el proximo '{'
+            start = text.find('{', i)
+            if start == -1:
+                break
+            # Intentar parsear desde este punto
+            depth = 0
+            end = start
+            for j in range(start, len(text)):
+                if text[j] == '{':
+                    depth += 1
+                elif text[j] == '}':
+                    depth -= 1
+                if depth == 0:
+                    end = j + 1
+                    break
+            if end > start:
+                try:
+                    parsed = json.loads(text[start:end])
+                    if isinstance(parsed, dict):
+                        results.append(parsed)
+                except Exception:
+                    pass
+                i = end
+            else:
+                i = start + 1
+        return results
+
+    def _looks_like_tool_json(self, text):
+        """Detecta si el texto parece ser JSON de tool call (no respuesta al usuario)."""
+        text = text.strip()
+        if not text:
+            return False
+        # Si empieza con { probablemente es JSON de tool call
+        if text.startswith('{'):
+            return True
+        # Si contiene patrones de tool calls
+        tool_indicators = ['"accion"', '"pensamiento"', '"params"', '"respuesta_final"',
+                          '"abrir_', '"ejecutar_', '"leer_', '"escribir_', '"buscar_"']
+        for indicator in tool_indicators:
+            if indicator in text:
+                return True
+        return False
 
     def _detect_tool_calling_support(self):
         """Detecta si el modelo soporta function calling nativo."""

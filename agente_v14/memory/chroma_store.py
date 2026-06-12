@@ -292,6 +292,18 @@ class ChromaVectorStore:
         if not query_embedding:
             return self._text_search(query, limit)
 
+        # Validar dimension del embedding antes de buscar
+        if self._embedding_dim is not None and len(query_embedding) != self._embedding_dim:
+            logger.warning(
+                f"Dimension mismatch en search: {len(query_embedding)} vs {self._embedding_dim}. "
+                f"Recreando coleccion y usando text search..."
+            )
+            try:
+                self._handle_dimension_error(query_embedding)
+            except Exception as e:
+                logger.warning(f"Error recreando coleccion: {e}")
+            return self._text_search(query, limit)
+
         try:
             # Buscar mas candidatos de los necesarios para re-rankear con decaimiento
             n_candidates = min(limit * 3, 20)
@@ -333,7 +345,15 @@ class ChromaVectorStore:
             return scored[:limit]
 
         except Exception as e:
-            logger.warning(f"Error en busqueda ChromaDB: {e}")
+            err_msg = str(e).lower()
+            if "dimension" in err_msg:
+                logger.warning(f"Dimension mismatch en query, recreando coleccion...")
+                try:
+                    self._handle_dimension_error(query_embedding)
+                except Exception:
+                    pass
+            else:
+                logger.warning(f"Error en busqueda ChromaDB: {e}")
             return self._text_search(query, limit)
 
     def _text_search(self, query, limit=5):
