@@ -1,45 +1,69 @@
 import { NextRequest } from "next/server";
 
+const BRIDGE_BASE = "http://localhost:8000";
 const OLLAMA_BASE = "http://localhost:11434";
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { messages, model } = body;
+    const { messages, model, useAgent } = body;
 
-    if (!messages || !model) {
-      return new Response(
-        JSON.stringify({ error: "Missing messages or model" }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
+    // If useAgent is true, route to the Python bridge (full ReAct agent)
+    if (useAgent) {
+      return await streamFromBridge(messages, model);
     }
 
-    const ollamaResponse = await fetch(`${OLLAMA_BASE}/api/chat`, {
+    // Otherwise, use Ollama directly (simple chat, no tools)
+    return await streamFromOllama(messages, model);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    if (message.includes("ECONNREFUSED") || message.includes("fetch failed")) {
+      return new Response(
+        JSON.stringify({
+          error: "Service not running",
+          details: "Cannot connect. Please start Ollama or the Agent Bridge.",
+        }),
+        { status: 503, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    return new Response(
+      JSON.stringify({ error: message }),
+      { status: 500, headers: { "Content-Type": "application/json" } }
+    );
+  }
+}
+
+async function streamFromBridge(messages: Array<{role: string; content: string}>, model: string) {
+  // Get the last user message for the agent
+  const lastUserMsg = messages.filter(m => m.role === "user").pop();
+  if (!lastUserMsg) {
+    return new Response(
+      JSON.stringify({ error: "No user message found" }),
+      { status: 400, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  try {
+    const bridgeResponse = await fetch(`${BRIDGE_BASE}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model,
-        messages,
+        message: lastUserMsg.content,
+        model: model,
         stream: true,
       }),
     });
 
-    if (!ollamaResponse.ok) {
-      const errorText = await ollamaResponse.text();
-      return new Response(
-        JSON.stringify({
-          error: `Ollama error: ${ollamaResponse.status}`,
-          details: errorText,
-        }),
-        { status: ollamaResponse.status, headers: { "Content-Type": "application/json" } }
-      );
+    if (!bridgeResponse.ok) {
+      // Bridge not available, fall back to direct Ollama
+      return await streamFromOllama(messages, model);
     }
 
-    // Stream the NDJSON response from Ollama
+    // Forward the SSE stream from the bridge
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
-        const reader = ollamaResponse.body?.getReader();
+        const reader = bridgeResponse.body?.getReader();
         if (!reader) {
           controller.close();
           return;
@@ -52,23 +76,14 @@ export async function POST(request: NextRequest) {
             if (done) break;
 
             const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split("\n").filter((line: string) => line.trim());
-
-            for (const line of lines) {
-              try {
-                const parsed = JSON.parse(line);
-                // Forward the Ollama response chunks
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify(parsed)}\n\n`));
-              } catch {
-                // Skip malformed lines
-              }
-            }
+            // Forward SSE events from bridge
+            controller.enqueue(encoder.encode(chunk));
           }
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         } catch (error) {
           const errMsg = error instanceof Error ? error.message : "Stream error";
           controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify({ error: errMsg })}\n\n`)
+            encoder.encode(`data: ${JSON.stringify({ type: "error", data: errMsg })}\n\n`)
           );
         } finally {
           controller.close();
@@ -83,21 +98,83 @@ export async function POST(request: NextRequest) {
         Connection: "keep-alive",
       },
     });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    // Check if it's a connection refused error
-    if (message.includes("ECONNREFUSED") || message.includes("fetch failed")) {
-      return new Response(
-        JSON.stringify({
-          error: "Ollama is not running",
-          details: "Cannot connect to localhost:11434. Please start Ollama first.",
-        }),
-        { status: 503, headers: { "Content-Type": "application/json" } }
-      );
-    }
+  } catch {
+    // Bridge not available, fall back to direct Ollama
+    return await streamFromOllama(messages, model);
+  }
+}
+
+async function streamFromOllama(messages: Array<{role: string; content: string}>, model: string) {
+  const ollamaResponse = await fetch(`${OLLAMA_BASE}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model,
+      messages,
+      stream: true,
+    }),
+  });
+
+  if (!ollamaResponse.ok) {
+    const errorText = await ollamaResponse.text();
     return new Response(
-      JSON.stringify({ error: message }),
-      { status: 500, headers: { "Content-Type": "application/json" } }
+      JSON.stringify({
+        error: `Ollama error: ${ollamaResponse.status}`,
+        details: errorText,
+      }),
+      { status: ollamaResponse.status, headers: { "Content-Type": "application/json" } }
     );
   }
+
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      const reader = ollamaResponse.body?.getReader();
+      if (!reader) {
+        controller.close();
+        return;
+      }
+
+      const decoder = new TextDecoder();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value, { stream: true });
+          const lines = chunk.split("\n").filter((line: string) => line.trim());
+
+          for (const line of lines) {
+            try {
+              const parsed = JSON.parse(line);
+              // Convert Ollama format to our unified format
+              const event = {
+                type: "text",
+                data: parsed.message?.content || "",
+              };
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+            } catch {
+              // Skip malformed lines
+            }
+          }
+        }
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : "Stream error";
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify({ type: "error", data: errMsg })}\n\n`)
+        );
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
 }

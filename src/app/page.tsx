@@ -44,8 +44,10 @@ interface Message {
 
 interface SystemStatus {
   connected: boolean;
+  agentAvailable: boolean;
   models: OllamaModel[];
   modelCount: number;
+  uptime?: number;
   error?: string;
 }
 
@@ -291,6 +293,7 @@ export default function ZAIInterface() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [expandedThinking, setExpandedThinking] = useState<Record<string, boolean>>({});
   const [isMobile, setIsMobile] = useState(false);
+  const [useAgent, setUseAgent] = useState(true);
 
   // Refs
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -325,7 +328,7 @@ export default function ZAIInterface() {
         });
       }
     } catch {
-      setStatus({ connected: false, models: [], modelCount: 0, error: "Failed to fetch" });
+      setStatus({ connected: false, agentAvailable: false, models: [], modelCount: 0, error: "Failed to fetch" });
     }
   }, []);
 
@@ -396,7 +399,7 @@ export default function ZAIInterface() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: ollamaMessages, model: selectedModel }),
+        body: JSON.stringify({ messages: ollamaMessages, model: selectedModel, useAgent }),
       });
 
       if (!res.ok) {
@@ -443,26 +446,57 @@ export default function ZAIInterface() {
               break;
             }
 
-            const content = parsed.message?.content || "";
-            tokenCount++;
-
-            if (content.includes("<think")) {
-              isThinking = true;
-            }
-
-            if (isThinking) {
-              thinkingContent += content;
-              if (content.includes("</think")) {
-                isThinking = false;
+            // Bridge agent events (type field present)
+            if (parsed.type) {
+              if (parsed.type === "text") {
+                const content = parsed.data || "";
+                if (content.includes("<think")) {
+                  isThinking = true;
+                }
+                if (isThinking) {
+                  thinkingContent += content;
+                  if (content.includes("</think")) {
+                    isThinking = false;
+                  }
+                } else {
+                  fullContent += content;
+                }
+                tokenCount++;
+              } else if (parsed.type === "tool_start") {
+                const toolName = parsed.data?.name || "unknown";
+                toolCalls = [...new Set([...toolCalls, toolName])];
+              } else if (parsed.type === "tool_result") {
+                // Tool completed - already tracked in toolCalls
+              } else if (parsed.type === "meta") {
+                // Metacognition event - we could display this
+              } else if (parsed.type === "done") {
+                // Agent finished
+              } else if (parsed.type === "error") {
+                fullContent += `\nError: ${parsed.data}`;
               }
             } else {
-              fullContent += content;
-            }
+              // Direct Ollama format (no type field)
+              const content = parsed.message?.content || "";
+              tokenCount++;
 
-            // Detect tool calls
-            const toolMatches = content.match(/\[([a-z_]+)\]/g);
-            if (toolMatches) {
-              toolCalls = [...new Set([...toolCalls, ...toolMatches.map((t) => t.slice(1, -1))])];
+              if (content.includes("<think")) {
+                isThinking = true;
+              }
+
+              if (isThinking) {
+                thinkingContent += content;
+                if (content.includes("</think")) {
+                  isThinking = false;
+                }
+              } else {
+                fullContent += content;
+              }
+
+              // Detect tool calls in text
+              const toolMatches = content.match(/\[([a-z_]+)\]/g);
+              if (toolMatches) {
+                toolCalls = [...new Set([...toolCalls, ...toolMatches.map((t) => t.slice(1, -1))])];
+              }
             }
           } catch {
             // Skip malformed JSON
@@ -564,6 +598,18 @@ export default function ZAIInterface() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {/* Agent mode toggle */}
+          <button
+            onClick={() => setUseAgent(!useAgent)}
+            className={`text-[9px] tracking-wider px-2 py-0.5 border transition-colors duration-150 ${
+              useAgent
+                ? "text-[#00d4ff] border-[rgba(0,212,255,0.2)] bg-[rgba(0,212,255,0.05)]"
+                : "text-[#444444] border-[rgba(255,255,255,0.04)] hover:text-[#666666] hover:border-[rgba(255,255,255,0.08)]"
+            }`}
+            title={useAgent ? "Full agent mode (ReAct + Tools)" : "Simple chat mode (no tools)"}
+          >
+            {useAgent ? "AGENT" : "CHAT"}
+          </button>
           {messages.length > 0 && (
             <button
               onClick={clearChat}
@@ -733,6 +779,26 @@ export default function ZAIInterface() {
                   <span className="text-[9px] text-[#3a3a3a]">UPTIME</span>
                   <span className="text-[10px] text-[#555555] tabular-nums">{formatUptime(uptime)}</span>
                 </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-[9px] text-[#3a3a3a]">MODE</span>
+                  <span className={`text-[10px] ${useAgent ? "text-[#00d4ff]" : "text-[#555555]"}`}>
+                    {useAgent ? "AGENT" : "CHAT"}
+                  </span>
+                </div>
+                {useAgent && status.agentAvailable !== undefined && (
+                  <div className="flex justify-between items-center">
+                    <span className="text-[9px] text-[#3a3a3a]">BRIDGE</span>
+                    <div className="flex items-center gap-1.5">
+                      <Circle
+                        size={4}
+                        className={status.agentAvailable ? "fill-[#00ff88] text-[#00ff88]" : "fill-[#ff8800] text-[#ff8800]"}
+                      />
+                      <span className="text-[10px] text-[#555555]">
+                        {status.agentAvailable ? "Active" : "Inactive"}
+                      </span>
+                    </div>
+                  </div>
+                )}
               </div>
             </section>
 
