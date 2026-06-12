@@ -18,7 +18,7 @@ from .archivos import leer_archivo, escribir_archivo, listar_archivos, buscar_en
 from .apps import abrir_aplicacion, abrir_url, buscar_youtube
 from .proyecto import analizar_proyecto, clonar_repositorio, instalar_dependencias
 from .codigo import generar_codigo
-from .web import buscar_web
+from .web import buscar_web, leer_web, buscar_web_profundo
 
 # Importar schemas predefinidos (para herramientas de sub-modulos)
 from .schemas import TOOL_SCHEMAS as _SCHEMAS_FROM_FILE
@@ -56,6 +56,8 @@ def _register_submodule_tools():
         "procesos_activos": procesos_activos,
         "matar_proceso": matar_proceso,
         "buscar_web": buscar_web,
+        "leer_web": leer_web,
+        "buscar_web_profundo": buscar_web_profundo,
     }
 
     for name, func in submod_tools.items():

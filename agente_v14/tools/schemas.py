@@ -213,11 +213,39 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "buscar_web",
-            "description": "Busca en internet cuando no sabes algo. Retorna resultados con links.",
+            "description": "Busca en internet cuando no sabes algo. Retorna resultados con links y contexto. PRIEMRA opcion cuando no sabes la respuesta.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "consulta": {"type": "string", "description": "Consulta de busqueda"}
+                },
+                "required": ["consulta"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "leer_web",
+            "description": "Lee el contenido completo de una pagina web y extrae el texto util. Usa cuando necesitas informacion detallada de una URL que encontraste con buscar_web.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL de la pagina web a leer"}
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "buscar_web_profundo",
+            "description": "Busqueda profunda: busca en internet, lee las mejores paginas automaticamente y retorna informacion detallada. Usa cuando buscar_web no fue suficiente o necesitas informacion mas completa.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "consulta": {"type": "string", "description": "Lo que quieres buscar en detalle"}
                 },
                 "required": ["consulta"]
             }

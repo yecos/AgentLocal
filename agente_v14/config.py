@@ -62,7 +62,7 @@ EMBED_MODEL_CANDIDATES = ["nomic-embed-text", "mxbai-embed-large", "all-minilm"]
 # ============================================================
 # LIMITES
 # ============================================================
-MAX_REACT_ITERATIONS = 6         # Max vueltas del bucle ReAct (reducido de 8 para velocidad)
+MAX_REACT_ITERATIONS = 8         # Max vueltas del bucle ReAct (subido de 6 para permitir busquedas web)
 MAX_CONVERSATION_MEMORY = 15     # Mensajes de contexto que recuerda (reducido de 20)
 MAX_CONTEXT_CHARS = 2000         # Budget de chars para contexto enriquecido (reducido de 3000)
 MAX_FILE_READ = 8000             # Max chars al leer un archivo

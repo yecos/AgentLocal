@@ -34,10 +34,11 @@ class Metacognition:
 
     # Umbrales de configuracion
     CONFIDENCE_HIGH = 0.8       # Por encima: seguir con confianza
-    CONFIDENCE_LOW = 0.4        # Por debajo: considerar cambiar plan
+    CONFIDENCE_LOW = 0.5        # Por debajo: BUSCAR EN INTERNET (subido de 0.4)
     LOOP_THRESHOLD = 3          # Mismas acciones consecutivas = bucle
     STUCK_THRESHOLD = 4         # Iteraciones sin progreso = atascado
     MIN_IMPROVEMENT = 0.05      # Minima mejora esperada entre iteraciones
+    SEARCH_TRIGGERED = False     # Se activo busqueda web por confianza baja?
 
     def __init__(self):
         self.confidence = 0.7  # Empezamos con confianza moderada
@@ -127,13 +128,34 @@ class Metacognition:
                     f"Los ultimos intentos no avanzan. Considera reformular o pedir aclaracion."
                 )
 
-        # 3. Confianza muy baja
+        # 3. Confianza muy baja -> BUSCAR EN INTERNET
         if self.confidence < self.CONFIDENCE_LOW:
-            reasons.append(
-                f"Confianza baja ({self.confidence:.0%}). "
-                f"Puede que el enfoque actual no sea el correcto. "
-                f"Prueba una estrategia diferente o pide mas contexto al usuario."
-            )
+            # Verificar si ya se busco en internet
+            web_tools = ["buscar_web", "buscar_web_profundo", "leer_web"]
+            already_searched = any(t in self.tool_history for t in web_tools)
+            
+            if not already_searched:
+                reasons.append(
+                    f"Confianza baja ({self.confidence:.0%}). "
+                    f"NO sabes suficiente para responder bien. "
+                    f"DEBES usar buscar_web o buscar_web_profundo ANTES de responder. "
+                    f"NUNCA respondas 'no se' sin haber buscado primero."
+                )
+                self.SEARCH_TRIGGERED = True
+            else:
+                # Ya busco pero sigue con confianza baja - intentar busqueda profunda
+                used_deep = "buscar_web_profundo" in self.tool_history
+                if not used_deep:
+                    reasons.append(
+                        f"Confianza baja ({self.confidence:.0%}) incluso despues de buscar. "
+                        f"Usa buscar_web_profundo para obtener informacion mas detallada, "
+                        f"o leer_web para leer una de las URLs encontradas."
+                    )
+                else:
+                    reasons.append(
+                        f"Confianza baja ({self.confidence:.0%}) despues de busqueda. "
+                        f"Responde con lo que encontraste, indicando las fuentes."
+                    )
 
         # 4. Demasiados errores
         if self.error_count >= 3 and self.success_count == 0:
@@ -186,7 +208,8 @@ class Metacognition:
                 "CAMBIA de herramienta o estrategia. "
                 "Si ejecutar_comando falla, prueba leer_archivo para entender el contexto. "
                 "Si buscar_en_archivos no encuentra, prueba listar_archivos primero. "
-                "Si no puedes resolver con herramientas, responde al usuario pidiendo aclaracion."
+                "Si no puedes resolver con herramientas locales, BUSCA EN INTERNET con buscar_web. "
+                "NUNCA te quedes atascado sin intentar buscar la solucion online."
             )
 
         if "estancado" in reasons_text or "atascado" in reasons_text:
@@ -194,20 +217,33 @@ class Metacognition:
                 "REPLANTEA el problema desde cero. "
                 "1. Que quiere realmente el usuario? "
                 "2. Hay una forma mas simple de resolverlo? "
-                "3. Necesitas informacion adicional? Pidela."
+                "3. Busca en internet como hacerlo: usar buscar_web o buscar_web_profundo. "
+                "4. Si ya buscaste pero no funciona, prueba leer_web con las URLs encontradas."
             )
 
         if "confianza baja" in reasons_text:
+            # Verificar si ya se hizo busqueda web
+            web_tools = ["buscar_web", "buscar_web_profundo", "leer_web"]
+            already_searched = any(t in self.tool_history for t in web_tools)
+            if already_searched:
+                return (
+                    "Ya buscaste en internet. Responde con la informacion que encontraste, "
+                    "menciona las fuentes. Si aun falta informacion, usa buscar_web_profundo "
+                    "o leer_web con URLs especificas."
+                )
             return (
-                "SIMPLIFICA tu enfoque. En vez de pasos complejos, "
-                "haz una accion directa o responde con lo que sabes. "
-                "Si no estas seguro, dile al usuario que opciones ve."
+                "NO SABES lo suficiente. DEBES buscar en internet AHORA. "
+                "Usa buscar_web para encontrar informacion. "
+                "Si los resultados no son suficientes, usa buscar_web_profundo. "
+                "NUNCA respondas sin informacion cuando puedes buscarla."
             )
 
         if "errores" in reasons_text:
             return (
                 "DIAGNOSTICA primero. Antes de intentar de nuevo, "
                 "usa leer_archivo o listar_archivos para entender el estado actual. "
+                "Si no sabes como solucionar el error, BUSCA EN INTERNET: "
+                "buscar_web o buscar_web_profundo para encontrar la solucion. "
                 "Luego ajusta tu comando basado en lo que encuentres."
             )
 
@@ -332,6 +368,7 @@ Si tu respuesta es incompleta, mencionalo y sugiere que puede hacer el usuario.
         self.success_count = 0
         self.plan_changes = 0
         self._last_evaluation = None
+        self.SEARCH_TRIGGERED = False
 
     def get_status(self):
         """Retorna el estado actual de la metacognicion (para debugging/UI)."""

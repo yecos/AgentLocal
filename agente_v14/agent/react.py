@@ -96,6 +96,58 @@ class ReactAgent:
                             "role": "user",
                             "content": f"[Contexto adicional relevante]:\n{extra_context[:500]}\n\nUsa esta informacion si es relevante."
                         })
+            
+            # *** NUEVO: AUTO-BUSQUEDA WEB cuando la confianza baja y no se ha buscado ***
+            if self.metacognition.confidence < 0.5 and iteration > 0:
+                web_tools = ["buscar_web", "buscar_web_profundo", "leer_web"]
+                already_searched = any(t in self.metacognition.tool_history for t in web_tools)
+                
+                if not already_searched:
+                    self._log("Confianza baja: ejecutando busqueda web automatica", "cloud")
+                    try:
+                        search_result = TOOL_FUNCTIONS["buscar_web"](consulta=user_message)
+                        if search_result and "No se encontraron" not in search_result:
+                            self._log(f"Busqueda web automatica exitosa: {search_result[:150]}...", "cloud")
+                            # Inyectar resultados como contexto
+                            messages.append({
+                                "role": "user", 
+                                "content": f"[RESULTADO DE BUSQUEDA WEB AUTOMATICA]:\n{search_result[:1500]}\n\nUsa esta informacion para responder. Si necesitas mas detalle, usa leer_web o buscar_web_profundo."
+                            })
+                            # Guardar en memoria
+                            self.memory.remember(
+                                f"Busqueda web para '{user_message[:50]}': {search_result[:300]}",
+                                metadata={"type": "web_search", "query": user_message[:50]},
+                                fast=True
+                            )
+                            self.metacognition.record_iteration(
+                                iteration=iteration, action_type="tool_call", 
+                                tool_name="buscar_web", result_summary=search_result[:100]
+                            )
+                            self.metacognition.confidence = min(0.7, self.metacognition.confidence + 0.2)
+                        else:
+                            self._log("Busqueda web automatica sin resultados", "warning")
+                    except Exception as e:
+                        self._log(f"Error en busqueda web automatica: {e}", "error")
+                
+                # Si ya se busco pero confianza sigue baja, intentar busqueda profunda
+                elif "buscar_web_profundo" not in self.metacognition.tool_history and self.metacognition.confidence < 0.4:
+                    self._log("Confianza muy baja tras busqueda: ejecutando busqueda profunda", "cloud")
+                    try:
+                        deep_result = TOOL_FUNCTIONS["buscar_web_profundo"](consulta=user_message)
+                        if deep_result and len(deep_result) > 200:
+                            self._log(f"Busqueda profunda exitosa: {deep_result[:150]}...", "cloud")
+                            messages.append({
+                                "role": "user",
+                                "content": f"[RESULTADO DE BUSQUEDA PROFUNDA]:\n{deep_result[:2000]}\n\nResponde al usuario usando esta informacion detallada."
+                            })
+                            self.memory.remember(
+                                f"Busqueda profunda para '{user_message[:50]}': {deep_result[:400]}",
+                                metadata={"type": "web_search_deep", "query": user_message[:50]},
+                                fast=True
+                            )
+                            self.metacognition.confidence = min(0.7, self.metacognition.confidence + 0.15)
+                    except Exception as e:
+                        self._log(f"Error en busqueda profunda automatica: {e}", "error")
 
             if self.supports_tool_calling:
                 action_result = self._react_with_tools(messages, iteration)
@@ -228,6 +280,59 @@ class ReactAgent:
                         "plan_changes": self.metacognition.plan_changes,
                     }
                 }
+
+            # *** NUEVO: AUTO-BUSQUEDA WEB en streaming cuando confianza baja ***
+            if self.metacognition.confidence < 0.5 and iteration > 0:
+                web_tools = ["buscar_web", "buscar_web_profundo", "leer_web"]
+                already_searched = any(t in self.metacognition.tool_history for t in web_tools)
+                
+                if not already_searched:
+                    self._log("Confianza baja (streaming): ejecutando busqueda web automatica", "cloud")
+                    yield {"type": "tool_start", "data": {"name": "buscar_web", "params": {"consulta": user_message}}}
+                    try:
+                        search_result = TOOL_FUNCTIONS["buscar_web"](consulta=user_message)
+                        if search_result and "No se encontraron" not in search_result:
+                            self._log(f"Busqueda web automatica exitosa", "cloud")
+                            yield {"type": "tool_result", "data": {"tool": {"name": "buscar_web"}, "result": search_result[:200]}}
+                            messages.append({
+                                "role": "user", 
+                                "content": f"[RESULTADO DE BUSQUEDA WEB AUTOMATICA]:\n{search_result[:1500]}\n\nUsa esta informacion para responder."
+                            })
+                            self.memory.remember(
+                                f"Busqueda web para '{user_message[:50]}': {search_result[:300]}",
+                                metadata={"type": "web_search", "query": user_message[:50]},
+                                fast=True
+                            )
+                            self.metacognition.record_iteration(
+                                iteration=iteration, action_type="tool_call",
+                                tool_name="buscar_web", result_summary=search_result[:100]
+                            )
+                            self.metacognition.confidence = min(0.7, self.metacognition.confidence + 0.2)
+                        else:
+                            self._log("Busqueda web automatica sin resultados", "warning")
+                    except Exception as e:
+                        self._log(f"Error en busqueda web automatica: {e}", "error")
+                
+                elif "buscar_web_profundo" not in self.metacognition.tool_history and self.metacognition.confidence < 0.4:
+                    self._log("Confianza muy baja tras busqueda: ejecutando busqueda profunda", "cloud")
+                    yield {"type": "tool_start", "data": {"name": "buscar_web_profundo", "params": {"consulta": user_message}}}
+                    try:
+                        deep_result = TOOL_FUNCTIONS["buscar_web_profundo"](consulta=user_message)
+                        if deep_result and len(deep_result) > 200:
+                            self._log(f"Busqueda profunda exitosa", "cloud")
+                            yield {"type": "tool_result", "data": {"tool": {"name": "buscar_web_profundo"}, "result": deep_result[:200]}}
+                            messages.append({
+                                "role": "user",
+                                "content": f"[RESULTADO DE BUSQUEDA PROFUNDA]:\n{deep_result[:2000]}\n\nResponde usando esta informacion."
+                            })
+                            self.memory.remember(
+                                f"Busqueda profunda para '{user_message[:50]}': {deep_result[:400]}",
+                                metadata={"type": "web_search_deep", "query": user_message[:50]},
+                                fast=True
+                            )
+                            self.metacognition.confidence = min(0.7, self.metacognition.confidence + 0.15)
+                    except Exception as e:
+                        self._log(f"Error en busqueda profunda automatica: {e}", "error")
 
             # ---- NUCLEO: Streaming token-a-token ----
             full_text = ""
@@ -819,6 +924,15 @@ class ReactAgent:
         if relevant_knowledge:
             knowledge_text = "\n".join([f"- {k['content']}" for k in relevant_knowledge[:3]])
             system_content += f"\n\nConocimiento adicional:\n{knowledge_text}"
+        
+        # *** NUEVO: Conocimiento aprendido de busquedas web previas ***
+        try:
+            from tools.web import get_web_learned
+            web_knowledge = get_web_learned(new_message)
+            if web_knowledge:
+                system_content += f"\n\n--- CONOCIMIENTO WEB APRENDIDO ---\n{web_knowledge}"
+        except Exception:
+            pass
 
         messages = [{"role": "system", "content": system_content}]
 
@@ -998,7 +1112,7 @@ class ReactAgent:
         return False
 
     def _save_interaction(self, user_message, final_response):
-        """Guarda la interaccion en la triple memoria."""
+        """Guarda la interaccion en la triple memoria + auto-aprende de busquedas web."""
         self.memory.add_conversation("user", user_message)
         self.memory.add_conversation("assistant", final_response)
         # Guardar interaccion sin embedding (mas rapido)
@@ -1008,3 +1122,22 @@ class ReactAgent:
             fast=True  # skip_embedding para velocidad
         )
         self.memory.set_success(final_response[:100])
+        
+        # *** NUEVO: Auto-aprender de busquedas web ***
+        # Si se uso buscar_web en esta interaccion, guardar el conocimiento
+        web_tools_used = [t for t in self.metacognition.tool_history 
+                         if t in ["buscar_web", "buscar_web_profundo", "leer_web"]]
+        if web_tools_used:
+            # Guardar que se aprendio algo de internet
+            learning.add_knowledge(
+                content=f"Pregunta: {user_message[:100]} | Respuesta: {final_response[:200]} | Fuentes: busqueda web",
+                topic=f"web_learned:{user_message[:50]}",
+                source="web_search"
+            )
+            # Tambien guardar en el cache de conocimiento web
+            try:
+                from tools.web import get_web_learned
+                web_knowledge = get_web_learned(user_message)
+                # El conocimiento ya se guardo automaticamente en _auto_learn_from_search
+            except Exception:
+                pass
