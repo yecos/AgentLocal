@@ -9,6 +9,8 @@ Cada skill tiene un SKILL.md con metadata y scripts en /scripts/.
 El loader los parsea y genera herramientas callable.
 
 v16: Nueva arquitectura - Skills como herramientas de primera clase.
+v16.1: Carga de conocimiento de referencia - Los skills de referencia
+       ahora proveen contexto enriquecido para el agente, no solo metadata.
 =============================================================
 """
 
@@ -182,19 +184,42 @@ _REFERENCE_SKILLS = {
     "skill-finder-cn", "image-understand",
 }
 
+# Limite maximo de caracteres para el texto de conocimiento extraido
+_MAX_KNOWLEDGE_CHARS = 2000
+
+# Patrones de secciones relevantes para extraer de SKILL.md
+_SECTION_PATTERNS = [
+    # Patrones para secciones de uso/como usar
+    re.compile(r"^#{1,3}\s*(?:when\s+to\s+use|how\s+to\s+use|usage|uso|como\s+usar|trigger|workflow)", re.IGNORECASE | re.MULTILINE),
+    # Patrones para secciones de reglas/guia
+    re.compile(r"^#{1,3}\s*(?:core\s+rules|rules|guidelines|reglas|guia|key\s+(?:rules|guidelines)|important|best\s+practices)", re.IGNORECASE | re.MULTILINE),
+    # Patrones para secciones de capacidades/overview
+    re.compile(r"^#{1,3}\s*(?:overview|capabilities|core\s+capabilities|capacidades|scope|architecture)", re.IGNORECASE | re.MULTILINE),
+    # Patrones para secciones de criterios de exito
+    re.compile(r"^#{1,3}\s*(?:success\s+criteria|criterios|success|criterios\s+de\s+exito)", re.IGNORECASE | re.MULTILINE),
+]
+
 
 # ============================================================
-# PARSER DE SKILL.MD
+# PARSER DE SKILL.MD (ENHANCED - extrae conocimiento)
 # ============================================================
 
 def parse_skill_md(skill_dir: str) -> dict:
-    """Parsea un archivo SKILL.md y extrae metadata y capacidades.
+    """Parsea un archivo SKILL.md y extrae metadata, capacidades y conocimiento.
+
+    Lee el SKILL.md del directorio del skill, extrae el frontmatter como metadata,
+    y ademas extrae contenido util del cuerpo del markdown:
+    - Primeros 500 caracteres despues del frontmatter (descripcion general)
+    - Secciones de uso/como usar
+    - Secciones de reglas/guia
+    - Secciones de capacidades/overview
+    Todo esto se almacena en el campo 'knowledge' del dict retornado.
 
     Args:
         skill_dir: Ruta al directorio del skill
 
     Returns:
-        Dict con name, description, scripts, capabilities
+        Dict con name, description, scripts, capabilities, knowledge
     """
     skill_md_path = os.path.join(skill_dir, "SKILL.md")
     if not os.path.exists(skill_md_path):
@@ -205,6 +230,7 @@ def parse_skill_md(skill_dir: str) -> dict:
 
     # Parsear frontmatter
     metadata = {}
+    body = content
     if content.startswith("---"):
         parts = content.split("---", 2)
         if len(parts) >= 3:
@@ -212,6 +238,8 @@ def parse_skill_md(skill_dir: str) -> dict:
                 if ":" in line:
                     key, _, val = line.partition(":")
                     metadata[key.strip()] = val.strip()
+            # El cuerpo es todo lo que va despues del segundo ---
+            body = parts[2].strip()
 
     # Buscar scripts disponibles
     scripts_dir = os.path.join(skill_dir, "scripts")
@@ -221,12 +249,48 @@ def parse_skill_md(skill_dir: str) -> dict:
             if f.endswith((".ts", ".js", ".sh", ".py")):
                 scripts.append(os.path.join(scripts_dir, f))
 
+    # ---- Extraccion de conocimiento enriquecido ----
+    knowledge_parts = []
+
+    # 1. Primeros 500 caracteres del cuerpo (descripcion general del skill)
+    intro_text = body[:500].strip()
+    if intro_text:
+        knowledge_parts.append(intro_text)
+
+    # 2. Extraer secciones relevantes (uso, reglas, capacidades, etc.)
+    for pattern in _SECTION_PATTERNS:
+        match = pattern.search(body)
+        if match:
+            # Extraer desde el heading hasta el siguiente heading del mismo nivel o superior
+            section_start = match.start()
+            section_header_level = len(match.group(0)) - len(match.group(0).lstrip('#'))
+            # Buscar el final de la seccion (siguiente heading de nivel <= al encontrado)
+            next_heading = re.search(
+                rf"^#{{1,{section_header_level}}}\s",
+                body[match.end():],
+                re.MULTILINE
+            )
+            if next_heading:
+                section_end = match.end() + next_heading.start()
+            else:
+                section_end = min(len(body), section_start + 1500)
+
+            section_text = body[section_start:section_end].strip()
+            if section_text and section_text not in knowledge_parts:
+                knowledge_parts.append(section_text)
+
+    # Combinar y truncar conocimiento
+    knowledge = "\n\n---\n\n".join(knowledge_parts)
+    if len(knowledge) > _MAX_KNOWLEDGE_CHARS:
+        knowledge = knowledge[:_MAX_KNOWLEDGE_CHARS - 3] + "..."
+
     return {
         "name": metadata.get("name", os.path.basename(skill_dir)),
         "description": metadata.get("description", ""),
         "scripts": scripts,
         "path": skill_dir,
         "has_cli": _detect_cli_capability(content),
+        "knowledge": knowledge,  # Campo nuevo: conocimiento extraido del SKILL.md
     }
 
 
@@ -234,6 +298,332 @@ def _detect_cli_capability(content: str) -> bool:
     """Detecta si el skill menciona comandos CLI de z-ai."""
     cli_patterns = ["z-ai function", "z-ai-generate", "z-ai function"]
     return any(p in content for p in cli_patterns)
+
+
+# ============================================================
+# CARGADOR DE CONOCIMIENTO DE SKILLS
+# ============================================================
+
+def load_skill_knowledge(skill_dir_name: str) -> str:
+    """Lee el SKILL.md de un skill y extrae texto de conocimiento relevante.
+
+    Esta funcion carga el contenido completo del SKILL.md y extrae las secciones
+    mas utiles: descripcion, instrucciones de uso, reglas clave y guias.
+    Se usa para inyectar contexto enriquecido en el prompt del agente.
+
+    Args:
+        skill_dir_name: Nombre del directorio del skill (ej: "blog-writer", "finance")
+
+    Returns:
+        Texto de conocimiento truncado a 2000 caracteres, o string vacio si no se encuentra
+    """
+    skill_dir = os.path.join(_SKILLS_ROOT, skill_dir_name)
+    skill_md_path = os.path.join(skill_dir, "SKILL.md")
+
+    if not os.path.exists(skill_md_path):
+        logger.debug(f"[SkillKnowledge] SKILL.md no encontrado para: {skill_dir_name}")
+        return ""
+
+    try:
+        with open(skill_md_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # Separar frontmatter del cuerpo
+        body = content
+        if content.startswith("---"):
+            parts = content.split("---", 2)
+            if len(parts) >= 3:
+                body = parts[2].strip()
+
+        knowledge_parts = []
+
+        # 1. Extraer descripcion general (primeros 500 chars del cuerpo)
+        intro = body[:500].strip()
+        if intro:
+            knowledge_parts.append(f"[DESCRIPCION]: {intro}")
+
+        # 2. Extraer secciones de uso
+        usage_match = re.search(
+            r"^#{1,3}\s*(?:when\s+to\s+use|how\s+to\s+use|usage|uso|como\s+usar|trigger|workflow).*$",
+            body,
+            re.IGNORECASE | re.MULTILINE,
+        )
+        if usage_match:
+            section_text = _extract_section(body, usage_match)
+            if section_text:
+                knowledge_parts.append(f"[USO]: {section_text}")
+
+        # 3. Extraer reglas y guias clave
+        rules_match = re.search(
+            r"^#{1,3}\s*(?:core\s+rules|rules|guidelines|reglas|guia|key\s+(?:rules|guidelines)|important|best\s+practices).*$",
+            body,
+            re.IGNORECASE | re.MULTILINE,
+        )
+        if rules_match:
+            section_text = _extract_section(body, rules_match)
+            if section_text:
+                knowledge_parts.append(f"[REGLAS]: {section_text}")
+
+        # 4. Extraer capacidades/overview si no se capturo ya
+        cap_match = re.search(
+            r"^#{1,3}\s*(?:overview|capabilities|core\s+capabilities|capacidades|scope|architecture).*$",
+            body,
+            re.IGNORECASE | re.MULTILINE,
+        )
+        if cap_match:
+            section_text = _extract_section(body, cap_match)
+            if section_text:
+                knowledge_parts.append(f"[CAPACIDADES]: {section_text}")
+
+        # Combinar todas las partes
+        result = "\n\n".join(knowledge_parts)
+
+        # Truncar al limite maximo
+        if len(result) > _MAX_KNOWLEDGE_CHARS:
+            result = result[:_MAX_KNOWLEDGE_CHARS - 3] + "..."
+
+        return result
+
+    except Exception as e:
+        logger.warning(f"[SkillKnowledge] Error leyendo SKILL.md de {skill_dir_name}: {e}")
+        return ""
+
+
+def _extract_section(body: str, match: re.Match) -> str:
+    """Extrae el texto de una seccion desde un heading hasta el siguiente heading del mismo nivel o superior.
+
+    Args:
+        body: Texto completo del cuerpo del SKILL.md
+        match: Objeto Match del heading encontrado
+
+    Returns:
+        Texto de la seccion, truncado a 800 caracteres maximo
+    """
+    section_start = match.start()
+    header_text = match.group(0)
+    # Determinar nivel del heading (numero de #)
+    header_level = len(header_text) - len(header_text.lstrip('#'))
+
+    # Buscar el siguiente heading de nivel igual o superior
+    remaining = body[match.end():]
+    next_heading = re.search(rf"^#{{1,{header_level}}}\s", remaining, re.MULTILINE)
+
+    if next_heading:
+        section_end = match.end() + next_heading.start()
+    else:
+        section_end = min(len(body), section_start + 1500)
+
+    section_text = body[section_start:section_end].strip()
+
+    # Limitar tamano de la seccion para no saturar el contexto
+    if len(section_text) > 800:
+        section_text = section_text[:797] + "..."
+
+    return section_text
+
+
+# ============================================================
+# BUSQUEDA DE SKILLS RELEVANTES
+# ============================================================
+
+def find_relevant_skills(query: str, top_k: int = 3) -> list[dict]:
+    """Busca skills relevantes para una consulta del usuario usando coincidencia de palabras clave.
+
+    Analiza la consulta del usuario, la divide en palabras clave, y busca
+    coincidencias en los nombres y descripciones de todos los skills cargados
+    (tanto herramientas como referencia). Para cada skill relevante, carga
+    su texto de conocimiento completo.
+
+    Args:
+        query: Consulta o descripcion de tarea del usuario
+        top_k: Numero maximo de skills relevantes a retornar (default: 3)
+
+    Returns:
+        Lista de dicts, cada uno con: name, relevance_score, knowledge_text
+        Ordenada por relevance_score descendente
+    """
+    if not _loaded_skills:
+        logger.debug("[SkillFinder] No hay skills cargados aun")
+        return []
+
+    # Normalizar query y extraer palabras clave
+    query_lower = query.lower()
+    # Eliminar stopwords simples en espanol e ingles
+    _stopwords = {
+        "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del",
+        "al", "a", "en", "por", "para", "con", "sin", "sobre", "entre",
+        "que", "se", "su", "es", "son", "fue", "ser", "estar", "hay",
+        "como", "mas", "menos", "muy", "este", "esta", "esto", "eso",
+        "the", "a", "an", "is", "are", "was", "were", "be", "been",
+        "being", "have", "has", "had", "do", "does", "did", "will",
+        "would", "could", "should", "may", "might", "shall", "can",
+        "to", "of", "in", "for", "on", "with", "at", "by", "from",
+        "and", "or", "but", "not", "no", "if", "then", "than", "so",
+        "it", "its", "this", "that", "these", "those", "me", "my",
+        "tu", "te", "ti", "le", "les", "nos", "les", "yo",
+    }
+    keywords = [
+        w for w in re.split(r"[\s,.;:!?()\-_]+", query_lower)
+        if len(w) > 2 and w not in _stopwords
+    ]
+
+    if not keywords:
+        return []
+
+    # Evaluar cada skill cargado
+    scored_skills = []
+    for skill_key, skill_data in _loaded_skills.items():
+        score = 0
+        skill_info = skill_data.get("info", {})
+        skill_name = skill_info.get("name", skill_key)
+        skill_description = skill_info.get("description", "")
+        skill_knowledge = skill_info.get("knowledge", "")
+
+        # Texto combinado para busqueda (nombre + descripcion + conocimiento)
+        searchable_text = f"{skill_name} {skill_description} {skill_knowledge}".lower()
+
+        # Calcular puntuacion por coincidencias de palabras clave
+        for kw in keywords:
+            # Coincidencia exacta de palabra clave
+            if kw in searchable_text:
+                # Peso extra si coincide en el nombre
+                if kw in skill_name.lower():
+                    score += 3
+                # Peso medio si coincide en la descripcion
+                elif kw in skill_description.lower():
+                    score += 2
+                # Peso menor si coincide solo en el conocimiento
+                else:
+                    score += 1
+
+        # Bonus por coincidencias parciales (substring en nombre)
+        for kw in keywords:
+            if len(kw) >= 4:
+                for word in skill_name.lower().replace("-", " ").replace("_", " ").split():
+                    if kw[:4] == word[:4] and kw != word:
+                        score += 1
+
+        if score > 0:
+            # Cargar conocimiento completo del skill para los relevantes
+            dir_name = skill_data.get("dir", "")
+            knowledge_text = ""
+            if dir_name and os.path.isdir(dir_name):
+                # Intentar obtener knowledge del skill_data ya cargado
+                knowledge_text = skill_knowledge
+                # Si no hay knowledge precargado, cargarlo dinamicamente
+                if not knowledge_text:
+                    # Determinar el nombre del directorio del skill
+                    skill_dir_name = os.path.basename(dir_name)
+                    knowledge_text = load_skill_knowledge(skill_dir_name)
+
+            scored_skills.append({
+                "name": skill_name,
+                "key": skill_key,
+                "relevance_score": score,
+                "knowledge_text": knowledge_text,
+                "is_reference": skill_data.get("is_reference", False),
+            })
+
+    # Ordenar por puntuacion descendente y tomar top_k
+    scored_skills.sort(key=lambda x: x["relevance_score"], reverse=True)
+    result = scored_skills[:top_k]
+
+    logger.debug(
+        f"[SkillFinder] Query: '{query[:50]}...' -> "
+        f"{len(scored_skills)} skills relevantes, top {min(top_k, len(scored_skills))}: "
+        f"{[s['name'] for s in result]}"
+    )
+
+    return result
+
+
+# ============================================================
+# GENERADOR DE CONTEXTO PARA EL AGENTE
+# ============================================================
+
+def get_skills_context(query: str) -> str:
+    """Genera un string de contexto con skills relevantes para inyectar en el prompt del agente.
+
+    Busca los top 3 skills relevantes para la consulta del usuario,
+    carga su conocimiento, y lo formatea como texto que puede ser
+    inyectado directamente en el system prompt o como contexto adicional.
+
+    Args:
+        query: Consulta o descripcion de tarea del usuario
+
+    Returns:
+        String formateado con contexto de skills relevantes, o string vacio si no hay relevantes
+    """
+    relevant = find_relevant_skills(query, top_k=3)
+
+    if not relevant:
+        return ""
+
+    context_lines = ["SKILLS RELEVANTES PARA ESTA TAREA:"]
+
+    for skill in relevant:
+        name = skill["name"]
+        knowledge = skill["knowledge_text"]
+        score = skill["relevance_score"]
+        is_ref = skill.get("is_reference", False)
+
+        # Indicador de tipo de skill
+        skill_type = "(referencia)" if is_ref else "(herramienta)"
+
+        # Si hay conocimiento, usarlo; si no, usar nombre y score
+        if knowledge:
+            # Truncar conocimiento para no saturar el contexto del prompt
+            excerpt = knowledge[:600]
+            if len(knowledge) > 600:
+                excerpt += "..."
+            context_lines.append(f"- {name} {skill_type}: {excerpt}")
+        else:
+            context_lines.append(f"- {name} {skill_type}: [sin detalle disponible, score={score}]")
+
+    context = "\n".join(context_lines)
+
+    logger.info(
+        f"[SkillContext] Contexto generado para query '{query[:50]}...': "
+        f"{len(relevant)} skills, {len(context)} caracteres"
+    )
+
+    return context
+
+
+# ============================================================
+# INTEGRACION CON REACTAGENT
+# ============================================================
+
+def enrich_prompt_with_skills(user_message: str, system_prompt: str = "") -> str:
+    """Enriquece un prompt del sistema con contexto de skills relevantes.
+
+    Funcion de integracion para ReactAgent: recibe el mensaje del usuario
+    y el prompt del sistema actual, busca skills relevantes, y los inyecta
+    como contexto adicional al final del prompt del sistema.
+
+    Uso desde react.py:
+        from tools.skill_loader import enrich_prompt_with_skills
+        enriched = enrich_prompt_with_skills(user_message, current_system_prompt)
+
+    Args:
+        user_message: Mensaje del usuario (se usa para buscar skills relevantes)
+        system_prompt: Prompt del sistema actual (opcional, se appendea al final)
+
+    Returns:
+        Prompt del sistema enriquecido con contexto de skills, o el original si no hay relevantes
+    """
+    skills_ctx = get_skills_context(user_message)
+
+    if not skills_ctx:
+        return system_prompt
+
+    # Inyectar contexto de skills antes de cualquier seccion final del prompt
+    # Separador claro para que el LLM distinga el contexto de skills
+    enriched = f"{system_prompt}\n\n{skills_ctx}" if system_prompt else skills_ctx
+
+    logger.debug(f"[SkillEnrich] Prompt enriquecido con {len(skills_ctx)} chars de contexto de skills")
+
+    return enriched
 
 
 # ============================================================
@@ -391,6 +781,9 @@ _load_errors = []
 def load_all_skills() -> dict:
     """Carga todos los skills disponibles y los registra como herramientas.
 
+    Ahora tambien extrae el conocimiento (knowledge) de cada SKILL.md
+    para que este disponible como contexto enriquecido para el agente.
+
     Returns:
         Dict con resumen de carga: {loaded: int, errors: int, skills: list}
     """
@@ -408,7 +801,7 @@ def load_all_skills() -> dict:
         tool_name = config["tool_name"]
 
         try:
-            # Parsear SKILL.md si existe
+            # Parsear SKILL.md si existe (ahora con conocimiento enriquecido)
             skill_info = parse_skill_md(skill_dir) if os.path.isdir(skill_dir) else {}
             _loaded_skills[tool_name] = {
                 "config": config,
@@ -429,11 +822,12 @@ def load_all_skills() -> dict:
             _load_errors.append(f"{tool_name}: {str(e)}")
             logger.error(f"[SkillLoader] Error cargando {skill_dir_name}: {e}")
 
-    # Cargar skills de referencia (solo metadata, no herramientas)
+    # Cargar skills de referencia (metadata + conocimiento, no herramientas)
     for skill_dir_name in _REFERENCE_SKILLS:
         skill_dir = os.path.join(_SKILLS_ROOT, skill_dir_name)
         if os.path.isdir(skill_dir):
             try:
+                # parse_skill_md ahora extrae conocimiento en el campo 'knowledge'
                 skill_info = parse_skill_md(skill_dir)
                 _loaded_skills[skill_dir_name] = {
                     "config": None,
@@ -447,14 +841,22 @@ def load_all_skills() -> dict:
     loaded_count = sum(1 for v in _loaded_skills.values() if v.get("config"))
     ref_count = sum(1 for v in _loaded_skills.values() if v.get("is_reference"))
 
+    # Contar cuantos skills tienen conocimiento extraido
+    knowledge_count = sum(
+        1 for v in _loaded_skills.values()
+        if v.get("info", {}).get("knowledge", "")
+    )
+
     logger.info(
         f"[SkillLoader] Carga completa: {loaded_count} herramientas, "
-        f"{ref_count} referencia, {_load_errors.__len__()} errores"
+        f"{ref_count} referencia, {knowledge_count} con conocimiento, "
+        f"{len(_load_errors)} errores"
     )
 
     return {
         "loaded": loaded_count,
         "reference": ref_count,
+        "with_knowledge": knowledge_count,
         "errors": len(_load_errors),
         "skills": list(_loaded_skills.keys()),
         "error_details": _load_errors,
@@ -476,16 +878,21 @@ def get_skill_info(tool_name: str) -> Optional[dict]:
 def list_available_skills() -> list:
     """Lista todos los skills disponibles (herramientas + referencia).
 
+    Ahora incluye el campo 'knowledge_available' para indicar si el skill
+    tiene conocimiento extraido utilizable como contexto.
+
     Returns:
-        Lista de dicts con name, description, is_tool
+        Lista de dicts con name, description, is_tool, is_reference, knowledge_available
     """
     result = []
     for name, data in _loaded_skills.items():
+        info = data.get("info", {})
         result.append({
             "name": name,
-            "description": data.get("info", {}).get("description", ""),
+            "description": info.get("description", ""),
             "is_tool": data.get("config") is not None,
             "is_reference": data.get("is_reference", False),
+            "knowledge_available": bool(info.get("knowledge", "")),
         })
     return result
 
@@ -498,10 +905,15 @@ def get_skills_status() -> dict:
     """
     tool_count = sum(1 for v in _loaded_skills.values() if v.get("config"))
     ref_count = sum(1 for v in _loaded_skills.values() if v.get("is_reference"))
+    knowledge_count = sum(
+        1 for v in _loaded_skills.values()
+        if v.get("info", {}).get("knowledge", "")
+    )
     return {
         "total_skills": len(_loaded_skills),
         "tool_skills": tool_count,
         "reference_skills": ref_count,
+        "with_knowledge": knowledge_count,
         "errors": len(_load_errors),
         "skills_root": _SKILLS_ROOT,
         "loaded": bool(_loaded_skills),

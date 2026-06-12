@@ -17,6 +17,17 @@ import {
   PanelRightClose,
   Activity,
   Circle,
+  Target,
+  Globe,
+  Sparkles,
+  ListTodo,
+  X,
+  Loader2,
+  CheckCircle2,
+  CircleDot,
+  CircleEllipsis,
+  AlertCircle,
+  RefreshCw,
 } from "lucide-react";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -76,6 +87,63 @@ interface SessionStats {
   toolsUsed: number;
   avgResponseTime: number;
   totalTokens: number;
+}
+
+// ─── v17 Sidebar Types ──────────────────────────────────────────────────────
+
+interface PlanTask {
+  id: string;
+  description: string;
+  status: "pending" | "in_progress" | "completed" | "failed";
+  result?: string;
+}
+
+interface PlanData {
+  active: boolean;
+  goal?: string;
+  tasks?: PlanTask[];
+  current_task_index?: number;
+  task_type?: string;
+  created_at?: string;
+  error?: string;
+}
+
+interface SkillInfo {
+  name: string;
+  description?: string;
+  category?: string;
+  loaded?: boolean;
+}
+
+interface ToolInfo {
+  name: string;
+  description?: string;
+  category?: string;
+  parameters?: Record<string, unknown>;
+}
+
+interface BrowserStatus {
+  active: boolean;
+  url?: string;
+  title?: string;
+  error?: string;
+}
+
+interface OrchestratorStatus {
+  running: boolean;
+  current_task?: string;
+  mode?: string;
+  error?: string;
+}
+
+interface SidebarData {
+  plan: PlanData | null;
+  skills: SkillInfo[];
+  tools: ToolInfo[];
+  browserStatus: BrowserStatus | null;
+  orchestratorStatus: OrchestratorStatus | null;
+  loading: boolean;
+  error: string | null;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -183,6 +251,120 @@ function HardwareStats() {
             className="h-full bg-[rgba(255,217,61,0.35)] transition-all duration-1000"
             style={{ width: stats.disk > 0 ? `${stats.disk}%` : '0%' }}
           />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Plan Modal Component ────────────────────────────────────────────────────
+
+function PlanModal({
+  isOpen,
+  onClose,
+  onSubmit,
+  isCreating,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  onSubmit: (goal: string, taskType: string) => void;
+  isCreating: boolean;
+}) {
+  const [goal, setGoal] = useState("");
+  const [taskType, setTaskType] = useState("general");
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(0,0,0,0.7)] animate-fade-in">
+      <div className="w-full max-w-md mx-4 border border-[rgba(0,212,255,0.15)] bg-[#0a0a0a] shadow-[0_0_60px_rgba(0,212,255,0.05)]">
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-3 border-b border-[rgba(255,255,255,0.06)]">
+          <div className="flex items-center gap-2">
+            <Target size={14} className="text-[rgba(0,212,255,0.7)]" />
+            <span className="text-[12px] tracking-[0.15em] text-[#e0e0e0] uppercase font-medium">Create Plan</span>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-1 text-[#555555] hover:text-[#e0e0e0] transition-colors"
+          >
+            <X size={14} />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="px-5 py-4 space-y-4">
+          <div>
+            <label className="text-[10px] tracking-[0.15em] text-[#555555] uppercase block mb-2">
+              Goal
+            </label>
+            <textarea
+              value={goal}
+              onChange={(e) => setGoal(e.target.value)}
+              placeholder="Describe what you want to accomplish..."
+              rows={3}
+              className="w-full bg-[rgba(255,255,255,0.03)] border border-[rgba(255,255,255,0.08)] text-[13px] text-[#e0e0e0] placeholder-[#3a3a3a] resize-none outline-none px-3 py-2 leading-[1.6] focus:border-[rgba(0,212,255,0.25)] transition-colors"
+              style={{ fontFamily: "inherit" }}
+              autoFocus
+            />
+          </div>
+          <div>
+            <label className="text-[10px] tracking-[0.15em] text-[#555555] uppercase block mb-2">
+              Task Type
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {[
+                { id: "general", label: "General" },
+                { id: "research", label: "Research" },
+                { id: "coding", label: "Coding" },
+                { id: "browser", label: "Browser" },
+                { id: "file_ops", label: "File Ops" },
+              ].map((type) => (
+                <button
+                  key={type.id}
+                  onClick={() => setTaskType(type.id)}
+                  className={`text-[10px] tracking-wider px-2.5 py-1 border transition-colors duration-150 ${
+                    taskType === type.id
+                      ? "text-[#00d4ff] border-[rgba(0,212,255,0.25)] bg-[rgba(0,212,255,0.06)]"
+                      : "text-[#555555] border-[rgba(255,255,255,0.06)] hover:text-[#777777] hover:border-[rgba(255,255,255,0.1)]"
+                  }`}
+                >
+                  {type.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-end gap-3 px-5 py-3 border-t border-[rgba(255,255,255,0.06)]">
+          <button
+            onClick={onClose}
+            className="text-[10px] tracking-wider text-[#555555] hover:text-[#777777] transition-colors px-3 py-1.5"
+          >
+            CANCEL
+          </button>
+          <button
+            onClick={() => {
+              if (goal.trim()) {
+                onSubmit(goal.trim(), taskType);
+              }
+            }}
+            disabled={!goal.trim() || isCreating}
+            className="text-[10px] tracking-wider text-[#000000] bg-[rgba(0,212,255,0.8)] hover:bg-[rgba(0,212,255,1)] disabled:opacity-30 disabled:hover:bg-[rgba(0,212,255,0.8)] transition-colors px-4 py-1.5 flex items-center gap-1.5"
+          >
+            {isCreating ? (
+              <>
+                <Loader2 size={10} className="animate-spin" />
+                CREATING
+              </>
+            ) : (
+              <>
+                <Target size={10} />
+                CREATE PLAN
+              </>
+            )}
+          </button>
         </div>
       </div>
     </div>
@@ -436,6 +618,28 @@ export default function ZAIInterface() {
   const [isMobile, setIsMobile] = useState(false);
   const [useAgent, setUseAgent] = useState(true);
 
+  // v17 Sidebar data
+  const [sidebarData, setSidebarData] = useState<SidebarData>({
+    plan: null,
+    skills: [],
+    tools: [],
+    browserStatus: null,
+    orchestratorStatus: null,
+    loading: true,
+    error: null,
+  });
+
+  // v17 Plan modal
+  const [planModalOpen, setPlanModalOpen] = useState(false);
+  const [planCreating, setPlanCreating] = useState(false);
+
+  // v17 Sidebar section collapse
+  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
+
+  const toggleSection = (section: string) => {
+    setCollapsedSections((prev) => ({ ...prev, [section]: !prev[section] }));
+  };
+
   // Refs
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -473,6 +677,63 @@ export default function ZAIInterface() {
     }
   }, []);
 
+  // ─── Fetch Sidebar Data (v17) ────────────────────────────────────────────
+
+  const fetchSidebarData = useCallback(async () => {
+    setSidebarData((prev) => ({ ...prev, loading: true, error: null }));
+
+    try {
+      const results = await Promise.allSettled([
+        fetch("/api/plan").then((r) => r.json()),
+        fetch("/api/skills").then((r) => r.json()),
+        fetch("/api/tools").then((r) => r.json()),
+      ]);
+
+      const planData = results[0].status === "fulfilled" ? results[0].value : null;
+      const skillsData = results[1].status === "fulfilled" ? results[1].value : null;
+      const toolsData = results[2].status === "fulfilled" ? results[2].value : null;
+
+      setSidebarData({
+        plan: planData && !planData.error ? planData : null,
+        skills: Array.isArray(skillsData?.skills) ? skillsData.skills : Array.isArray(skillsData) ? skillsData : [],
+        tools: Array.isArray(toolsData?.tools) ? toolsData.tools : Array.isArray(toolsData) ? toolsData : [],
+        browserStatus: planData?.browser ? { active: true, ...planData.browser } : null,
+        orchestratorStatus: planData?.orchestrator ? { running: true, ...planData.orchestrator } : null,
+        loading: false,
+        error: null,
+      });
+    } catch (error) {
+      setSidebarData((prev) => ({
+        ...prev,
+        loading: false,
+        error: error instanceof Error ? error.message : "Failed to fetch sidebar data",
+      }));
+    }
+  }, []);
+
+  // ─── Create Plan (v17) ──────────────────────────────────────────────────
+
+  const createPlan = async (goal: string, taskType: string) => {
+    setPlanCreating(true);
+    try {
+      const res = await fetch("/api/plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ goal, task_type: taskType }),
+      });
+      const data = await res.json();
+
+      if (data.success || data.active) {
+        await fetchSidebarData();
+        setPlanModalOpen(false);
+      }
+    } catch {
+      // Error handled silently - sidebar will show stale data
+    } finally {
+      setPlanCreating(false);
+    }
+  };
+
   // ─── Effects ─────────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -480,6 +741,12 @@ export default function ZAIInterface() {
     const interval = setInterval(fetchStatus, 10000);
     return () => clearInterval(interval);
   }, [fetchStatus]);
+
+  useEffect(() => {
+    fetchSidebarData();
+    const interval = setInterval(fetchSidebarData, 10000);
+    return () => clearInterval(interval);
+  }, [fetchSidebarData]);
 
   useEffect(() => {
     const timer = setInterval(() => setUptime((prev) => prev + 1), 1000);
@@ -755,6 +1022,27 @@ export default function ZAIInterface() {
     responseTimesRef.current = [];
   };
 
+  // ─── Computed: Plan Progress ────────────────────────────────────────────
+
+  const planProgress = useMemo(() => {
+    const plan = sidebarData.plan;
+    if (!plan?.tasks || plan.tasks.length === 0) return 0;
+    const completed = plan.tasks.filter((t) => t.status === "completed").length;
+    return Math.round((completed / plan.tasks.length) * 100);
+  }, [sidebarData.plan]);
+
+  // ─── Computed: Tools by Category ────────────────────────────────────────
+
+  const toolsByCategory = useMemo(() => {
+    const categories: Record<string, ToolInfo[]> = {};
+    for (const tool of sidebarData.tools) {
+      const cat = tool.category || "General";
+      if (!categories[cat]) categories[cat] = [];
+      categories[cat].push(tool);
+    }
+    return categories;
+  }, [sidebarData.tools]);
+
   // ─── Render ─────────────────────────────────────────────────────────────
 
   return (
@@ -847,7 +1135,7 @@ export default function ZAIInterface() {
                 {useAgent && !status.agentAvailable && status.connected && (
                   <div className="mt-1 px-4 py-2 border border-[rgba(255,136,0,0.2)] text-[10px] text-[#ff8800] leading-[1.6]">
                     AGENT mode is ON but Bridge is not running.<br />
-                    Tools won't work. Start: <span className="text-[#ffaa33]">python bridge_api.py</span>
+                    Tools won&apos;t work. Start: <span className="text-[#ffaa33]">python bridge_api.py</span>
                   </div>
                 )}
               </div>
@@ -895,6 +1183,17 @@ export default function ZAIInterface() {
                   target.style.height = Math.min(target.scrollHeight, 120) + "px";
                 }}
               />
+              {/* v17 Plan button */}
+              {useAgent && (
+                <button
+                  onClick={() => setPlanModalOpen(true)}
+                  disabled={!status.connected || !status.agentAvailable}
+                  className="pb-1 text-[#555555] hover:text-[rgba(0,212,255,0.6)] disabled:opacity-10 disabled:hover:text-[#555555] transition-colors duration-150 shrink-0"
+                  title="Create a plan"
+                >
+                  <Target size={15} />
+                </button>
+              )}
               <button
                 onClick={sendMessage}
                 disabled={!input.trim() || isLoading || !status.connected}
@@ -922,11 +1221,299 @@ export default function ZAIInterface() {
         {/* ─── Sidebar ───────────────────────────────────────────────────── */}
         <aside
           className={`${
-            sidebarOpen ? "w-64" : "w-0"
+            sidebarOpen ? "w-72" : "w-0"
           } ${isMobile ? "absolute right-0 top-0 bottom-0 z-20" : "relative"
           } shrink-0 border-l border-[rgba(255,255,255,0.06)] bg-[#050505] overflow-hidden transition-all duration-200`}
         >
-          <div className="w-64 h-full overflow-y-auto px-4 py-4 space-y-5">
+          <div className="w-72 h-full overflow-y-auto px-4 py-4 space-y-5">
+
+            {/* ═══ v17: PLAN STATUS ══════════════════════════════════════════ */}
+            <section>
+              <button
+                onClick={() => toggleSection("plan")}
+                className="flex items-center gap-1.5 mb-3 w-full"
+              >
+                <Target size={10} className="text-[#555555]" />
+                <h3 className="text-[9px] tracking-[0.2em] text-[#555555] uppercase text-left">Plan Status</h3>
+                <span className="ml-auto">
+                  {collapsedSections["plan"] ? (
+                    <ChevronRight size={9} className="text-[#444444]" />
+                  ) : (
+                    <ChevronDown size={9} className="text-[#444444]" />
+                  )}
+                </span>
+              </button>
+              {!collapsedSections["plan"] && (
+                <div className="space-y-2.5">
+                  {sidebarData.loading && !sidebarData.plan ? (
+                    <div className="flex items-center gap-2 text-[10px] text-[#444444]">
+                      <Loader2 size={10} className="animate-spin text-[#555555]" />
+                      <span>Loading plan...</span>
+                    </div>
+                  ) : sidebarData.plan?.active ? (
+                    <>
+                      {/* Goal */}
+                      <div>
+                        <span className="text-[10px] text-[#505050]">GOAL</span>
+                        <p className="text-[11px] text-[#999999] mt-0.5 leading-[1.5] line-clamp-2">
+                          {sidebarData.plan.goal}
+                        </p>
+                      </div>
+                      {/* Progress bar */}
+                      {sidebarData.plan.tasks && sidebarData.plan.tasks.length > 0 && (
+                        <div>
+                          <div className="flex justify-between items-center mb-1.5">
+                            <span className="text-[10px] text-[#505050]">PROGRESS</span>
+                            <span className="text-[10px] text-[#00d4ff] tabular-nums">{planProgress}%</span>
+                          </div>
+                          <div className="h-[3px] bg-[rgba(255,255,255,0.08)] overflow-hidden">
+                            <div
+                              className="h-full bg-[rgba(0,212,255,0.5)] transition-all duration-500"
+                              style={{ width: `${planProgress}%` }}
+                            />
+                          </div>
+                        </div>
+                      )}
+                      {/* Task list */}
+                      {sidebarData.plan.tasks && sidebarData.plan.tasks.length > 0 && (
+                        <div className="space-y-1 max-h-48 overflow-y-auto">
+                          {sidebarData.plan.tasks.map((task, i) => {
+                            const isCurrent = i === sidebarData.plan?.current_task_index;
+                            const statusIcon = task.status === "completed" ? (
+                              <CheckCircle2 size={10} className="text-[#4ade80] shrink-0" />
+                            ) : task.status === "in_progress" || isCurrent ? (
+                              <CircleDot size={10} className="text-[#00d4ff] shrink-0 animate-pulse" />
+                            ) : task.status === "failed" ? (
+                              <AlertCircle size={10} className="text-[#f87171] shrink-0" />
+                            ) : (
+                              <CircleEllipsis size={10} className="text-[#444444] shrink-0" />
+                            );
+                            return (
+                              <div
+                                key={task.id || i}
+                                className={`flex items-start gap-1.5 px-2 py-1.5 border transition-colors ${
+                                  isCurrent
+                                    ? "border-[rgba(0,212,255,0.2)] bg-[rgba(0,212,255,0.03)]"
+                                    : "border-transparent"
+                                }`}
+                              >
+                                {statusIcon}
+                                <span
+                                  className={`text-[10px] leading-[1.4] ${
+                                    task.status === "completed"
+                                      ? "text-[#4ade80] line-through opacity-60"
+                                      : isCurrent
+                                        ? "text-[#e0e0e0]"
+                                        : "text-[#666666]"
+                                  }`}
+                                >
+                                  {task.description}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {/* Task type badge */}
+                      {sidebarData.plan.task_type && (
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[9px] text-[#505050]">TYPE</span>
+                          <span className="text-[9px] px-1.5 py-0.5 border border-[rgba(0,212,255,0.15)] text-[rgba(0,212,255,0.6)]">
+                            {sidebarData.plan.task_type}
+                          </span>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="text-[10px] text-[#3a3a3a]">
+                      No active plan
+                    </div>
+                  )}
+                </div>
+              )}
+            </section>
+
+            <div className="h-px bg-[rgba(255,255,255,0.05)]" />
+
+            {/* ═══ v17: SKILLS ══════════════════════════════════════════════ */}
+            <section>
+              <button
+                onClick={() => toggleSection("skills")}
+                className="flex items-center gap-1.5 mb-3 w-full"
+              >
+                <Sparkles size={10} className="text-[#555555]" />
+                <h3 className="text-[9px] tracking-[0.2em] text-[#555555] uppercase text-left">Skills</h3>
+                {sidebarData.skills.length > 0 && (
+                  <span className="text-[9px] text-[#505050] ml-auto mr-2">{sidebarData.skills.length}</span>
+                )}
+                {collapsedSections["skills"] ? (
+                  <ChevronRight size={9} className="text-[#444444]" />
+                ) : (
+                  <ChevronDown size={9} className="text-[#444444]" />
+                )}
+              </button>
+              {!collapsedSections["skills"] && (
+                <div className="space-y-2">
+                  {sidebarData.loading && sidebarData.skills.length === 0 ? (
+                    <div className="flex items-center gap-2 text-[10px] text-[#444444]">
+                      <Loader2 size={10} className="animate-spin text-[#555555]" />
+                      <span>Loading skills...</span>
+                    </div>
+                  ) : sidebarData.skills.length > 0 ? (
+                    <div className="flex flex-wrap gap-1.5">
+                      {sidebarData.skills.map((skill, i) => (
+                        <span
+                          key={skill.name || i}
+                          className={`text-[9px] px-2 py-0.5 border transition-colors ${
+                            skill.loaded !== false
+                              ? "border-[rgba(0,255,136,0.2)] text-[rgba(0,255,136,0.7)] bg-[rgba(0,255,136,0.03)]"
+                              : "border-[rgba(255,255,255,0.06)] text-[#555555]"
+                          }`}
+                          title={skill.description || skill.name}
+                        >
+                          {skill.name}
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-[10px] text-[#3a3a3a]">
+                      No skills loaded
+                    </div>
+                  )}
+                </div>
+              )}
+            </section>
+
+            <div className="h-px bg-[rgba(255,255,255,0.05)]" />
+
+            {/* ═══ v17: TOOLS ═══════════════════════════════════════════════ */}
+            <section>
+              <button
+                onClick={() => toggleSection("tools")}
+                className="flex items-center gap-1.5 mb-3 w-full"
+              >
+                <Wrench size={10} className="text-[#555555]" />
+                <h3 className="text-[9px] tracking-[0.2em] text-[#555555] uppercase text-left">Tools</h3>
+                {sidebarData.tools.length > 0 && (
+                  <span className="text-[9px] text-[#505050] ml-auto mr-2">{sidebarData.tools.length}</span>
+                )}
+                {collapsedSections["tools"] ? (
+                  <ChevronRight size={9} className="text-[#444444]" />
+                ) : (
+                  <ChevronDown size={9} className="text-[#444444]" />
+                )}
+              </button>
+              {!collapsedSections["tools"] && (
+                <div className="space-y-2.5">
+                  {sidebarData.loading && sidebarData.tools.length === 0 ? (
+                    <div className="flex items-center gap-2 text-[10px] text-[#444444]">
+                      <Loader2 size={10} className="animate-spin text-[#555555]" />
+                      <span>Loading tools...</span>
+                    </div>
+                  ) : sidebarData.tools.length > 0 ? (
+                    <div className="space-y-3 max-h-64 overflow-y-auto">
+                      {Object.entries(toolsByCategory).map(([category, tools]) => (
+                        <div key={category}>
+                          <div className="text-[9px] tracking-[0.15em] text-[#444444] uppercase mb-1.5">
+                            {category}
+                          </div>
+                          <div className="space-y-0.5">
+                            {tools.map((tool, i) => (
+                              <div
+                                key={tool.name || i}
+                                className="flex items-center gap-1.5 px-2 py-1 hover:bg-[rgba(255,255,255,0.015)] transition-colors"
+                              >
+                                <span className="text-[10px] text-[rgba(0,212,255,0.6)] shrink-0">▸</span>
+                                <span className="text-[10px] text-[#888888] truncate">{tool.name}</span>
+                                {tool.description && (
+                                  <span className="text-[9px] text-[#3a3a3a] truncate hidden xl:inline">
+                                    — {tool.description.slice(0, 40)}
+                                  </span>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-[10px] text-[#3a3a3a]">
+                      No tools registered
+                    </div>
+                  )}
+                </div>
+              )}
+            </section>
+
+            <div className="h-px bg-[rgba(255,255,255,0.05)]" />
+
+            {/* ═══ v17: BROWSER ═════════════════════════════════════════════ */}
+            <section>
+              <button
+                onClick={() => toggleSection("browser")}
+                className="flex items-center gap-1.5 mb-3 w-full"
+              >
+                <Globe size={10} className="text-[#555555]" />
+                <h3 className="text-[9px] tracking-[0.2em] text-[#555555] uppercase text-left">Browser</h3>
+                {collapsedSections["browser"] ? (
+                  <ChevronRight size={9} className="text-[#444444] ml-auto" />
+                ) : (
+                  <ChevronDown size={9} className="text-[#444444] ml-auto" />
+                )}
+              </button>
+              {!collapsedSections["browser"] && (
+                <div className="space-y-2.5">
+                  {sidebarData.loading && !sidebarData.browserStatus ? (
+                    <div className="flex items-center gap-2 text-[10px] text-[#444444]">
+                      <Loader2 size={10} className="animate-spin text-[#555555]" />
+                      <span>Loading browser status...</span>
+                    </div>
+                  ) : sidebarData.browserStatus?.active ? (
+                    <>
+                      <div className="flex justify-between items-center">
+                        <span className="text-[10px] text-[#505050]">STATUS</span>
+                        <div className="flex items-center gap-1.5">
+                          <Circle size={4} className="fill-[#4ade80] text-[#4ade80]" />
+                          <span className="text-[10px] text-[#4ade80]">Active</span>
+                        </div>
+                      </div>
+                      {sidebarData.browserStatus.url && (
+                        <div>
+                          <span className="text-[10px] text-[#505050]">URL</span>
+                          <p className="text-[10px] text-[#888888] mt-0.5 truncate" title={sidebarData.browserStatus.url}>
+                            {sidebarData.browserStatus.url}
+                          </p>
+                        </div>
+                      )}
+                      {sidebarData.browserStatus.title && (
+                        <div>
+                          <span className="text-[10px] text-[#505050]">TITLE</span>
+                          <p className="text-[10px] text-[#888888] mt-0.5 truncate">
+                            {sidebarData.browserStatus.title}
+                          </p>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <div className="flex justify-between items-center">
+                        <span className="text-[10px] text-[#505050]">STATUS</span>
+                        <div className="flex items-center gap-1.5">
+                          <Circle size={4} className="fill-[#444444] text-[#444444]" />
+                          <span className="text-[10px] text-[#555555]">Inactive</span>
+                        </div>
+                      </div>
+                      <div className="text-[10px] text-[#3a3a3a]">
+                        Browser automation not active
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </section>
+
+            <div className="h-px bg-[rgba(255,255,255,0.05)]" />
+
             {/* SYSTEM */}
             <section>
               <div className="flex items-center gap-1.5 mb-3">
@@ -1102,12 +1689,20 @@ export default function ZAIInterface() {
             {/* Footer */}
             <div className="pt-6">
               <div className="text-[8px] text-[#333333] text-center tracking-[0.4em] uppercase">
-                ZAI Agent Interface v0.1
+                ZAI Agent Interface v17
               </div>
             </div>
           </div>
         </aside>
       </div>
+
+      {/* ─── Plan Modal ──────────────────────────────────────────────────── */}
+      <PlanModal
+        isOpen={planModalOpen}
+        onClose={() => setPlanModalOpen(false)}
+        onSubmit={createPlan}
+        isCreating={planCreating}
+      />
     </div>
   );
 }
