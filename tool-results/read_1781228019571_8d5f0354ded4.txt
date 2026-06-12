@@ -1,0 +1,1011 @@
+     1→"""
+     2→=============================================================
+     3→AGENTE v14 - Motor ReAct
+     4→=============================================================
+     5→Piensa -> Actua -> Observa -> Piensa de nuevo -> Repite.
+     6→v14.3: Streaming REAL token-a-token, metacognicion integrada,
+     7→       optimizacion de contexto y llamadas API.
+     8→       Usa TripleMemory como unica fuente de historial.
+     9→=============================================================
+    10→"""
+    11→
+    12→import os
+    13→import re
+    14→import json
+    15→import logging
+    16→from datetime import datetime
+    17→
+    18→from config import (
+    19→    REPOS_DIR, MAX_REACT_ITERATIONS, MAX_CONVERSATION_MEMORY, logger,
+    20→    USER_PROFILE_FILE
+    21→)
+    22→from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS
+    23→from memory.triple_memory import TripleMemory, learning
+    24→from llm import ollama
+    25→from agent.schemas import SYSTEM_PROMPT, JSON_TOOLS_PROMPT
+    26→from agent.metacognition import Metacognition
+    27→from utils.metrics import get_metrics
+    28→
+    29→
+    30→class ReactAgent:
+    31→    """Motor ReAct: Piensa -> Actua -> Observa -> Piensa de nuevo."""
+    32→
+    33→    # Rate limiting: max llamadas a la misma herramienta por conversacion
+    34→    MAX_SAME_TOOL_CALLS = 5
+    35→    MAX_TOTAL_TOOL_CALLS = 12
+    36→
+    37→    def __init__(self, memory=None):
+    38→        self.memory = memory or TripleMemory()
+    39→        self.thinking_log = []
+    40→        self.supports_tool_calling = None
+    41→        self.metacognition = Metacognition()
+    42→        self._models_cache = None  # Cache de modelos para no llamar API cada vez
+    43→        self._tool_call_counts = {}  # Rate limiting por herramienta
+    44→        self._total_tool_calls = 0   # Total de tool calls en esta conversacion
+    45→
+    46→    def _log(self, message, category="info"):
+    47→        timestamp = datetime.now().strftime("%H:%M:%S")
+    48→        self.thinking_log.append(f"[{timestamp}] [{category.upper()}] {message}")
+    49→
+    50→    # ----------------------------------------------------------
+    51→    # RUN SIN STREAMING (original, para compatibilidad)
+    52→    # ----------------------------------------------------------
+    53→    def run(self, user_message):
+    54→        """
+    55→        Bucle ReAct principal. Retorna (respuesta, thinking_log).
+    56→        """
+    57→        self.thinking_log = []
+    58→        self.metacognition.reset()
+    59→        self._tool_call_counts = {}
+    60→        self._total_tool_calls = 0
+    61→        self._log(f"Mensaje del usuario: {user_message}", "input")
+    62→
+    63→        messages = self._build_messages(user_message)
+    64→
+    65→        if self.supports_tool_calling is None:
+    66→            self.supports_tool_calling = self._detect_tool_calling_support()
+    67→            self._log(
+    68→                f"Tool calling nativo: {'SI' if self.supports_tool_calling else 'NO (usando JSON fallback)'}",
+    69→                "info"
+    70→            )
+    71→
+    72→        for iteration in range(MAX_REACT_ITERATIONS):
+    73→            self._log(f"--- Iteracion {iteration + 1}/{MAX_REACT_ITERATIONS} ---", "react")
+    74→
+    75→            # *** FIX: Metacognicion ANTES de decidir la accion ***
+    76→            # Antes: se evaluaba DESPUES de actuar (paso 4→5→2)
+    77→            # Ahora: se evalua ANTES (paso 2→3→4) para mejor toma de decisiones
+    78→            meta_prompt = self.metacognition.get_metacognitive_prompt(iteration)
+    79→            if meta_prompt:
+    80→                self._log("Alerta metacognitiva inyectada ANTES de accion", "evaluation")
+    81→                self._inject_metacognitive_prompt(messages, meta_prompt)
+    82→
+    83→            # Verificar si metacognicion indica que necesitamos mas contexto
+    84→            if self.metacognition.confidence < 0.3 and iteration > 0:
+    85→                extra_context = self.memory.get_context_for(user_message)
+    86→                if extra_context and not any(extra_context[:50] in str(m.get("content", "")) for m in messages[-3:]):
+    87→                    self._log("Metacognicion: inyectando contexto adicional de memoria", "evaluation")
+    88→                    # No re-agregar contexto que ya esta en mensajes
+    89→                    context_added = False
+    90→                    for m in messages[-3:]:
+    91→                        if "CONTEXTO DE MEMORIA" in m.get("content", ""):
+    92→                            context_added = True
+    93→                            break
+    94→                    if not context_added:
+    95→                        messages.append({
+    96→                            "role": "user",
+    97→                            "content": f"[Contexto adicional relevante]:\n{extra_context[:500]}\n\nUsa esta informacion si es relevante."
+    98→                        })
+    99→
+   100→            if self.supports_tool_calling:
+   101→                action_result = self._react_with_tools(messages, iteration)
+   102→            else:
+   103→                action_result = self._react_with_json(messages, iteration)
+   104→
+   105→            if action_result[0] == "respond":
+   106→                final_response = action_result[1]
+   107→
+   108→                # SAFETY CHECK: Si la respuesta es JSON de tool call, ejecutarlo
+   109→                # en vez de mostrarlo como texto al usuario
+   110→                parsed_json = self._parse_json(final_response)
+   111→                if parsed_json:
+   112→                    accion = parsed_json.get("accion", "").strip()
+   113→                    if accion and accion in TOOL_FUNCTIONS:
+   114→                        self._log(f"JSON de tool detectado en respuesta: {accion}", "thinking")
+   115→                        action_result = ("tool_calls", [{"name": accion, "params": parsed_json.get("params", {})}])
+   116→                        # Procesar como tool call en vez de respuesta
+   117→                        for tc in action_result[1]:
+   118→                            self.metacognition.record_iteration(
+   119→                                iteration=iteration, action_type="tool_call", tool_name=tc["name"]
+   120→                            )
+   121→                        results = self._execute_tool_calls(action_result[1], messages)
+   122→                        for tc, res in zip(action_result[1], results):
+   123→                            had_error = "ERROR" in res
+   124→                            self.metacognition.record_iteration(
+   125→                                iteration=iteration, action_type="tool_result",
+   126→                                tool_name=tc["name"], result_summary=res[:200], had_error=had_error
+   127→                            )
+   128→                        self._feed_tool_results(action_result[1], results, messages)
+   129→                        continue  # Siguiente iteracion del bucle ReAct
+   130→                    elif not parsed_json.get("respuesta_final", "").strip():
+   131→                        # JSON sin respuesta_final ni accion valida - limpiar
+   132→                        clean = self._clean_json_leak(final_response)
+   133→                        if clean != final_response:
+   134→                            final_response = clean
+   135→
+   136→                # Evaluar resultado para poblar _last_evaluation
+   137→                reflection = self.metacognition.evaluate_result(
+   138→                    user_message, final_response, iteration + 1
+   139→                )
+   140→                self._log(
+   141→                    f"Evaluacion: {reflection['assessment']} "
+   142→                    f"(confianza={reflection['confidence_final']})",
+   143→                    "evaluation"
+   144→                )
+   145→
+   146→                # SEGUNDO: Ahora get_final_reflection_prompt() tiene datos reales
+   147→                reflection_prompt = self.metacognition.get_final_reflection_prompt()
+   148→                if reflection_prompt:
+   149→                    self._log("Reflexion metacognitiva inyectada en respuesta final", "evaluation")
+   150→                    # Re-generar con contexto de reflexion (solo si la respuesta puede mejorar)
+   151→                    if len(final_response) < 100 and self.metacognition.error_count > 0:
+   152→                        messages.append({"role": "assistant", "content": final_response})
+   153→                        messages.append({"role": "user", "content": reflection_prompt + "\n\nMejora tu respuesta anterior si es incompleta."})
+   154→                        improved = ollama.generate_chat(messages)
+   155→                        if improved and len(improved) > len(final_response):
+   156→                            final_response = improved
+   157→                            self._log("Respuesta mejorada via metacognicion", "success")
+   158→
+   159→                for lesson in reflection.get("lessons", []):
+   160→                    learning.add_knowledge(lesson, source="metacognition")
+   161→                self._log("Respuesta final generada", "success")
+   162→                self._save_interaction(user_message, final_response)
+   163→                return final_response, self.thinking_log
+   164→
+   165→            elif action_result[0] == "tool_calls":
+   166→                tool_calls = action_result[1]
+   167→                for tc in tool_calls:
+   168→                    self.metacognition.record_iteration(
+   169→                        iteration=iteration, action_type="tool_call", tool_name=tc["name"]
+   170→                    )
+   171→                results = self._execute_tool_calls(tool_calls, messages)
+   172→                for tc, res in zip(tool_calls, results):
+   173→                    had_error = "ERROR" in res
+   174→                    self.metacognition.record_iteration(
+   175→                        iteration=iteration, action_type="tool_result",
+   176→                        tool_name=tc["name"], result_summary=res[:200], had_error=had_error
+   177→                    )
+   178→                self._feed_tool_results(tool_calls, results, messages)
+   179→
+   180→            elif action_result[0] == "error":
+   181→                self._log(f"Error: {action_result[1]}", "error")
+   182→                self.metacognition.record_iteration(
+   183→                    iteration=iteration, action_type="error", had_error=True
+   184→                )
+   185→                if iteration >= MAX_REACT_ITERATIONS - 1:
+   186→                    return "Tuve problemas para procesar tu solicitud. Puedes reformularla?", self.thinking_log
+   187→
+   188→        self._log("Alcanzado limite de iteraciones", "warning")
+   189→        return "Alcance el limite de iteraciones. Puede que necesites ser mas especifico.", self.thinking_log
+   190→
+   191→    # ----------------------------------------------------------
+   192→    # RUN CON STREAMING REAL (token a token)
+   193→    # ----------------------------------------------------------
+   194→    def run_stream(self, user_message):
+   195→        """
+   196→        Bucle ReAct con streaming REAL. Yields cada token al instante.
+   197→        Eventos: {"type": "text"|"tool_start"|"tool_result"|"meta"|"done", "data": ...}
+   198→        """
+   199→        self.thinking_log = []
+   200→        self.metacognition.reset()
+   201→        self._tool_call_counts = {}
+   202→        self._total_tool_calls = 0
+   203→        self._log(f"Mensaje del usuario: {user_message}", "input")
+   204→
+   205→        messages = self._build_messages(user_message)
+   206→
+   207→        if self.supports_tool_calling is None:
+   208→            self.supports_tool_calling = self._detect_tool_calling_support()
+   209→            self._log(
+   210→                f"Tool calling nativo: {'SI' if self.supports_tool_calling else 'NO (usando JSON fallback)'}",
+   211→                "info"
+   212→            )
+   213→
+   214→        for iteration in range(MAX_REACT_ITERATIONS):
+   215→            self._log(f"--- Iteracion {iteration + 1}/{MAX_REACT_ITERATIONS} ---", "react")
+   216→
+   217→            # *** FIX: Metacognicion ANTES de decidir la accion ***
+   218→            meta_prompt = self.metacognition.get_metacognitive_prompt(iteration)
+   219→            if meta_prompt:
+   220→                self._log("Alerta metacognitiva inyectada ANTES de accion", "evaluation")
+   221→                self._inject_metacognitive_prompt(messages, meta_prompt)
+   222→                yield {
+   223→                    "type": "meta",
+   224→                    "data": {
+   225→                        "confidence": self.metacognition.confidence,
+   226→                        "errors": self.metacognition.error_count,
+   227→                        "successes": self.metacognition.success_count,
+   228→                        "plan_changes": self.metacognition.plan_changes,
+   229→                    }
+   230→                }
+   231→
+   232→            # ---- NUCLEO: Streaming token-a-token ----
+   233→            full_text = ""
+   234→            tool_calls_found = []
+   235→            is_final_response = False
+   236→
+   237→            if self.supports_tool_calling:
+   238→                # Stream del LLM y procesar en tiempo real
+   239→                for event in self._stream_llm_with_tools(messages):
+   240→                    if event["type"] == "token":
+   241→                        full_text += event["data"]
+   242→                        yield {"type": "text", "data": event["data"]}
+   243→                    elif event["type"] == "tool_calls":
+   244→                        tool_calls_found = event["data"]
+   245→                    elif event["type"] == "done":
+   246→                        is_final_response = event["data"]  # True si es respuesta final
+   247→            else:
+   248→                # JSON fallback (sin streaming real)
+   249→                result_type, result_data = self._react_with_json(messages, iteration)
+   250→                if result_type == "respond":
+   251→                    full_text = result_data
+   252→                    yield {"type": "text", "data": result_data}
+   253→                    is_final_response = True
+   254→                elif result_type == "tool_calls":
+   255→                    tool_calls_found = result_data
+   256→                elif result_type == "error":
+   257→                    self._log(f"Error: {result_data}", "error")
+   258→                    self.metacognition.record_iteration(
+   259→                        iteration=iteration, action_type="error", had_error=True
+   260→                    )
+   261→                    if iteration >= MAX_REACT_ITERATIONS - 1:
+   262→                        yield {
+   263→                            "type": "done",
+   264→                            "data": "Tuve problemas para procesar tu solicitud. Puedes reformularla?",
+   265→                            "thinking_log": self.thinking_log,
+   266→                            "meta_status": self.metacognition.get_status(),
+   267→                        }
+   268→                        return
+   269→                    continue
+   270→
+   271→            # Procesar resultado de esta iteracion
+   272→            # SAFETY CHECK: Si full_text parece JSON de tool call, parsearlo y ejecutar
+   273→            # en vez de mostrarlo como texto al usuario
+   274→            if is_final_response and not tool_calls_found and full_text:
+   275→                parsed_json = self._parse_json(full_text)
+   276→                if parsed_json:
+   277→                    accion = parsed_json.get("accion", "").strip()
+   278→                    if accion and accion in TOOL_FUNCTIONS:
+   279→                        self._log(f"JSON de tool detectado en respuesta final: {accion}", "thinking")
+   280→                        tool_calls_found = [{"name": accion, "params": parsed_json.get("params", {})}]
+   281→                        is_final_response = False  # No es respuesta final, es tool call
+   282→                    elif not parsed_json.get("respuesta_final", "").strip():
+   283→                        # JSON sin respuesta_final ni accion valida - extraer contenido util
+   284→                        clean = self._clean_json_leak(full_text)
+   285→                        if clean != full_text:
+   286→                            full_text = clean
+   287→
+   288→            if is_final_response and not tool_calls_found:
+   289→                # PRIMERO: Evaluar resultado para poblar _last_evaluation
+   290→                reflection = self.metacognition.evaluate_result(
+   291→                    user_message, full_text, iteration + 1
+   292→                )
+   293→                self._log(
+   294→                    f"Evaluacion: {reflection['assessment']} (confianza={reflection['confidence_final']})",
+   295→                    "evaluation"
+   296→                )
+   297→
+   298→                # SEGUNDO: Ahora get_final_reflection_prompt() tiene datos reales
+   299→                reflection_prompt = self.metacognition.get_final_reflection_prompt()
+   300→                if reflection_prompt and len(full_text) < 100 and self.metacognition.error_count > 0:
+   301→                    self._log("Reflexion metacognitiva: reintentando respuesta mejorada", "evaluation")
+   302→                    try:
+   303→                        messages.append({"role": "assistant", "content": full_text})
+   304→                        messages.append({"role": "user", "content": reflection_prompt + "\n\nDa una respuesta mas completa."})
+   305→                        improved = ollama.generate_chat(messages)
+   306→                        if improved and len(improved) > len(full_text):
+   307→                            full_text = improved
+   308→                            yield {"type": "text", "data": "\n\n[Respuesta mejorada] " + improved}
+   309→                    except Exception:
+   310→                        pass
+   311→
+   312→                # Respuesta final - terminar
+   313→                for lesson in reflection.get("lessons", []):
+   314→                    learning.add_knowledge(lesson, source="metacognition")
+   315→
+   316→                self._log("Respuesta final generada (streaming)", "success")
+   317→                self._save_interaction(user_message, full_text)
+   318→                yield {
+   319→                    "type": "done",
+   320→                    "data": full_text,
+   321→                    "thinking_log": self.thinking_log,
+   322→                    "meta_status": self.metacognition.get_status(),
+   323→                }
+   324→                return
+   325→
+   326→            elif tool_calls_found:
+   327→                # Ejecutar tool calls
+   328→                for tc in tool_calls_found:
+   329→                    self.metacognition.record_iteration(
+   330→                        iteration=iteration, action_type="tool_call", tool_name=tc["name"]
+   331→                    )
+   332→                    yield {"type": "tool_start", "data": tc}
+   333→
+   334→                results = self._execute_tool_calls(tool_calls_found, messages)
+   335→
+   336→                for tc, res in zip(tool_calls_found, results):
+   337→                    had_error = "ERROR" in res
+   338→                    self.metacognition.record_iteration(
+   339→                        iteration=iteration, action_type="tool_result",
+   340→                        tool_name=tc["name"], result_summary=res[:200], had_error=had_error
+   341→                    )
+   342→                    yield {"type": "tool_result", "data": {"tool": tc, "result": res}}
+   343→
+   344→                self._feed_tool_results(tool_calls_found, results, messages)
+   345→
+   346→            elif not full_text:
+   347→                # Ni respuesta ni tool calls - error
+   348→                self._log("Respuesta vacia del modelo", "error")
+   349→                self.metacognition.record_iteration(
+   350→                    iteration=iteration, action_type="error", had_error=True
+   351→                )
+   352→                if iteration >= MAX_REACT_ITERATIONS - 1:
+   353→                    yield {
+   354→                        "type": "done",
+   355→                        "data": "Tuve problemas para procesar tu solicitud. Puedes reformularla?",
+   356→                        "thinking_log": self.thinking_log,
+   357→                        "meta_status": self.metacognition.get_status(),
+   358→                    }
+   359→                    return
+   360→
+   361→        # Limite de iteraciones
+   362→        yield {
+   363→            "type": "done",
+   364→            "data": "Alcance el limite de iteraciones. Puede que necesites ser mas especifico.",
+   365→            "thinking_log": self.thinking_log,
+   366→            "meta_status": self.metacognition.get_status(),
+   367→        }
+   368→
+   369→    # ----------------------------------------------------------
+   370→    # STREAMING LLM CON TOOL CALLING (token a token)
+   371→    # ----------------------------------------------------------
+   372→    def _stream_llm_with_tools(self, messages):
+   373→        """
+   374→        Genera respuesta del LLM con streaming REAL.
+   375→        Yields: {"type": "token"|"tool_calls"|"done", "data": ...}
+   376→        """
+   377→        import time as _time
+   378→        _llm_start = _time.monotonic()
+   379→        full_content = ""
+   380→        full_tool_calls = []
+   381→
+   382→        try:
+   383→            # Intentar streaming HTTP directo (mas rapido, sin overhead de lib)
+   384→            for chunk in ollama.generate_stream(messages, tools=TOOL_SCHEMAS):
+   385→                if isinstance(chunk, str):
+   386→                    # Token de texto - emitir inmediatamente
+   387→                    # PERO: si parece JSON de tool call, no emitirlo al usuario
+   388→                    full_content += chunk
+   389→                    # Detectar si el contenido es JSON de herramienta
+   390→                    if self._looks_like_tool_json(full_content):
+   391→                        continue  # Acumular sin emitir
+   392→                    # Si antes se acumulaba JSON pero ya no, limpiar
+   393→                    yield {"type": "token", "data": chunk}
+   394→                elif isinstance(chunk, dict):
+   395→                    # Resultado final con tool_calls
+   396→                    msg = chunk.get("message", chunk)
+   397→                    tool_calls = msg.get("tool_calls", [])
+   398→                    content = msg.get("content", "")
+   399→
+   400→                    if content and not full_content:
+   401→                        # Contenido que no se streameo (fallback)
+   402→                        full_content = content
+   403→                        yield {"type": "token", "data": content}
+   404→
+   405→                    if tool_calls:
+   406→                        # Parsear tool calls
+   407→                        parsed_calls = []
+   408→                        for tc in tool_calls:
+   409→                            tool_name = tc.get("function", {}).get("name", "")
+   410→                            tool_params = tc.get("function", {}).get("arguments", {})
+   411→                            self._log(f"Tool call: {tool_name}({tool_params})", "thinking")
+   412→                            parsed_calls.append({"name": tool_name, "params": tool_params})
+   413→                        yield {"type": "tool_calls", "data": parsed_calls}
+   414→                        yield {"type": "done", "data": False}
+   415→                        return
+   416→
+   417→            # Si llegamos aqui sin tool_calls, verificar si el contenido es JSON de herramientas
+   418→            if full_content:
+   419→                # Si el contenido acumulado era JSON de tool calls (no se emitio),
+   420→                # parsearlo y ejecutar como tool calls
+   421→                if self._looks_like_tool_json(full_content):
+   422→                    parsed = self._parse_json(full_content)
+   423→                    if parsed:
+   424→                        # Verificar si son multiples tool calls
+   425→                        if parsed.get("_multi_tool_calls") and parsed.get("tool_calls"):
+   426→                            yield {"type": "tool_calls", "data": parsed["tool_calls"]}
+   427→                            yield {"type": "done", "data": False}
+   428→                            return
+   429→                        accion = parsed.get("accion", "").strip()
+   430→                        if accion and accion in TOOL_FUNCTIONS:
+   431→                            yield {"type": "tool_calls", "data": [{"name": accion, "params": parsed.get("params", {})}]}
+   432→                            yield {"type": "done", "data": False}
+   433→                            return
+   434→                    # Si no se pudo parsear como tool call, emitir el texto limpio
+   435→                    clean = self._clean_json_leak(full_content)
+   436→                    if clean != full_content:
+   437→                        # El texto era JSON, emitir version limpia
+   438→                        yield {"type": "token", "data": clean}
+   439→                _llm_elapsed = (_time.monotonic() - _llm_start) * 1000.0
+   440→                get_metrics().record_llm_call(_llm_elapsed)
+   441→                yield {"type": "done", "data": True}
+   442→                return
+   443→
+   444→        except Exception as e:
+   445→            self._log(f"Error en streaming: {e}", "error")
+   446→            get_metrics().record_error("llm_stream")
+   447→
+   448→        # Fallback: modo no-streaming
+   449→        try:
+   450→            response = ollama.generate(messages, tools=TOOL_SCHEMAS)
+   451→            # generate() already records llm_call via @timed, so no duplicate
+   452→            if isinstance(response, str):
+   453→                yield {"type": "token", "data": response}
+   454→                yield {"type": "done", "data": True}
+   455→                return
+   456→
+   457→            message = response.get("message", response)
+   458→            tool_calls = message.get("tool_calls", [])
+   459→            content = message.get("content", "")
+   460→
+   461→            if tool_calls:
+   462→                parsed_calls = []
+   463→                for tc in tool_calls:
+   464→                    tool_name = tc.get("function", {}).get("name", "")
+   465→                    tool_params = tc.get("function", {}).get("arguments", {})
+   466→                    self._log(f"Tool call: {tool_name}({tool_params})", "thinking")
+   467→                    parsed_calls.append({"name": tool_name, "params": tool_params})
+   468→                yield {"type": "tool_calls", "data": parsed_calls}
+   469→                yield {"type": "done", "data": False}
+   470→                return
+   471→
+   472→            if content:
+   473→                yield {"type": "token", "data": content}
+   474→                yield {"type": "done", "data": True}
+   475→                return
+   476→
+   477→        except Exception as e:
+   478→            self._log(f"Error en fallback: {e}", "error")
+   479→
+   480→        yield {"type": "done", "data": False}
+   481→
+   482→    # ----------------------------------------------------------
+   483→    # REACT CON TOOL CALLING (sin streaming)
+   484→    # ----------------------------------------------------------
+   485→    def _react_with_tools(self, messages, iteration):
+   486→        """ReAct usando function calling nativo. Soporta multiple tool calls."""
+   487→        # generate() already records llm_call via @timed decorator
+   488→        try:
+   489→            response = ollama.generate(messages, tools=TOOL_SCHEMAS)
+   490→
+   491→            if isinstance(response, str):
+   492→                return ("respond", response)
+   493→
+   494→            message = response.get("message", response)
+   495→            tool_calls = message.get("tool_calls", [])
+   496→
+   497→            if tool_calls:
+   498→                parsed_calls = []
+   499→                for tc in tool_calls:
+   500→                    tool_name = tc.get("function", {}).get("name", "")
+   501→                    tool_params = tc.get("function", {}).get("arguments", {})
+   502→                    self._log(f"Tool call: {tool_name}({tool_params})", "thinking")
+   503→                    parsed_calls.append({"name": tool_name, "params": tool_params})
+   504→                return ("tool_calls", parsed_calls)
+   505→
+   506→            content = message.get("content", "")
+   507→            if content:
+   508→                # SAFETY CHECK: Si el modelo genero JSON de tool call en vez de
+   509→                # usar function calling nativo, parsearlo y ejecutarlo
+   510→                parsed = self._parse_json(content)
+   511→                if parsed:
+   512→                    accion = parsed.get("accion", "").strip()
+   513→                    if accion and accion in TOOL_FUNCTIONS:
+   514→                        self._log(f"Tool call via JSON (modelo no uso function calling nativo): {accion}", "thinking")
+   515→                        params = parsed.get("params", {})
+   516→                        return ("tool_calls", [{"name": accion, "params": params}])
+   517→                    # Si tiene respuesta_final, usarla
+   518→                    respuesta_final = parsed.get("respuesta_final", "").strip()
+   519→                    if respuesta_final:
+   520→                        return ("respond", respuesta_final)
+   521→                return ("respond", content)
+   522→
+   523→            return ("error", "Respuesta vacia del modelo")
+   524→
+   525→        except Exception as e:
+   526→            self._log(f"Error en tool calling: {e}", "error")
+   527→            self.supports_tool_calling = False
+   528→            return ("error", str(e))
+   529→
+   530→    # ----------------------------------------------------------
+   531→    # REACT CON JSON FALLBACK
+   532→    # ----------------------------------------------------------
+   533→    def _react_with_json(self, messages, iteration):
+   534→        """ReAct usando JSON parsing (fallback)."""
+   535→        # generate_chat() already records llm_call via @timed decorator
+   536→        if not any("HERRAMIENTAS DISPONIBLES" in str(m.get("content", "")) for m in messages):
+   537→            system_msg_idx = next((i for i, m in enumerate(messages) if m["role"] == "system"), -1)
+   538→            if system_msg_idx >= 0:
+   539→                messages[system_msg_idx]["content"] += JSON_TOOLS_PROMPT
+   540→
+   541→        try:
+   542→            response = ollama.generate_chat(messages)
+   543→            if not response:
+   544→                return ("error", "El LLM no respondio")
+   545→
+   546→            parsed = self._parse_json(response)
+   547→            if not parsed:
+   548→                # No es JSON - probablemente respuesta directa del modelo
+   549→                # Limpiar posibles restos de formato JSON
+   550→                clean = self._clean_json_leak(response)
+   551→                return ("respond", clean)
+   552→
+   553→            # 1. Si hay _multi_tool_calls, ejecutar todas las herramientas
+   554→            if parsed.get("_multi_tool_calls") and parsed.get("tool_calls"):
+   555→                return ("tool_calls", parsed["tool_calls"])
+   556→
+   557→            # 2. Si hay respuesta_final con contenido, usarla
+   558→            respuesta_final = parsed.get("respuesta_final", "").strip()
+   559→            if respuesta_final:
+   560→                return ("respond", respuesta_final)
+   561→
+   562→            accion = parsed.get("accion", "").strip()
+   563→            params = parsed.get("params", {})
+   564→            pensamiento = parsed.get("pensamiento", "").strip()
+   565→
+   566→            if pensamiento:
+   567→                self._log(f"Pensamiento: {pensamiento}", "thinking")
+   568→
+   569→            # 3. Si hay accion valida, ejecutar herramienta
+   570→            if accion and accion in TOOL_FUNCTIONS:
+   571→                # Si tambien hay pensamiento, inyectarlo como contexto
+   572→                if pensamiento:
+   573→                    messages.append({
+   574→                        "role": "assistant",
+   575→                        "content": f"[Pensamiento: {pensamiento}] Ejecutando {accion}..."
+   576→                    })
+   577→                return ("tool_calls", [{"name": accion, "params": params}])
+   578→
+   579→            # 3. Si hay pensamiento pero no accion ni respuesta_final,
+   580→            #    el modelo esta respondiendo en campo equivocado - usar pensamiento
+   581→            if pensamiento and not accion:
+   582→                self._log("Modelo respondio en 'pensamiento' en vez de 'respuesta_final'", "info")
+   583→                return ("respond", pensamiento)
+   584→
+   585→            # 4. Fallback: devolver texto limpio (no JSON crudo)
+   586→            clean = self._clean_json_leak(response)
+   587→            return ("respond", clean)
+   588→
+   589→        except Exception as e:
+   590→            return ("error", str(e))
+   591→
+   592→    def _clean_json_leak(self, text):
+   593→        """Limpia texto que tiene restos de formato JSON para mostrar al usuario.
+   594→        v3: Mas agresivo - tambien limpia JSON parcial al inicio/final del texto.
+   595→        """
+   596→        # Si el texto es JSON completo, extraer solo el contenido util
+   597→        parsed = self._parse_json(text)
+   598→        if parsed:
+   599→            # Prioridad: respuesta_final > pensamiento > texto original
+   600→            if parsed.get("respuesta_final", "").strip():
+   601→                return parsed["respuesta_final"].strip()
+   602→            if parsed.get("pensamiento", "").strip():
+   603→                return parsed["pensamiento"].strip()
+   604→        # Si no es JSON completo, intentar limpiar restos
+   605→        # Caso: texto que empieza con JSON parcial
+   606→        import re as _re
+   607→        # Remover JSON parcial al inicio: {"pensamiento": "..." ... restos
+   608→        cleaned = _re.sub(r'^\s*\{[^}]*$', '', text).strip()
+   609→        # Remover JSON parcial al final
+   610→        cleaned = _re.sub(r'\{[^}]*$\s*$', '', cleaned).strip()
+   611→        # Si despues de limpiar quedo vacio, devolver texto original
+   612→        return cleaned if cleaned else text
+   613→
+   614→    # ----------------------------------------------------------
+   615→    # EJECUCION DE TOOLS (paralelo + retry)
+   616→    # ----------------------------------------------------------
+   617→    def _execute_tool_calls(self, tool_calls, messages):
+   618→        """Ejecuta multiples tool calls con rate limiting y paralelismo."""
+   619→        from concurrent.futures import ThreadPoolExecutor, as_completed
+   620→
+   621→        # Rate limiting: filtrar herramientas que se llamaron demasiadas veces
+   622→        filtered_calls = []
+   623→        for tc in tool_calls:
+   624→            tool_name = tc["name"]
+   625→            self._tool_call_counts[tool_name] = self._tool_call_counts.get(tool_name, 0) + 1
+   626→            self._total_tool_calls += 1
+   627→
+   628→            if self._total_tool_calls > self.MAX_TOTAL_TOOL_CALLS:
+   629→                self._log(f"Rate limit: max total tool calls alcanzado ({self.MAX_TOTAL_TOOL_CALLS})", "warning")
+   630→                break
+   631→
+   632→            if self._tool_call_counts[tool_name] > self.MAX_SAME_TOOL_CALLS:
+   633→                self._log(f"Rate limit: {tool_name} llamada {self._tool_call_counts[tool_name]} veces (max {self.MAX_SAME_TOOL_CALLS})", "warning")
+   634→                continue
+   635→
+   636→            filtered_calls.append(tc)
+   637→
+   638→        tool_calls = filtered_calls
+   639→
+   640→        # Validar parametros de todos los tool calls primero
+   641→        for tc in tool_calls:
+   642→            tc["params"] = self._validate_tool_params(tc["name"], tc["params"])
+   643→
+   644→        # Si hay solo 1 tool, ejecutar directamente (sin overhead de threads)
+   645→        if len(tool_calls) == 1:
+   646→            return [self._execute_single_tool(tool_calls[0], messages)]
+   647→
+   648→        # Si hay multiples tools, ejecutar en paralelo
+   649→        # PERO no paralelizar si alguno es "ejecutar_comando" (puede tener side effects)
+   650→        has_sequential = any(tc["name"] == "ejecutar_comando" for tc in tool_calls)
+   651→        
+   652→        if has_sequential:
+   653→            # Ejecutar secuencialmente para evitar race conditions
+   654→            results = []
+   655→            for tc in tool_calls:
+   656→                results.append(self._execute_single_tool(tc, messages))
+   657→            return results
+   658→
+   659→        # Ejecucion paralela para tools de solo lectura
+   660→        results = [None] * len(tool_calls)
+   661→        with ThreadPoolExecutor(max_workers=min(len(tool_calls), 3)) as executor:
+   662→            futures = {}
+   663→            for i, tc in enumerate(tool_calls):
+   664→                future = executor.submit(self._execute_single_tool, tc, messages)
+   665→                futures[future] = i
+   666→            
+   667→            for future in as_completed(futures):
+   668→                idx = futures[future]
+   669→                try:
+   670→                    results[idx] = future.result(timeout=30)
+   671→                except Exception as e:
+   672→                    results[idx] = f"ERROR: {e}"
+   673→
+   674→        return results
+   675→
+   676→    def _execute_single_tool(self, tc, messages, max_retries=1):
+   677→        """Ejecuta un solo tool call con retry automatico."""
+   678→        import time as _time
+   679→        tool_name = tc["name"]
+   680→        tool_params = tc["params"]
+   681→
+   682→        self._log(f"Ejecutando: {tool_name}({tool_params})", "execution")
+   683→
+   684→        _tool_start = _time.monotonic()
+   685→        tool_result = self._execute_tool(tool_name, tool_params)
+   686→
+   687→        # Retry si fallo y el tool es reintentable
+   688→        if "ERROR" in tool_result and max_retries > 0:
+   689→            retryable_errors = ["TIMEOUT", "ConnectionError", "empty", "vacia"]
+   690→            if any(err in tool_result for err in retryable_errors):
+   691→                self._log(f"Reintentando {tool_name} (error transitorio)...", "execution")
+   692→                tool_result = self._execute_tool(tool_name, tool_params)
+   693→
+   694→        _tool_elapsed_ms = (_time.monotonic() - _tool_start) * 1000.0
+   695→        get_metrics().record_tool_call(tool_name, _tool_elapsed_ms)
+   696→
+   697→        if "ERROR" in tool_result:
+   698→            get_metrics().record_error("tool:" + tool_name)
+   699→
+   700→        self._log(f"Resultado: {tool_result[:150]}...", "observation")
+   701→
+   702→        # Alimentar memoria de trabajo
+   703→        self.memory.add_step(f"{tool_name}({tool_params})", tool_result[:200])
+   704→        if "ERROR" in tool_result:
+   705→            self.memory.set_error(f"{tool_name}: {tool_result[:100]}")
+   706→        if "PELIGROSO" in tool_result:
+   707→            self._log(f"Comando peligroso bloqueado: {tool_name}", "warning")
+   708→        if len(tool_result) > 50 and "ERROR" not in tool_result:
+   709→            self.memory.remember(
+   710→                f"Resultado de {tool_name}: {tool_result[:300]}",
+   711→                metadata={"type": "tool_result", "tool": tool_name}
+   712→            )
+   713→
+   714→        return tool_result
+   715→
+   716→    def _validate_tool_params(self, tool_name, params):
+   717→        """Valida y limpia parametros de un tool call antes de ejecutar."""
+   718→        if not isinstance(params, dict):
+   719→            params = {}
+   720→        
+   721→        # Asegurar que params tenga las claves correctas
+   722→        clean_params = {}
+   723→        for key, value in params.items():
+   724→            if isinstance(key, str) and len(key) < 50:
+   725→                # Limpiar valores string de posibles inyecciones
+   726→                if isinstance(value, str):
+   727→                    # No sanitizar contenido de archivos (puede tener codigo legitimo)
+   728→                    if tool_name in ("escribir_archivo", "generar_codigo"):
+   729→                        clean_params[key] = value
+   730→                    else:
+   731→                        from utils.security import sanitize_input
+   732→                        clean_params[key] = sanitize_input(value)
+   733→                else:
+   734→                    clean_params[key] = value
+   735→        
+   736→        return clean_params
+   737→
+   738→    def _feed_tool_results(self, tool_calls, results, messages):
+   739→        """Alimenta resultados de tools de vuelta al agente."""
+   740→        if self.supports_tool_calling:
+   741→            assistant_msg = {"role": "assistant", "content": "", "tool_calls": []}
+   742→            for tc in tool_calls:
+   743→                assistant_msg["tool_calls"].append({
+   744→                    "function": {"name": tc["name"], "arguments": tc["params"]}
+   745→                })
+   746→            messages.append(assistant_msg)
+   747→            for tc, result in zip(tool_calls, results):
+   748→                messages.append({"role": "tool", "content": result})
+   749→        else:
+   750→            for tc, result in zip(tool_calls, results):
+   751→                messages.append({
+   752→                    "role": "assistant",
+   753→                    "content": json.dumps({
+   754→                        "pensamiento": f"Ejecute {tc['name']}",
+   755→                        "accion": tc["name"],
+   756→                        "params": tc["params"]
+   757→                    })
+   758→                })
+   759→                messages.append({
+   760→                    "role": "user",
+   761→                    "content": f"Resultado de {tc['name']}: {result}\n\nQue hago ahora? Responde con JSON."
+   762→                })
+   763→
+   764→    def _execute_tool(self, tool_name, params):
+   765→        """Ejecuta una herramienta por nombre."""
+   766→        if tool_name in TOOL_FUNCTIONS:
+   767→            try:
+   768→                params = self._resolve_params(params)
+   769→                return TOOL_FUNCTIONS[tool_name](**params)
+   770→            except Exception as e:
+   771→                return f"ERROR ejecutando {tool_name}: {e}"
+   772→        return f"Herramienta no encontrada: {tool_name}"
+   773→
+   774→    # ----------------------------------------------------------
+   775→    # METACOGNICION: INYECCION DE PROMPT
+   776→    # ----------------------------------------------------------
+   777→    def _inject_metacognitive_prompt(self, messages, meta_prompt):
+   778→        """Inyecta el prompt metacognitivo en la conversacion."""
+   779→        for i in range(len(messages) - 1, -1, -1):
+   780→            if messages[i]["role"] == "user":
+   781→                messages.insert(i + 1, {"role": "user", "content": meta_prompt})
+   782→                return
+   783→        messages.append({"role": "user", "content": meta_prompt})
+   784→
+   785→    # ----------------------------------------------------------
+   786→    # CONSTRUCCION DE MENSAJES (OPTIMIZADA)
+   787→    # ----------------------------------------------------------
+   788→    def _build_messages(self, new_message):
+   789→        """Construye la lista de mensajes con contexto enriquecido (optimizado)."""
+   790→        # Cache de modelos para evitar llamada API en cada mensaje
+   791→        if self._models_cache is None:
+   792→            self._models_cache = ollama._fetch_available_models() or [ollama.model or "desconocido"]
+   793→        models = self._models_cache
+   794→
+   795→        system_content = SYSTEM_PROMPT.format(
+   796→            so=os.name,
+   797→            repos_dir=REPOS_DIR,
+   798→            models=", ".join(models),
+   799→            corrections="Ver correcciones abajo"
+   800→        )
+   801→
+   802→        # Perfil de usuario (personalizacion)
+   803→        user_profile = self._load_user_profile()
+   804→        if user_profile:
+   805→            profile_parts = []
+   806→            for key, label in [("name", "Nombre"), ("role", "Rol"), ("interests", "Intereses"), ("language", "Idioma preferido"), ("style", "Estilo de respuesta")]:
+   807→                if key in user_profile and user_profile[key]:
+   808→                    profile_parts.append(f"{label}: {user_profile[key]}")
+   809→            if profile_parts:
+   810→                system_content += "\n\n--- PERFIL DEL USUARIO ---\n" + "\n".join(profile_parts)
+   811→
+   812→        # Contexto enriquecido desde Triple Memoria (con cache de embedding)
+   813→        enriched_context = self.memory.get_context_for(new_message)
+   814→        if enriched_context:
+   815→            system_content += f"\n\n--- CONTEXTO DE MEMORIA ---\n{enriched_context}"
+   816→
+   817→        # Conocimiento relevante (sistema antiguo como backup)
+   818→        relevant_knowledge = learning.get_knowledge(new_message)
+   819→        if relevant_knowledge:
+   820→            knowledge_text = "\n".join([f"- {k['content']}" for k in relevant_knowledge[:3]])
+   821→            system_content += f"\n\nConocimiento adicional:\n{knowledge_text}"
+   822→
+   823→        messages = [{"role": "system", "content": system_content}]
+   824→
+   825→        # Historial desde TripleMemory (unica fuente)
+   826→        recent_history = self.memory.short_term[-MAX_CONVERSATION_MEMORY:]
+   827→        for msg in recent_history:
+   828→            messages.append({"role": msg["role"], "content": msg["content"]})
+   829→
+   830→        # Mensaje actual
+   831→        messages.append({"role": "user", "content": new_message})
+   832→
+   833→        return messages
+   834→
+   835→    def _load_user_profile(self):
+   836→        """Carga el perfil de usuario desde archivo JSON."""
+   837→        try:
+   838→            if os.path.exists(USER_PROFILE_FILE):
+   839→                with open(USER_PROFILE_FILE, "r", encoding="utf-8") as f:
+   840→                    return json.load(f)
+   841→        except Exception:
+   842→            pass
+   843→        return {}
+   844→
+   845→    # ----------------------------------------------------------
+   846→    # HELPERS
+   847→    # ----------------------------------------------------------
+   848→    def _resolve_params(self, params):
+   849→        resolved = {}
+   850→        for key, value in params.items():
+   851→            if isinstance(value, str):
+   852→                value = value.replace("REPOS_DIR", REPOS_DIR)
+   853→                value = value.replace("RUTA_DEL_REPO", self._find_repo_path())
+   854→            resolved[key] = value
+   855→        return resolved
+   856→
+   857→    def _find_repo_path(self):
+   858→        try:
+   859→            dirs = [d for d in os.listdir(REPOS_DIR)
+   860→                    if os.path.isdir(os.path.join(REPOS_DIR, d)) and not d.startswith(".")]
+   861→            if dirs:
+   862→                latest = max(dirs, key=lambda d: os.path.getmtime(os.path.join(REPOS_DIR, d)))
+   863→                return os.path.join(REPOS_DIR, latest)
+   864→        except Exception:
+   865→            pass
+   866→        return REPOS_DIR
+   867→
+   868→    def _parse_json(self, text):
+   869→        try:
+   870→            return json.loads(text)
+   871→        except Exception:
+   872→            pass
+   873→        patterns = [
+   874→            r'```json\s*(.*?)\s*```',
+   875→            r'```\s*(.*?)\s*```',
+   876→        ]
+   877→        for pattern in patterns:
+   878→            match = re.search(pattern, text, re.DOTALL)
+   879→            if match:
+   880→                try:
+   881→                    return json.loads(match.group(1))
+   882→                except Exception:
+   883→                    continue
+   884→        # Intentar parsear multiples JSONs en el texto
+   885→        # Cada JSON es una accion separada del ReAct
+   886→        jsons = self._extract_all_jsons(text)
+   887→        if len(jsons) == 1:
+   888→            return jsons[0]
+   889→        elif len(jsons) > 1:
+   890→            # Multiples JSONs = multiples tool calls
+   891→            # Combinar en una lista de tool calls
+   892→            tool_calls = []
+   893→            for j in jsons:
+   894→                accion = j.get("accion", "").strip()
+   895→                if accion:
+   896→                    tool_calls.append({"name": accion, "params": j.get("params", {})})
+   897→            if tool_calls:
+   898→                # Retornar formato especial para multiples tool calls
+   899→                return {"_multi_tool_calls": True, "tool_calls": tool_calls}
+   900→            return jsons[0]  # Fallback al primer JSON
+   901→        # Ultimo intento: buscar un solo objeto JSON
+   902→        match = re.search(r'(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})', text, re.DOTALL)
+   903→        if match:
+   904→            try:
+   905→                return json.loads(match.group(1))
+   906→            except Exception:
+   907→                pass
+   908→        return None
+   909→
+   910→    def _extract_all_jsons(self, text):
+   911→        """Extrae todos los objetos JSON validos de un texto."""
+   912→        results = []
+   913→        # Buscar secuencias que parezcan JSON
+   914→        i = 0
+   915→        while i < len(text):
+   916→            # Encontrar el proximo '{'
+   917→            start = text.find('{', i)
+   918→            if start == -1:
+   919→                break
+   920→            # Intentar parsear desde este punto
+   921→            depth = 0
+   922→            end = start
+   923→            for j in range(start, len(text)):
+   924→                if text[j] == '{':
+   925→                    depth += 1
+   926→                elif text[j] == '}':
+   927→                    depth -= 1
+   928→                if depth == 0:
+   929→                    end = j + 1
+   930→                    break
+   931→            if end > start:
+   932→                try:
+   933→                    parsed = json.loads(text[start:end])
+   934→                    if isinstance(parsed, dict):
+   935→                        results.append(parsed)
+   936→                except Exception:
+   937→                    pass
+   938→                i = end
+   939→            else:
+   940→                i = start + 1
+   941→        return results
+   942→
+   943→    def _looks_like_tool_json(self, text):
+   944→        """Detecta si el texto parece ser JSON de tool call (no respuesta al usuario).
+   945→        v3: Mas robusto - detecta JSON que empieza despues de whitespace o texto corto.
+   946→        """
+   947→        text = text.strip()
+   948→        if not text:
+   949→            return False
+   950→        # Si el texto empieza con { probablemente es JSON de tool call
+   951→        if text.startswith('{'):
+   952→            return True
+   953→        # Si despues de whitespace/newline hay {, tambien es JSON
+   954→        # Esto captura casos donde el modelo genera: "\n{" o "  {"
+   955→        stripped = text.lstrip()
+   956→        if stripped.startswith('{'):
+   957→            return True
+   958→        # Si contiene patrones de tool calls en cualquier parte
+   959→        tool_indicators = ['"accion"', '"pensamiento"', '"params"', '"respuesta_final"',
+   960→                          '"abrir_', '"ejecutar_', '"leer_', '"escribir_', '"buscar_"']
+   961→        for indicator in tool_indicators:
+   962→            if indicator in text:
+   963→                return True
+   964→        # Si el texto es corto y parece inicio de JSON
+   965→        if len(text) < 5 and text in ['{', '"', '\n', '\r']:
+   966→            return True
+   967→        return False
+   968→
+   969→    def _detect_tool_calling_support(self):
+   970→        """Detecta si el modelo soporta function calling nativo."""
+   971→        ollama.detect_models()
+   972→        if ollama.model:
+   973→            model_lower = ollama.model.lower()
+   974→            # Modelos que SI soportan tool calling nativo
+   975→            if "qwen3" in model_lower:
+   976→                return True
+   977→            if "qwen2.5-coder" in model_lower:
+   978→                return True
+   979→            # Modelos que NO soportan tool calling
+   980→            if any(x in model_lower for x in ["qwen2.5:14b", "qwen2.5:32b", "llama3.1"]):
+   981→                return False
+   982→        # Test rapido
+   983→        try:
+   984→            import ollama as ollama_lib
+   985→            for host in ['http://localhost:11434', 'http://127.0.0.1:11434']:
+   986→                try:
+   987→                    client = ollama_lib.Client(host=host)
+   988→                    client.chat(
+   989→                        model=ollama.model,
+   990→                        messages=[{"role": "user", "content": "hi"}],
+   991→                        tools=[TOOL_SCHEMAS[0]]
+   992→                    )
+   993→                    return True
+   994→                except Exception:
+   995→                    continue
+   996→        except Exception:
+   997→            pass
+   998→        return False
+   999→
+  1000→    def _save_interaction(self, user_message, final_response):
+  1001→        """Guarda la interaccion en la triple memoria."""
+  1002→        self.memory.add_conversation("user", user_message)
+  1003→        self.memory.add_conversation("assistant", final_response)
+  1004→        # Guardar interaccion sin embedding (mas rapido)
+  1005→        self.memory.remember(
+  1006→            f"Usuario pregunto: {user_message[:100]} -> Respuesta: {final_response[:200]}",
+  1007→            metadata={"type": "interaction", "user_msg": user_message[:50]},
+  1008→            fast=True  # skip_embedding para velocidad
+  1009→        )
+  1010→        self.memory.set_success(final_response[:100])
+  1011→
