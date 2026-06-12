@@ -779,6 +779,254 @@ def ejecutar_en_contenedor(codigo: str, lenguaje: str = "python", timeout: int =
         return output
 
 
+# --- Project Scaffolding (v18) ---
+
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "crear_proyecto",
+        "description": "Crea un proyecto completo con multiples archivos desde una plantilla. Soporta: nextjs_app, express_api, python_cli, python_api, react_app, fullstack_nextjs, python_package. Genera TODOS los archivos necesarios para un proyecto funcionando. Mucho mas rapido que crear archivo por archivo.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "plantilla": {"type": "string", "description": "Plantilla: nextjs_app, express_api, python_cli, python_api, react_app, fullstack_nextjs, python_package"},
+                "nombre_proyecto": {"type": "string", "description": "Nombre del proyecto (sin espacios)"},
+                "directorio": {"type": "string", "description": "Directorio destino (default: directorio de trabajo)"},
+                "descripcion": {"type": "string", "description": "Descripcion del proyecto (para README y personalizacion)"},
+                "sobrescribir": {"type": "boolean", "description": "Sobrescribir si ya existe (default: false)"},
+                "instalar": {"type": "boolean", "description": "Ejecutar npm install / pip install despues de crear (default: true)"}
+            },
+            "required": ["plantilla", "nombre_proyecto"]
+        }
+    }
+})
+def crear_proyecto(plantilla: str, nombre_proyecto: str, directorio: str = "",
+                   descripcion: str = "", sobrescribir: bool = False,
+                   instalar: bool = True) -> str:
+    """Crea un proyecto completo desde una plantilla."""
+    from .project_scaffold import ProjectScaffold
+
+    scaffold = ProjectScaffold()
+    options = {
+        "overwrite": sobrescribir,
+        "install_deps": instalar,
+        "description": descripcion or nombre_proyecto,
+    }
+
+    result = scaffold.scaffold_project(
+        template_name=plantilla,
+        project_name=nombre_proyecto,
+        target_dir=directorio or None,
+        options=options,
+    )
+
+    if result.get("success"):
+        files = result.get("files_created", [])
+        output = f"Proyecto '{nombre_proyecto}' creado con {len(files)} archivos."
+        output += f"\nPlantilla: {plantilla}"
+        output += f"\nRuta: {result.get('project_path', '')}"
+        if files:
+            output += f"\nArchivos creados:\n" + "\n".join(f"  - {f}" for f in files[:20])
+            if len(files) > 20:
+                output += f"\n  ... y {len(files) - 20} mas"
+        return output
+    return f"ERROR: {result.get('error', 'Error desconocido')}"
+
+
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "listar_plantillas",
+        "description": "Lista las plantillas de proyecto disponibles para usar con crear_proyecto. Muestra nombre, descripcion y archivos que genera cada una.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    }
+})
+def listar_plantillas() -> str:
+    """Lista las plantillas de proyecto disponibles."""
+    from .project_scaffold import ProjectScaffold
+
+    scaffold = ProjectScaffold()
+    templates = scaffold.list_templates()
+
+    output = "PLANTILLAS DE PROYECTO DISPONIBLES:\n\n"
+    for name, info in templates.items():
+        output += f"  {name}:\n"
+        output += f"    Descripcion: {info.get('description', 'N/A')}\n"
+        output += f"    Archivos: {info.get('file_count', '?')} archivos\n"
+        output += f"    Post-create: {', '.join(info.get('post_create_commands', []))}\n\n"
+
+    return output
+
+
+# --- Deployment Tool (v18) ---
+
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "desplegar_proyecto",
+        "description": "Despliega un proyecto a la plataforma indicada. Soporta: local (dev server), docker (contenedor), vercel (cloud), ssh (servidor remoto). Auto-detecta el tipo de proyecto y genera configuracion si falta.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ruta_proyecto": {"type": "string", "description": "Ruta al proyecto a desplegar"},
+                "plataforma": {"type": "string", "description": "Plataforma: local, docker, vercel, ssh"},
+                "produccion": {"type": "boolean", "description": "Desplegar en produccion (default: false, solo para vercel)"},
+                "puerto": {"type": "integer", "description": "Puerto para el servidor (default: auto)"},
+                "imagen_docker": {"type": "string", "description": "Nombre de imagen Docker (para plataforma=docker)"},
+                "host_ssh": {"type": "string", "description": "Host SSH (para plataforma=ssh)"},
+                "usuario_ssh": {"type": "string", "description": "Usuario SSH (para plataforma=ssh)"},
+                "ruta_remota": {"type": "string", "description": "Ruta remota en el servidor SSH"}
+            },
+            "required": ["ruta_proyecto", "plataforma"]
+        }
+    }
+})
+def desplegar_proyecto(ruta_proyecto: str, plataforma: str, produccion: bool = False,
+                       puerto: int = 0, imagen_docker: str = "", host_ssh: str = "",
+                       usuario_ssh: str = "", ruta_remota: str = "") -> str:
+    """Despliega un proyecto a la plataforma indicada."""
+    from . import deployment_tool as dt
+
+    platform = plataforma.lower().strip()
+
+    if platform == "local":
+        result = dt.deploy_local(ruta_proyecto, port=puerto or None)
+    elif platform == "docker":
+        result = dt.deploy_docker(
+            ruta_proyecto,
+            image_name=imagen_docker or None,
+            ports=puerto or None,
+        )
+    elif platform == "vercel":
+        result = dt.deploy_vercel(ruta_proyecto, production=produccion)
+    elif platform == "ssh":
+        if not host_ssh or not usuario_ssh:
+            return "ERROR: Para SSH se requiere host_ssh y usuario_ssh"
+        result = dt.deploy_ssh(
+            ruta_proyecto,
+            host=host_ssh,
+            user=usuario_ssh,
+            remote_path=ruta_remota or None,
+        )
+    else:
+        return f"Plataforma no soportada: {platform}. Usa: local, docker, vercel, ssh"
+
+    if result.get("success"):
+        output = f"Despliegue exitoso en {platform}!"
+        if result.get("url"):
+            output += f"\nURL: {result['url']}"
+        if result.get("pid"):
+            output += f"\nPID: {result['pid']}"
+        if result.get("container_id"):
+            output += f"\nContainer: {result['container_id'][:12]}"
+        return output
+    return f"ERROR desplegando: {result.get('error', 'Error desconocido')}"
+
+
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "opciones_despliegue",
+        "description": "Analiza un proyecto y lista las opciones de despliegue disponibles. Verifica que herramientas estan instaladas (Docker, Vercel, SSH) y recomienda la mejor plataforma.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ruta_proyecto": {"type": "string", "description": "Ruta al proyecto"}
+            },
+            "required": ["ruta_proyecto"]
+        }
+    }
+})
+def opciones_despliegue(ruta_proyecto: str) -> str:
+    """Lista opciones de despliegue para un proyecto."""
+    from . import deployment_tool as dt
+
+    result = dt.list_deployment_options(ruta_proyecto)
+
+    output = f"Tipo de proyecto: {result.get('project_type', 'desconocido')}\n"
+    output += f"Opciones disponibles: {', '.join(result.get('available', []))}\n"
+    output += f"Recomendado: {result.get('recommended', 'N/A')}\n"
+
+    reasons = result.get("reasons", {})
+    if reasons:
+        output += "\nRazones:\n"
+        for platform, reason in reasons.items():
+            output += f"  {platform}: {reason}\n"
+
+    return output
+
+
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "detener_despliegue",
+        "description": "Detiene un despliegue activo. Puede detener servidores locales (por PID), contenedores Docker, o indicar como detener despliegues cloud.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ruta_proyecto": {"type": "string", "description": "Ruta del proyecto desplegado"},
+                "plataforma": {"type": "string", "description": "Plataforma donde esta desplegado: local, docker"}
+            },
+            "required": ["ruta_proyecto"]
+        }
+    }
+})
+def detener_despliegue(ruta_proyecto: str, plataforma: str = "") -> str:
+    """Detiene un despliegue activo."""
+    from . import deployment_tool as dt
+
+    result = dt.stop_deployment(project_path=ruta_proyecto)
+
+    if result.get("success"):
+        return result.get("message", "Despliegue detenido")
+    return f"ERROR: {result.get('error', 'No se pudo detener')}"
+
+
+# --- Model Router (v18) ---
+
+@tool(schema={
+    "type": "function",
+    "function": {
+        "name": "info_modelos",
+        "description": "Muestra informacion sobre los modelos de IA disponibles, sus capacidades (chat, codigo, vision, embeddings), y recomendaciones de instalacion.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    }
+})
+def info_modelos() -> str:
+    """Muestra informacion sobre modelos disponibles."""
+    from .model_router import get_router
+
+    router = get_router()
+    info = router.get_model_info()
+
+    output = "MODELOS DE IA DISPONIBLES:\n\n"
+
+    by_cap = info.get("by_capability", {})
+    for capability, models in by_cap.items():
+        output += f"  {capability.upper()}:\n"
+        for model in models:
+            output += f"    - {model}\n"
+        output += "\n"
+
+    output += f"Modelo por defecto: {info.get('recommended', 'N/A')}\n"
+
+    recommendations = router.recommend_model_install()
+    if recommendations:
+        output += "\nRECOMENDACIONES DE INSTALACION:\n"
+        for rec in recommendations:
+            output += f"  - {rec}\n"
+
+    return output
+
+
 # ============================================================
 # CARGAR SKILLS DINAMICAMENTE
 # ============================================================

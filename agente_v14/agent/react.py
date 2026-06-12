@@ -1,8 +1,9 @@
 """
 =============================================================
-AGENTE v14 - Motor ReAct
+AGENTE v18 - Motor ReAct
 =============================================================
 Piensa -> Actua -> Observa -> Piensa de nuevo -> Repite.
+v18: + Model Router, Orchestrator delegation, Scaffolding/Deploy tools
 v14.3: Streaming REAL token-a-token, metacognicion integrada,
        optimizacion de contexto y llamadas API.
        Usa TripleMemory como unica fuente de historial.
@@ -39,6 +40,13 @@ try:
     SKILLS_ENRICHMENT_AVAILABLE = True
 except Exception:
     SKILLS_ENRICHMENT_AVAILABLE = False
+
+# Importar model router con fallback graceful
+try:
+    from tools.model_router import get_router
+    MODEL_ROUTER_AVAILABLE = True
+except Exception:
+    MODEL_ROUTER_AVAILABLE = False
 
 
 class ReactAgent:
