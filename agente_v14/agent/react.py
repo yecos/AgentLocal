@@ -1,8 +1,12 @@
 """
 =============================================================
-AGENTE v18 - Motor ReAct
+AGENTE v19 - Motor ReAct
 =============================================================
 Piensa -> Actua -> Observa -> Piensa de nuevo -> Repite.
+v19: + Direct Intent Parser - ejecuta herramientas sin depender
+      del LLM para generar JSON. Los modelos locales fallan mucho
+      en formato JSON, asi que ahora parseamos la intencion
+      directamente del mensaje del usuario.
 v18: + Model Router, Orchestrator delegation, Scaffolding/Deploy tools
 v14.3: Streaming REAL token-a-token, metacognicion integrada,
        optimizacion de contexto y llamadas API.
@@ -23,7 +27,7 @@ from config import (
 from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS
 from memory.triple_memory import TripleMemory, learning
 from llm import ollama
-from agent.schemas import SYSTEM_PROMPT, JSON_TOOLS_PROMPT
+from agent.schemas import SYSTEM_PROMPT, JSON_TOOLS_PROMPT, SYSTEM_PROMPT_COMPACT, JSON_TOOLS_PROMPT_COMPACT
 from agent.metacognition import Metacognition
 from utils.metrics import get_metrics
 
@@ -48,6 +52,13 @@ try:
 except Exception:
     MODEL_ROUTER_AVAILABLE = False
 
+# Importar Direct Intent Parser con fallback graceful
+try:
+    from tools.direct_intent import get_intent_parser, parse_direct_intent
+    DIRECT_INTENT_AVAILABLE = True
+except Exception:
+    DIRECT_INTENT_AVAILABLE = False
+
 
 class ReactAgent:
     """Motor ReAct: Piensa -> Actua -> Observa -> Piensa de nuevo."""
@@ -71,6 +82,175 @@ class ReactAgent:
         self._tool_call_counts = {}  # Rate limiting por herramienta
         self._total_tool_calls = 0   # Total de tool calls en esta conversacion
         self.orchestrator = get_orchestrator() if ORCHESTRATOR_AVAILABLE else None
+        self.intent_parser = get_intent_parser() if DIRECT_INTENT_AVAILABLE else None
+
+    # ----------------------------------------------------------
+    # DIRECT INTENT PARSER (v19)
+    # Ejecuta herramientas directamente sin pasar por el LLM
+    # cuando la intención del usuario es clara.
+    # ----------------------------------------------------------
+    def _try_direct_intent(self, user_message: str):
+        """
+        Intenta ejecutar la herramienta directamente basándose en
+        pattern matching del mensaje del usuario.
+
+        Returns:
+            (response, thinking_log) si la intención fue ejecutada directamente
+            None si no se detectó intención clara (dejar al LLM decidir)
+        """
+        if not self.intent_parser:
+            return None
+
+        result = parse_direct_intent(user_message)
+        if result is None:
+            return None
+
+        tool_name, params, confidence = result
+
+        # Solo ejecutar directamente si la confianza es alta
+        if confidence < 0.80:
+            self._log(f"Direct intent detectado pero confianza baja ({confidence}): {tool_name}", "intent")
+            return None
+
+        # No ejecutar directamente herramientas que tienen side effects significativos
+        # a menos que la confianza sea muy alta
+        high_risk_tools = {"ejecutar_comando", "escribir_archivo", "matar_proceso", "git_operacion"}
+        if tool_name in high_risk_tools and confidence < 0.95:
+            self._log(f"Direct intent: herramienta de riesgo ({tool_name}), requiere confianza 0.95+, tiene {confidence}", "intent")
+            return None
+
+        self._log(f"Direct intent detectado: {tool_name}({params}) [confianza={confidence}]", "intent")
+
+        # Ejecutar la herramienta directamente
+        try:
+            tool_fn = TOOL_FUNCTIONS.get(tool_name)
+            if not tool_fn:
+                self._log(f"Direct intent: herramienta no encontrada: {tool_name}", "warning")
+                return None
+
+            # Filtrar params vacíos o None
+            clean_params = {k: v for k, v in params.items() if v is not None and v != ""}
+            if not clean_params:
+                # La herramienta necesita parámetros pero no los pudimos extraer
+                self._log(f"Direct intent: parámetros vacíos para {tool_name}, dejando al LLM", "intent")
+                return None
+
+            tool_result = tool_fn(**clean_params)
+
+            # Formatear respuesta amigable
+            self._log(f"Direct intent ejecutado exitosamente: {tool_name}", "success")
+            self._save_interaction(user_message, tool_result)
+
+            return tool_result, self.thinking_log
+
+        except Exception as e:
+            self._log(f"Direct intent falló: {tool_name} -> {e}", "error")
+            # No retornar error, dejar que el LLM lo intente
+            return None
+
+    def _try_direct_intent_stream(self, user_message: str):
+        """
+        Versión streaming del Direct Intent Parser.
+        Yields eventos SSE para la UI.
+
+        Returns:
+            Generator de eventos SSE si la intención fue ejecutada directamente
+            None si no se detectó intención clara
+        """
+        if not self.intent_parser:
+            return None
+
+        result = parse_direct_intent(user_message)
+        if result is None:
+            return None
+
+        tool_name, params, confidence = result
+
+        # Solo ejecutar directamente si la confianza es alta
+        if confidence < 0.80:
+            self._log(f"Direct intent detectado pero confianza baja ({confidence}): {tool_name}", "intent")
+            return None
+
+        # No ejecutar directamente herramientas de riesgo sin confianza muy alta
+        high_risk_tools = {"ejecutar_comando", "escribir_archivo", "matar_proceso", "git_operacion"}
+        if tool_name in high_risk_tools and confidence < 0.95:
+            self._log(f"Direct intent: herramienta de riesgo ({tool_name}), requiere confianza 0.95+, tiene {confidence}", "intent")
+            return None
+
+        self._log(f"Direct intent detectado (stream): {tool_name}({params}) [confianza={confidence}]", "intent")
+
+        # Generar eventos de streaming
+        def _stream_direct():
+            # Evento: pensamiento
+            yield {
+                "type": "thinking",
+                "data": {
+                    "phase": "direct_intent",
+                    "message": f"Ejecutando directamente: {tool_name}",
+                    "iteration": 1,
+                    "confidence": confidence,
+                }
+            }
+
+            # Evento: tool start
+            yield {
+                "type": "tool_start",
+                "data": {
+                    "name": tool_name,
+                    "params": params,
+                }
+            }
+
+            # Ejecutar la herramienta
+            try:
+                tool_fn = TOOL_FUNCTIONS.get(tool_name)
+                if not tool_fn:
+                    self._log(f"Direct intent: herramienta no encontrada: {tool_name}", "warning")
+                    return
+
+                clean_params = {k: v for k, v in params.items() if v is not None and v != ""}
+                if not clean_params:
+                    self._log(f"Direct intent: parámetros vacíos para {tool_name}, dejando al LLM", "intent")
+                    return
+
+                tool_result = tool_fn(**clean_params)
+
+                # Evento: tool result
+                yield {
+                    "type": "tool_result",
+                    "data": {
+                        "tool": {"name": tool_name},
+                        "result": tool_result[:500] if tool_result else "(sin resultado)",
+                    }
+                }
+
+                self._log(f"Direct intent ejecutado exitosamente (stream): {tool_name}", "success")
+
+                # Evento: respuesta final
+                yield {
+                    "type": "text",
+                    "data": tool_result if tool_result else "(sin resultado)",
+                }
+
+                # Guardar interacción
+                self._save_interaction(user_message, tool_result or "(sin resultado)")
+
+                # Evento: done
+                yield {
+                    "type": "done",
+                    "data": tool_result if tool_result else "(sin resultado)",
+                    "thinking_log": self.thinking_log,
+                    "meta_status": self.metacognition.get_status() if hasattr(self, 'metacognition') else {},
+                }
+
+            except Exception as e:
+                self._log(f"Direct intent falló (stream): {tool_name} -> {e}", "error")
+                yield {
+                    "type": "error",
+                    "data": f"Error ejecutando {tool_name}: {e}",
+                }
+
+        return _stream_direct()
 
     def _log(self, message, category="info"):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -88,6 +268,13 @@ class ReactAgent:
         self._tool_call_counts = {}
         self._total_tool_calls = 0
         self._log(f"Mensaje del usuario: {user_message}", "input")
+
+        # *** NUEVO v19: Direct Intent Parser ***
+        # Intentar ejecutar directamente si la intención es clara
+        # Esto evita depender del LLM para generar JSON válido
+        direct_result = self._try_direct_intent(user_message)
+        if direct_result is not None:
+            return direct_result
 
         messages = self._build_messages(user_message)
 
@@ -283,6 +470,13 @@ class ReactAgent:
         self._tool_call_counts = {}
         self._total_tool_calls = 0
         self._log(f"Mensaje del usuario: {user_message}", "input")
+
+        # *** NUEVO v19: Direct Intent Parser ***
+        # Intentar ejecutar directamente si la intención es clara
+        direct_result = self._try_direct_intent_stream(user_message)
+        if direct_result is not None:
+            yield from direct_result
+            return
 
         # Emitir evento thinking: recibiendo pregunta
         yield {
@@ -1198,7 +1392,9 @@ class ReactAgent:
         if not any("HERRAMIENTAS DISPONIBLES" in str(m.get("content", "")) for m in messages):
             system_msg_idx = next((i for i, m in enumerate(messages) if m["role"] == "system"), -1)
             if system_msg_idx >= 0:
-                messages[system_msg_idx]["content"] += JSON_TOOLS_PROMPT
+                # Usar prompt de tools compacto o completo según el modelo
+                tools_prompt = JSON_TOOLS_PROMPT_COMPACT if self._should_use_compact_prompt() else JSON_TOOLS_PROMPT
+                messages[system_msg_idx]["content"] += tools_prompt
 
         try:
             response = ollama.generate_chat(messages)
@@ -1454,12 +1650,22 @@ class ReactAgent:
             self._models_cache = ollama._fetch_available_models() or [ollama.model or "desconocido"]
         models = self._models_cache
 
-        system_content = SYSTEM_PROMPT.format(
-            so=os.name,
-            repos_dir=REPOS_DIR,
-            models=", ".join(models),
-            corrections="Ver correcciones abajo"
-        )
+        # *** v19: Detectar si el modelo es pequeño y usar prompt compacto ***
+        use_compact = self._should_use_compact_prompt()
+
+        if use_compact:
+            system_content = SYSTEM_PROMPT_COMPACT.format(
+                so=os.name,
+                repos_dir=REPOS_DIR,
+                models=", ".join(models),
+            )
+        else:
+            system_content = SYSTEM_PROMPT.format(
+                so=os.name,
+                repos_dir=REPOS_DIR,
+                models=", ".join(models),
+                corrections="Ver correcciones abajo"
+            )
 
         # Perfil de usuario (personalizacion)
         user_profile = self._load_user_profile()
@@ -1520,6 +1726,40 @@ class ReactAgent:
             pass
         return {}
 
+    def _should_use_compact_prompt(self) -> bool:
+        """
+        Determina si se debe usar el prompt compacto basándose en el tamaño del modelo.
+        Los modelos < 8B se benefician de prompts más cortos.
+        """
+        if not ollama.model:
+            return False
+
+        model_lower = ollama.model.lower()
+
+        # Modelos pequeños conocidos
+        small_models = [
+            "qwen3:4b", "qwen2.5:3b", "qwen2.5-coder:3b",
+            "llama3.2:1b", "llama3.2:3b", "llama3.1:8b",
+            "mistral:7b", "phi3:mini", "phi3:3.8b",
+            "gemma2:2b", "gemma2:9b", "tinyllama",
+        ]
+
+        # Check exact match first
+        if model_lower in small_models:
+            return True
+
+        # Check pattern: if model name contains size indicators
+        size_patterns = [
+            (r':(\d+)b', lambda m: int(m.group(1)) <= 8),
+            (r'[-_](\d+)b', lambda m: int(m.group(1)) <= 8),
+        ]
+        for pattern, check in size_patterns:
+            match = re.search(pattern, model_lower)
+            if match:
+                return check(match)
+
+        return False
+
     # ----------------------------------------------------------
     # HELPERS
     # ----------------------------------------------------------
@@ -1544,10 +1784,14 @@ class ReactAgent:
         return REPOS_DIR
 
     def _parse_json(self, text):
+        """Parsea JSON de la respuesta del LLM con múltiples estrategias y auto-corrección."""
+        # Estrategia 1: JSON directo
         try:
             return json.loads(text)
         except Exception:
             pass
+
+        # Estrategia 2: Extraer de bloques de código markdown
         patterns = [
             r'```json\s*(.*?)\s*```',
             r'```\s*(.*?)\s*```',
@@ -1558,31 +1802,122 @@ class ReactAgent:
                 try:
                     return json.loads(match.group(1))
                 except Exception:
+                    # Intentar auto-corregir el JSON dentro del bloque
+                    corrected = self._auto_fix_json(match.group(1))
+                    if corrected:
+                        return corrected
                     continue
-        # Intentar parsear multiples JSONs en el texto
-        # Cada JSON es una accion separada del ReAct
+
+        # Estrategia 3: Auto-corrección del texto completo
+        corrected = self._auto_fix_json(text)
+        if corrected:
+            return corrected
+
+        # Estrategia 4: Buscar múltiples JSONs en el texto
         jsons = self._extract_all_jsons(text)
         if len(jsons) == 1:
             return jsons[0]
         elif len(jsons) > 1:
-            # Multiples JSONs = multiples tool calls
-            # Combinar en una lista de tool calls
             tool_calls = []
             for j in jsons:
                 accion = j.get("accion", "").strip()
                 if accion:
                     tool_calls.append({"name": accion, "params": j.get("params", {})})
             if tool_calls:
-                # Retornar formato especial para multiples tool calls
                 return {"_multi_tool_calls": True, "tool_calls": tool_calls}
-            return jsons[0]  # Fallback al primer JSON
-        # Ultimo intento: buscar un solo objeto JSON
+            return jsons[0]
+
+        # Estrategia 5: Regex flexible para objeto JSON
         match = re.search(r'(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})', text, re.DOTALL)
         if match:
             try:
                 return json.loads(match.group(1))
             except Exception:
+                # Último intento con auto-corrección
+                corrected = self._auto_fix_json(match.group(1))
+                if corrected:
+                    return corrected
+
+        return None
+
+    def _auto_fix_json(self, text: str):
+        """
+        Intenta auto-corregir JSON malformado.
+        Los modelos locales frecuentemente generan JSON con:
+        - Comillas simples en vez de dobles
+        - Comas trailing
+        - Comentarios // dentro del JSON
+        - Keys sin comillas
+        - Missing closing braces
+        """
+        import re as _re
+
+        # Si no parece JSON, no intentar
+        if '{' not in text and '}' not in text:
+            return None
+
+        fixed = text
+
+        # 1. Remover comentarios // style
+        fixed = _re.sub(r'//.*?$', '', fixed, flags=_re.MULTILINE)
+
+        # 2. Reemplazar comillas simples por dobles (solo si no están dentro de strings)
+        # Estrategia simple: reemplazar 'key': por "key":
+        fixed = _re.sub(r"'([^']+)':", r'"\1":', fixed)
+        # Y valores string con comillas simples
+        fixed = _re.sub(r":\s*'([^']*)'", r': "\1"', fixed)
+
+        # 3. Remover trailing commas antes de } o ]
+        fixed = _re.sub(r',\s*([}\]])', r'\1', fixed)
+
+        # 4. Agregar comillas a keys sin comillas
+        fixed = _re.sub(r'(\{|,)\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', fixed)
+
+        # 5. Agregar closing braces faltantes
+        open_braces = fixed.count('{') - fixed.count('}')
+        if open_braces > 0:
+            fixed += '}' * open_braces
+
+        # 6. Agregar closing brackets faltantes
+        open_brackets = fixed.count('[') - fixed.count(']')
+        if open_brackets > 0:
+            fixed += ']' * open_brackets
+
+        # Intentar parsear el JSON corregido
+        try:
+            result = json.loads(fixed)
+            if isinstance(result, dict):
+                return result
+        except Exception:
+            pass
+
+        # 7. Último intento: extraer solo los campos que nos importan
+        # Buscar accion, params, pensamiento, respuesta_final
+        extracted = {}
+        for field in ['accion', 'action', 'pensamiento', 'thought', 'respuesta_final', 'final_answer']:
+            match = _re.search(rf'"{field}"\s*:\s*"([^"]*)"', fixed)
+            if match:
+                key = field
+                if field == 'action':
+                    key = 'accion'
+                elif field == 'thought':
+                    key = 'pensamiento'
+                elif field == 'final_answer':
+                    key = 'respuesta_final'
+                extracted[key] = match.group(1)
+
+        # Buscar params como objeto
+        params_match = _re.search(r'"params?"\s*:\s*\{([^}]*)\}', fixed)
+        if params_match:
+            try:
+                params = json.loads('{' + params_match.group(1) + '}')
+                extracted['params'] = params
+            except Exception:
                 pass
+
+        if extracted:
+            return extracted
+
         return None
 
     def _extract_all_jsons(self, text):

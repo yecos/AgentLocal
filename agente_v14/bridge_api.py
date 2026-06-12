@@ -93,11 +93,18 @@ except Exception as e:
     bridge_logger.warning(f"No se pudo importar tools.browser_automation: {e}")
     BROWSER_AVAILABLE = False
 
+try:
+    from tools.direct_intent import get_intent_parser, parse_direct_intent
+    DIRECT_INTENT_AVAILABLE = True
+except Exception as e:
+    bridge_logger.warning(f"No se pudo importar tools.direct_intent: {e}")
+    DIRECT_INTENT_AVAILABLE = False
+
 # --- App ---
 app = FastAPI(
     title="ZAI Agent Bridge",
-    version="17.0.0",
-    description="Bridge API v17 - ReAct Agent con orchestrator, browser, plan, skills y error recovery",
+    version="19.0.0",
+    description="Bridge API v19 - Direct Intent Parser, Auto-fix JSON, Compact prompts for small models",
 )
 
 app.add_middleware(
@@ -246,8 +253,9 @@ async def status():
         ],
         "modelCount": len(models),
         "uptime": uptime,
-        "version": "v17",
+        "version": "v19",
         "skills": skills_info,
+        "direct_intent": DIRECT_INTENT_AVAILABLE,
     }
 
 
@@ -339,7 +347,7 @@ async def health():
         "status": "ok",
         "agent": AGENT_AVAILABLE,
         "busy": _busy,
-        "version": "v17",
+        "version": "v19",
         "tools": tool_count() if TOOLS_AVAILABLE else 0,
     }
 
@@ -557,6 +565,45 @@ async def browser_status():
         }
     except Exception:
         return {"available": True, "browser_active": False, "page_active": False}
+
+
+# ============================================================
+# RUTAS v19 - DIRECT INTENT PARSER
+# ============================================================
+
+class DirectIntentRequest(BaseModel):
+    message: str
+
+@app.post("/api/intent")
+async def detect_intent(request: DirectIntentRequest):
+    """Detecta la intencion del usuario usando pattern matching directo."""
+    if not DIRECT_INTENT_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Direct Intent Parser no disponible")
+    
+    result = parse_direct_intent(request.message)
+    if result is None:
+        return {"detected": False, "message": request.message}
+    
+    tool_name, params, confidence = result
+    return {
+        "detected": True,
+        "tool": tool_name,
+        "params": params,
+        "confidence": confidence,
+        "message": request.message,
+    }
+
+
+@app.get("/api/intent/patterns")
+async def intent_patterns():
+    """Lista los patrones de intencion disponibles."""
+    if not DIRECT_INTENT_AVAILABLE:
+        return {"patterns": [], "count": 0}
+    from tools.direct_intent import INTENT_PATTERNS
+    return {
+        "count": len(INTENT_PATTERNS),
+        "tools": list(set(p[1] for p in INTENT_PATTERNS)),
+    }
 
 
 # ============================================================
