@@ -404,10 +404,14 @@ export default function ZAIInterface() {
 
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({ error: "Unknown error" }));
+        let errorMsg = errorData.error || "Unknown error";
+        if (errorData.bridgeRequired) {
+          errorMsg = `AGENT mode requires the bridge. Run: python bridge_api.py`;
+        }
         setMessages((prev) =>
           prev.map((m) =>
             m.id === assistantId
-              ? { ...m, content: `Error: ${errorData.error || "Unknown error"}`, isStreaming: false, responseTime: Date.now() - startTime }
+              ? { ...m, content: errorMsg, isStreaming: false, responseTime: Date.now() - startTime }
               : m
           )
         );
@@ -663,6 +667,12 @@ export default function ZAIInterface() {
                     Start Ollama: ollama serve
                   </div>
                 )}
+                {useAgent && !status.agentAvailable && status.connected && (
+                  <div className="mt-1 px-4 py-2 border border-[rgba(255,136,0,0.2)] text-[10px] text-[#ff8800] leading-[1.6]">
+                    AGENT mode is ON but Bridge is not running.<br />
+                    Tools won't work. Start: <span className="text-[#ffaa33]">python bridge_api.py</span>
+                  </div>
+                )}
               </div>
             )}
 
@@ -680,6 +690,13 @@ export default function ZAIInterface() {
           </div>
 
           {/* ─── Input Area ──────────────────────────────────────────────── */}
+          {/* Bridge warning bar */}
+          {useAgent && !status.agentAvailable && status.connected && (
+            <div className="px-5 py-1.5 border-t border-[rgba(255,136,0,0.15)] bg-[rgba(255,136,0,0.03)] text-[10px] text-[#ff8800] flex items-center gap-2">
+              <Circle size={4} className="fill-[#ff8800] text-[#ff8800]" />
+              <span>Bridge not running — tools disabled. Start: python bridge_api.py</span>
+            </div>
+          )}
           <div className="shrink-0 border-t border-[rgba(255,255,255,0.06)]">
             <div className="flex items-end gap-3 px-5 py-3">
               <div className="text-[12px] text-[#555555] pb-1 select-none">{">"}</div>

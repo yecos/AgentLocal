@@ -55,8 +55,16 @@ async function streamFromBridge(messages: Array<{role: string; content: string}>
     });
 
     if (!bridgeResponse.ok) {
-      // Bridge not available, fall back to direct Ollama
-      return await streamFromOllama(messages, model);
+      // Bridge returned error — return error instead of silent fallback
+      const errorData = await bridgeResponse.json().catch(() => ({ detail: "Bridge error" }));
+      return new Response(
+        JSON.stringify({
+          error: "Agent Bridge error",
+          details: errorData.detail || `Bridge returned ${bridgeResponse.status}`,
+          bridgeRequired: true,
+        }),
+        { status: bridgeResponse.status, headers: { "Content-Type": "application/json" } }
+      );
     }
 
     // Forward the SSE stream from the bridge
@@ -99,8 +107,15 @@ async function streamFromBridge(messages: Array<{role: string; content: string}>
       },
     });
   } catch {
-    // Bridge not available, fall back to direct Ollama
-    return await streamFromOllama(messages, model);
+    // Bridge not reachable — return error instead of silent fallback
+    return new Response(
+      JSON.stringify({
+        error: "Agent Bridge not running",
+        details: "Start the bridge first: python bridge_api.py (port 8000)",
+        bridgeRequired: true,
+      }),
+      { status: 503, headers: { "Content-Type": "application/json" } }
+    );
   }
 }
 
