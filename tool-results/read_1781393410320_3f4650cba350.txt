@@ -1,0 +1,1007 @@
+     1→"""
+     2→=============================================================
+     3→AGENTE v15 - Herramientas de Diagramas
+     4→=============================================================
+     5→13+ tipos de diagramas:
+     6→- Flowchart (diagrama de flujo)
+     7→- Mind map (mapa mental)
+     8→- Tree diagram (diagrama de arbol)
+     9→- Org chart (organigrama)
+    10→- Architecture diagram (diagrama de arquitectura)
+    11→- Network/relationship graph (grafo de red)
+    12→- ER diagram (diagrama entidad-relacion)
+    13→- Class diagram (diagrama de clases)
+    14→- Gantt chart (diagrama de Gantt)
+    15→- Swimlane diagram (diagrama de carriles)
+    16→- Sequence diagram (diagrama de secuencia)
+    17→- Topology/route map (topologia/ruta)
+    18→- Knowledge graph (grafo de conocimiento)
+    19→- Mermaid (genera codigo Mermaid y renderiza)
+    20→
+    21→Renderizado: matplotlib + networkx / graphviz / Mermaid CLI
+    22→=============================================================
+    23→"""
+    24→
+    25→import os
+    26→import json
+    27→import logging
+    28→from config import REPOS_DIR, logger
+    29→from utils.security import validate_path
+    30→
+    31→
+    32→# ============================================================
+    33→# DIAPOSITIVO PRINCIPAL - CREAR DIAGRAMA
+    34→# ============================================================
+    35→
+    36→SUPPORTED_DIAGRAM_TYPES = [
+    37→    "flowchart", "mindmap", "tree", "org", "architecture",
+    38→    "network", "er", "class", "gantt", "swimlane", "sequence",
+    39→    "topology", "knowledge_graph", "mermaid",
+    40→]
+    41→
+    42→
+    43→def crear_diagrama(
+    44→    ruta: str,
+    45→    tipo: str = "flowchart",
+    46→    datos: str = "{}",
+    47→    titulo: str = "",
+    48→    opciones: str = "{}",
+    49→) -> str:
+    50→    """Crea un diagrama y lo guarda como imagen PNG o como codigo Mermaid.
+    51→    Soporta 13+ tipos: flowchart, mindmap, tree, org, architecture,
+    52→    network, er, class, gantt, swimlane, sequence, topology,
+    53→    knowledge_graph, mermaid.
+    54→
+    55→    Args:
+    56→        ruta: Ruta donde guardar (.png, .svg, o .md para Mermaid)
+    57→        tipo: Tipo de diagrama (ver lista arriba)
+    58→        datos: Datos del diagrama en formato JSON
+    59→        titulo: Titulo del diagrama
+    60→        opciones: Opciones extra en JSON
+    61→    """
+    62→    validation = validate_path(ruta)
+    63→    if validation != ruta:
+    64→        return validation
+    65→
+    66→    tipo = tipo.lower().strip().replace("-", "_").replace(" ", "_")
+    67→
+    68→    # Mapear aliases
+    69→    aliases = {
+    70→        "mind_map": "mindmap", "mapa_mental": "mindmap",
+    71→        "arbol": "tree", "tree_diagram": "tree",
+    72→        "organigrama": "org", "org_chart": "org",
+    73→        "arquitectura": "architecture",
+    74→        "red": "network", "grafo": "network", "relationship": "network",
+    75→        "entidad_relacion": "er", "er_diagram": "er",
+    76→        "diagrama_clases": "class", "class_diagram": "class",
+    77→        "gantt_chart": "gantt",
+    78→        "carriles": "swimlane", "swimlane_diagram": "swimlane",
+    79→        "secuencia": "sequence", "sequence_diagram": "sequence",
+    80→        "topologia": "topology", "route_map": "topology",
+    81→        "conocimiento": "knowledge_graph", "knowledge": "knowledge_graph",
+    82→    }
+    83→    tipo = aliases.get(tipo, tipo)
+    84→
+    85→    if tipo not in SUPPORTED_DIAGRAM_TYPES:
+    86→        return (f"ERROR: Tipo '{tipo}' no soportado. "
+    87→                f"Usar: {', '.join(SUPPORTED_DIAGRAM_TYPES)}")
+    88→
+    89→    # Si es Mermaid, generar codigo y opcionalmente renderizar
+    90→    if tipo == "mermaid":
+    91→        return _crear_mermaid(ruta, datos, titulo, opciones)
+    92→
+    93→    # Intentar renderizar con matplotlib/graphviz
+    94→    try:
+    95→        return _render_diagram(ruta, tipo, datos, titulo, opciones)
+    96→    except Exception as e:
+    97→        logger.debug(f"Renderizado grafico fallo: {e}")
+    98→        # Fallback: generar Mermaid y renderizar
+    99→        try:
+   100→            mermaid_code = _to_mermaid(tipo, datos, titulo)
+   101→            return _crear_mermaid(ruta, json.dumps({"code": mermaid_code}), titulo, opciones)
+   102→        except Exception as e2:
+   103→            return f"ERROR creando diagrama: {e}. Fallback Mermaid tambien fallo: {e2}"
+   104→
+   105→
+   106→def generar_mermaid(
+   107→    tipo: str = "flowchart",
+   108→    datos: str = "{}",
+   109→    titulo: str = "",
+   110→) -> str:
+   111→    """Genera codigo Mermaid para un diagrama. No renderiza, solo genera el codigo.
+   112→
+   113→    Args:
+   114→        tipo: Tipo de diagrama
+   115→        datos: Datos del diagrama en JSON
+   116→        titulo: Titulo (opcional)
+   117→    """
+   118→    tipo = tipo.lower().strip().replace("-", "_").replace(" ", "_")
+   119→    aliases = {
+   120→        "mind_map": "mindmap", "mapa_mental": "mindmap",
+   121→        "arbol": "tree", "organigrama": "org",
+   122→        "arquitectura": "architecture", "red": "network",
+   123→        "entidad_relacion": "er", "diagrama_clases": "class",
+   124→        "carriles": "swimlane", "secuencia": "sequence",
+   125→        "topologia": "topology", "conocimiento": "knowledge_graph",
+   126→    }
+   127→    tipo = aliases.get(tipo, tipo)
+   128→
+   129→    try:
+   130→        return _to_mermaid(tipo, datos, titulo)
+   131→    except Exception as e:
+   132→        return f"ERROR generando Mermaid: {e}"
+   133→
+   134→
+   135→# ============================================================
+   136→# RENDERIZADO DE DIAGRAMAS
+   137→# ============================================================
+   138→
+   139→def _render_diagram(ruta, tipo, datos_str, titulo, opciones_str):
+   140→    """Renderiza un diagrama usando matplotlib + networkx."""
+   141→    import matplotlib
+   142→    matplotlib.use('Agg')
+   143→    import matplotlib.pyplot as plt
+   144→    import matplotlib.font_manager as fm
+   145→    import numpy as np
+   146→
+   147→    _setup_fonts()
+   148→
+   149→    datos = _parse_json(datos_str, {})
+   150→    opts = _parse_json(opciones_str, {})
+   151→
+   152→    fig_width = opts.get("fig_width", 12)
+   153→    fig_height = opts.get("fig_height", 8)
+   154→
+   155→    if tipo == "gantt":
+   156→        return _render_gantt(ruta, datos, titulo, opts)
+   157→
+   158→    if tipo == "sequence":
+   159→        return _render_sequence(ruta, datos, titulo, opts)
+   160→
+   161→    if tipo == "swimlane":
+   162→        return _render_swimlane(ruta, datos, titulo, opts)
+   163→
+   164→    # Para grafos: usar networkx si esta disponible
+   165→    try:
+   166→        return _render_graph(ruta, tipo, datos, titulo, opts)
+   167→    except ImportError:
+   168→        # Fallback sin networkx
+   169→        return _render_simple(ruta, tipo, datos, titulo, opts)
+   170→
+   171→
+   172→def _render_graph(ruta, tipo, datos, titulo, opts):
+   173→    """Renderiza diagramas de grafo usando networkx + matplotlib."""
+   174→    import matplotlib
+   175→    matplotlib.use('Agg')
+   176→    import matplotlib.pyplot as plt
+   177→    import networkx as nx
+   178→    import numpy as np
+   179→
+   180→    _setup_fonts()
+   181→
+   182→    # Construir grafo desde datos
+   183→    G = _build_graph(tipo, datos)
+   184→
+   185→    fig, ax = plt.subplots(figsize=(opts.get("fig_width", 12),
+   186→                                     opts.get("fig_height", 8)))
+   187→
+   188→    # Layout segun tipo
+   189→    if tipo == "tree" or tipo == "org":
+   190→        pos = nx.drawing.nx_agraph.graphviz_layout(G, prog='dot') if _has_graphviz() \
+   191→              else _hierarchy_pos(G)
+   192→    elif tipo == "mindmap":
+   193→        pos = nx.drawing.nx_agraph.graphviz_layout(G, prog='twopi') if _has_graphviz() \
+   194→              else nx.spring_layout(G, k=2, iterations=50)
+   195→    elif tipo == "architecture" or tipo == "topology":
+   196→        pos = nx.drawing.nx_agraph.graphviz_layout(G, prog='fdp') if _has_graphviz() \
+   197→              else nx.spring_layout(G, k=1.5, iterations=50)
+   198→    elif tipo == "network" or tipo == "knowledge_graph":
+   199→        pos = nx.spring_layout(G, k=1.5, iterations=50, seed=42)
+   200→    elif tipo == "er":
+   201→        pos = nx.circular_layout(G)
+   202→    elif tipo == "class":
+   203→        pos = nx.drawing.nx_agraph.graphviz_layout(G, prog='dot') if _has_graphviz() \
+   204→              else nx.spring_layout(G, k=2, iterations=50)
+   205→    else:
+   206→        pos = nx.spring_layout(G, seed=42)
+   207→
+   208→    # Colores y estilos por tipo
+   209→    node_colors = opts.get("node_colors", None)
+   210→    edge_colors = opts.get("edge_colors", "#888888")
+   211→
+   212→    # Dibujar nodos
+   213→    node_size = opts.get("node_size", 1500)
+   214→    node_color = node_colors or PALETTE["primary"]
+   215→
+   216→    labels = nx.get_node_attributes(G, 'label')
+   217→    if not labels:
+   218→        labels = {n: str(n) for n in G.nodes()}
+   219→
+   220→    # Escalar fontsize segun longitud del label
+   221→    max_label_len = max(len(str(l)) for l in labels.values()) if labels else 1
+   222→    font_size = max(6, min(10, 14 - max_label_len))
+   223→
+   224→    nx.draw_networkx_nodes(G, pos, ax=ax, node_size=node_size,
+   225→                           node_color=node_color, alpha=0.8)
+   226→    nx.draw_networkx_labels(G, pos, labels, ax=ax, font_size=font_size,
+   227→                            font_color='white', font_weight='bold')
+   228→
+   229→    # Dibujar aristas
+   230→    edge_labels = nx.get_edge_attributes(G, 'label')
+   231→    nx.draw_networkx_edges(G, pos, ax=ax, edge_color=edge_colors,
+   232→                           arrows=True, arrowsize=15,
+   233→                           connectionstyle='arc3,rad=0.1')
+   234→    if edge_labels:
+   235→        nx.draw_networkx_edge_labels(G, pos, edge_labels, ax=ax,
+   236→                                      font_size=7, font_color='#555555')
+   237→
+   238→    # Titulo
+   239→    if titulo:
+   240→        ax.set_title(titulo, fontsize=14, fontweight='bold', pad=15)
+   241→
+   242→    ax.axis('off')
+   243→    plt.tight_layout()
+   244→
+   245→    # Guardar
+   246→    dir_name = os.path.dirname(ruta)
+   247→    if dir_name:
+   248→        os.makedirs(dir_name, exist_ok=True)
+   249→
+   250→    plt.savefig(ruta, dpi=150, bbox_inches='tight', facecolor='white')
+   251→    plt.close()
+   252→
+   253→    size_kb = os.path.getsize(ruta) / 1024
+   254→    return f"Diagrama [{tipo}] creado: {ruta} ({size_kb:.0f} KB, {G.number_of_nodes()} nodos, {G.number_of_edges()} aristas)"
+   255→
+   256→
+   257→def _build_graph(tipo, datos):
+   258→    """Construye un grafo networkx desde los datos JSON."""
+   259→    import networkx as nx
+   260→
+   261→    G = nx.DiGraph() if tipo in ("tree", "org", "flowchart", "class", "sequence") else nx.Graph()
+   262→
+   263→    # Nodos
+   264→    nodes = datos.get("nodes", datos.get("nodos", []))
+   265→    for node in nodes:
+   266→        if isinstance(node, str):
+   267→            G.add_node(node, label=node)
+   268→        elif isinstance(node, dict):
+   269→            nid = node.get("id", node.get("nombre", ""))
+   270→            label = node.get("label", node.get("nombre", node.get("name", nid)))
+   271→            G.add_node(nid, label=label, **{k: v for k, v in node.items()
+   272→                                            if k not in ("id", "label", "nombre", "name")})
+   273→
+   274→    # Aristas
+   275→    edges = datos.get("edges", datos.get("aristas", datos.get("conexiones", [])))
+   276→    for edge in edges:
+   277→        if isinstance(edge, (list, tuple)) and len(edge) >= 2:
+   278→            G.add_edge(edge[0], edge[1], label=str(edge[2]) if len(edge) > 2 else "")
+   279→        elif isinstance(edge, dict):
+   280→            src = edge.get("from", edge.get("source", edge.get("desde", "")))
+   281→            dst = edge.get("to", edge.get("target", edge.get("hasta", "")))
+   282→            label = edge.get("label", edge.get("etiqueta", ""))
+   283→            G.add_edge(src, dst, label=label)
+   284→
+   285→    # Si no hay nodos explicitos, generar desde aristas
+   286→    if not nodes and not edges:
+   287→        # Intentar formato simple: jerarquia
+   288→        hierarchy = datos.get("hierarchy", datos.get("jerarquia", {}))
+   289→        if hierarchy:
+   290→            _add_hierarchy(G, hierarchy, root=None)
+   291→
+   292→    return G
+   293→
+   294→
+   295→def _add_hierarchy(G, data, root=None):
+   296→    """Agrega nodos y aristas desde una estructura jerarquica."""
+   297→    if isinstance(data, dict):
+   298→        for key, children in data.items():
+   299→            G.add_node(key, label=key)
+   300→            if root is not None:
+   301→                G.add_edge(root, key)
+   302→            if isinstance(children, dict):
+   303→                _add_hierarchy(G, children, root=key)
+   304→            elif isinstance(children, list):
+   305→                for child in children:
+   306→                    if isinstance(child, str):
+   307→                        G.add_node(child, label=child)
+   308→                        G.add_edge(key, child)
+   309→                    elif isinstance(child, dict):
+   310→                        _add_hierarchy(G, child, root=key)
+   311→    elif isinstance(data, list):
+   312→        for item in data:
+   313→            if isinstance(item, str):
+   314→                G.add_node(item, label=item)
+   315→                if root is not None:
+   316→                    G.add_edge(root, item)
+   317→
+   318→
+   319→def _render_gantt(ruta, datos, titulo, opts):
+   320→    """Renderiza un diagrama de Gantt."""
+   321→    import matplotlib
+   322→    matplotlib.use('Agg')
+   323→    import matplotlib.pyplot as plt
+   324→    import numpy as np
+   325→    from datetime import datetime, timedelta
+   326→
+   327→    _setup_fonts()
+   328→
+   329→    tasks = datos.get("tasks", datos.get("tareas", []))
+   330→    if not tasks:
+   331→        return "ERROR: Diagrama de Gantt requiere 'tasks' con: nombre, inicio, duracion"
+   332→
+   333→    fig, ax = plt.subplots(figsize=(opts.get("fig_width", 12),
+   334→                                     opts.get("fig_height", 6)))
+   335→
+   336→    colors = opts.get("colors", CHART_COLORS)
+   337→
+   338→    for i, task in enumerate(tasks):
+   339→        name = task.get("nombre", task.get("name", f"Tarea {i+1}"))
+   340→        start = task.get("inicio", task.get("start", 0))
+   341→        duration = task.get("duracion", task.get("duration", 1))
+   342→        color = task.get("color", colors[i % len(colors)])
+   343→
+   344→        # Parsear inicio
+   345→        if isinstance(start, str):
+   346→            try:
+   347→                start_dt = datetime.strptime(start, "%Y-%m-%d")
+   348→                start_num = (start_dt - datetime(2000, 1, 1)).days
+   349→            except ValueError:
+   350→                start_num = float(start)
+   351→        else:
+   352→            start_num = float(start)
+   353→
+   354→        ax.barh(i, duration, left=start_num, height=0.6,
+   355→                color=color, alpha=0.8, edgecolor='white')
+   356→        ax.text(start_num + duration/2, i, name, ha='center', va='center',
+   357→                fontsize=8, fontweight='bold', color='white')
+   358→
+   359→    ax.set_yticks(range(len(tasks)))
+   360→    ax.set_yticklabels([t.get("nombre", t.get("name", f"Tarea {i+1}"))
+   361→                         for i, t in enumerate(tasks)])
+   362→    ax.invert_yaxis()
+   363→    ax.set_xlabel("Tiempo")
+   364→
+   365→    if titulo:
+   366→        ax.set_title(titulo, fontsize=14, fontweight='bold')
+   367→
+   368→    ax.grid(True, axis='x', alpha=0.3)
+   369→    plt.tight_layout()
+   370→
+   371→    dir_name = os.path.dirname(ruta)
+   372→    if dir_name:
+   373→        os.makedirs(dir_name, exist_ok=True)
+   374→
+   375→    plt.savefig(ruta, dpi=150, bbox_inches='tight', facecolor='white')
+   376→    plt.close()
+   377→
+   378→    size_kb = os.path.getsize(ruta) / 1024
+   379→    return f"Diagrama [gantt] creado: {ruta} ({size_kb:.0f} KB, {len(tasks)} tareas)"
+   380→
+   381→
+   382→def _render_sequence(ruta, datos, titulo, opts):
+   383→    """Renderiza un diagrama de secuencia simplificado."""
+   384→    import matplotlib
+   385→    matplotlib.use('Agg')
+   386→    import matplotlib.pyplot as plt
+   387→    import numpy as np
+   388→
+   389→    _setup_fonts()
+   390→
+   391→    participants = datos.get("participants", datos.get("participantes", []))
+   392→    messages = datos.get("messages", datos.get("mensajes", []))
+   393→
+   394→    if not participants:
+   395→        participants = ["A", "B"]
+   396→    if not messages:
+   397→        return "ERROR: Diagrama de secuencia requiere 'messages' con: from, to, text"
+   398→
+   399→    n = len(participants)
+   400→    fig, ax = plt.subplots(figsize=(opts.get("fig_width", 12),
+   401→                                     opts.get("fig_height", 8)))
+   402→
+   403→    # Dibujar participantes
+   404→    x_positions = np.linspace(0.1, 0.9, n)
+   405→    for i, p in enumerate(participants):
+   406→        ax.plot([x_positions[i]], [0.95], 's', markersize=20, color=PALETTE["primary"])
+   407→        ax.text(x_positions[i], 0.98, p, ha='center', va='bottom', fontsize=10, fontweight='bold')
+   408→        # Linea vertical
+   409→        ax.axvline(x=x_positions[i], ymin=0, ymax=0.9, color='#CCCCCC', linewidth=1, linestyle='--')
+   410→
+   411→    # Dibujar mensajes
+   412→    y_start = 0.88
+   413→    y_step = min(0.05, 0.8 / max(len(messages), 1))
+   414→
+   415→    for i, msg in enumerate(messages):
+   416→        src = msg.get("from", msg.get("desde", ""))
+   417→        dst = msg.get("to", msg.get("hasta", ""))
+   418→        text = msg.get("text", msg.get("texto", ""))
+   419→
+   420→        src_idx = participants.index(src) if src in participants else 0
+   421→        dst_idx = participants.index(dst) if dst in participants else min(1, n-1)
+   422→
+   423→        y = y_start - i * y_step
+   424→
+   425→        # Flecha
+   426→        color = PALETTE["success"] if src_idx < dst_idx else PALETTE["danger"]
+   427→        ax.annotate("", xy=(x_positions[dst_idx], y), xytext=(x_positions[src_idx], y),
+   428→                    arrowprops=dict(arrowstyle="->", color=color, lw=1.5))
+   429→        # Texto
+   430→        mid_x = (x_positions[src_idx] + x_positions[dst_idx]) / 2
+   431→        ax.text(mid_x, y + 0.01, text, ha='center', va='bottom', fontsize=8,
+   432→                bbox=dict(boxstyle='round,pad=0.2', facecolor='lightyellow', alpha=0.8))
+   433→
+   434→    if titulo:
+   435→        ax.set_title(titulo, fontsize=14, fontweight='bold')
+   436→
+   437→    ax.axis('off')
+   438→    ax.set_xlim(0, 1)
+   439→    ax.set_ylim(0, 1)
+   440→    plt.tight_layout()
+   441→
+   442→    dir_name = os.path.dirname(ruta)
+   443→    if dir_name:
+   444→        os.makedirs(dir_name, exist_ok=True)
+   445→
+   446→    plt.savefig(ruta, dpi=150, bbox_inches='tight', facecolor='white')
+   447→    plt.close()
+   448→
+   449→    size_kb = os.path.getsize(ruta) / 1024
+   450→    return f"Diagrama [sequence] creado: {ruta} ({size_kb:.0f} KB)"
+   451→
+   452→
+   453→def _render_swimlane(ruta, datos, titulo, opts):
+   454→    """Renderiza un diagrama de swimlane (carriles)."""
+   455→    import matplotlib
+   456→    matplotlib.use('Agg')
+   457→    import matplotlib.pyplot as plt
+   458→    import numpy as np
+   459→
+   460→    _setup_fonts()
+   461→
+   462→    lanes = datos.get("lanes", datos.get("carriles", []))
+   463→    steps = datos.get("steps", datos.get("pasos", []))
+   464→
+   465→    if not lanes:
+   466→        lanes = ["Lane 1", "Lane 2"]
+   467→    if not steps:
+   468→        return "ERROR: Diagrama swimlane requiere 'steps' con: lane, texto, orden"
+   469→
+   470→    n_lanes = len(lanes)
+   471→    fig, ax = plt.subplots(figsize=(opts.get("fig_width", 14),
+   472→                                     opts.get("fig_height", max(4, 2 + len(steps) * 0.5))))
+   473→
+   474→    # Dibujar carriles horizontales
+   475→    lane_height = 1.0 / n_lanes
+   476→    colors = CHART_COLORS[:n_lanes]
+   477→
+   478→    for i, lane in enumerate(lanes):
+   479→        y_bottom = 1.0 - (i + 1) * lane_height
+   480→        ax.axhspan(y_bottom, y_bottom + lane_height, alpha=0.1, color=colors[i])
+   481→        ax.text(-0.02, y_bottom + lane_height/2, lane, ha='right', va='center',
+   482→                fontsize=10, fontweight='bold', color=colors[i])
+   483→
+   484→    # Dibujar pasos
+   485→    step_width = 0.8 / max(len(steps), 1)
+   486→    for i, step in enumerate(steps):
+   487→        lane_name = step.get("lane", step.get("carril", lanes[0]))
+   488→        text = step.get("texto", step.get("text", f"Paso {i+1}"))
+   489→        order = step.get("orden", step.get("order", i))
+   490→
+   491→        lane_idx = lanes.index(lane_name) if lane_name in lanes else 0
+   492→        x = 0.05 + (order * step_width) + step_width/2
+   493→        y = 1.0 - (lane_idx + 0.5) * lane_height
+   494→
+   495→        # Caja
+   496→        bbox = dict(boxstyle='round,pad=0.3', facecolor=colors[lane_idx], alpha=0.7)
+   497→        ax.text(x, y, text, ha='center', va='center', fontsize=8,
+   498→                fontweight='bold', color='white', bbox=bbox)
+   499→
+   500→    if titulo:
+   501→        ax.set_title(titulo, fontsize=14, fontweight='bold')
+   502→
+   503→    ax.axis('off')
+   504→    ax.set_xlim(-0.15, 1.05)
+   505→    ax.set_ylim(0, 1.05)
+   506→    plt.tight_layout()
+   507→
+   508→    dir_name = os.path.dirname(ruta)
+   509→    if dir_name:
+   510→        os.makedirs(dir_name, exist_ok=True)
+   511→
+   512→    plt.savefig(ruta, dpi=150, bbox_inches='tight', facecolor='white')
+   513→    plt.close()
+   514→
+   515→    size_kb = os.path.getsize(ruta) / 1024
+   516→    return f"Diagrama [swimlane] creado: {ruta} ({size_kb:.0f} KB)"
+   517→
+   518→
+   519→def _render_simple(ruta, tipo, datos, titulo, opts):
+   520→    """Renderizado simple sin networkx (fallback)."""
+   521→    import matplotlib
+   522→    matplotlib.use('Agg')
+   523→    import matplotlib.pyplot as plt
+   524→
+   525→    _setup_fonts()
+   526→
+   527→    fig, ax = plt.subplots(figsize=(10, 8))
+   528→
+   529→    # Generar representacion visual simple
+   530→    nodes = datos.get("nodes", datos.get("nodos", []))
+   531→    edges = datos.get("edges", datos.get("aristas", []))
+   532→
+   533→    if not nodes and not edges:
+   534→        ax.text(0.5, 0.5, f"Diagrama: {tipo}\n(sin datos)", ha='center', va='center',
+   535→                fontsize=16, transform=ax.transAxes)
+   536→    else:
+   537→        # Posicionar nodos en circulo
+   538→        import math
+   539→        n = len(nodes) if nodes else 0
+   540→        positions = {}
+   541→        for i, node in enumerate(nodes if nodes else []):
+   542→            angle = 2 * math.pi * i / max(n, 1)
+   543→            x = 0.5 + 0.35 * math.cos(angle)
+   544→            y = 0.5 + 0.35 * math.sin(angle)
+   545→            label = node if isinstance(node, str) else node.get("label", node.get("id", ""))
+   546→            positions[label] = (x, y)
+   547→            ax.plot(x, y, 'o', markersize=25, color=PALETTE["primary"], alpha=0.8)
+   548→            ax.text(x, y, label, ha='center', va='center', fontsize=8,
+   549→                    fontweight='bold', color='white')
+   550→
+   551→        # Dibujar aristas
+   552→        for edge in edges if edges else []:
+   553→            if isinstance(edge, (list, tuple)) and len(edge) >= 2:
+   554→                src, dst = str(edge[0]), str(edge[1])
+   555→                if src in positions and dst in positions:
+   556→                    ax.annotate("", xy=positions[dst], xytext=positions[src],
+   557→                                arrowprops=dict(arrowstyle="->", color=PALETTE["secondary"], lw=1.5))
+   558→
+   559→    if titulo:
+   560→        ax.set_title(titulo, fontsize=14, fontweight='bold')
+   561→
+   562→    ax.axis('off')
+   563→    plt.tight_layout()
+   564→
+   565→    dir_name = os.path.dirname(ruta)
+   566→    if dir_name:
+   567→        os.makedirs(dir_name, exist_ok=True)
+   568→
+   569→    plt.savefig(ruta, dpi=150, bbox_inches='tight', facecolor='white')
+   570→    plt.close()
+   571→
+   572→    size_kb = os.path.getsize(ruta) / 1024
+   573→    return f"Diagrama [{tipo}] creado: {ruta} ({size_kb:.0f} KB)"
+   574→
+   575→
+   576→# ============================================================
+   577→# MERMAID
+   578→# ============================================================
+   579→
+   580→def _crear_mermaid(ruta, datos_str, titulo, opciones_str):
+   581→    """Genera codigo Mermaid y opcionalmente renderiza a imagen."""
+   582→    datos = _parse_json(datos_str, {})
+   583→
+   584→    # Si ya viene codigo Mermaid
+   585→    code = datos.get("code", datos.get("codigo", ""))
+   586→    if not code:
+   587→        # Generar desde tipo y datos
+   588→        tipo = datos.get("tipo", "flowchart")
+   589→        code = _to_mermaid(tipo, datos_str, titulo)
+   590→
+   591→    # Guardar como .md o .mermaid
+   592→    if ruta.endswith(('.md', '.mermaid', '.mmd')):
+   593→        dir_name = os.path.dirname(ruta)
+   594→        if dir_name:
+   595→            os.makedirs(dir_name, exist_ok=True)
+   596→        with open(ruta, 'w', encoding='utf-8') as f:
+   597→            f.write(f"```mermaid\n{code}\n```\n")
+   598→        return f"Codigo Mermaid guardado: {ruta}"
+   599→
+   600→    # Intentar renderizar a imagen con mmdc (mermaid-cli)
+   601→    import subprocess
+   602→    try:
+   603→        result = subprocess.run(
+   604→            ["mmdc", "--version"], capture_output=True, text=True, timeout=5
+   605→        )
+   606→        if result.returncode == 0:
+   607→            # Guardar temporal y renderizar
+   608→            tmp_mmd = ruta + ".mmd"
+   609→            with open(tmp_mmd, 'w') as f:
+   610→                f.write(code)
+   611→
+   612→            render_result = subprocess.run(
+   613→                ["mmdc", "-i", tmp_mmd, "-o", ruta, "-b", "white"],
+   614→                capture_output=True, text=True, timeout=30
+   615→            )
+   616→            os.remove(tmp_mmd)
+   617→
+   618→            if render_result.returncode == 0 and os.path.exists(ruta):
+   619→                size_kb = os.path.getsize(ruta) / 1024
+   620→                return f"Diagrama Mermaid renderizado: {ruta} ({size_kb:.0f} KB)"
+   621→
+   622→    except (FileNotFoundError, subprocess.TimeoutExpired):
+   623→        pass
+   624→
+   625→    # Fallback: guardar como .md con codigo Mermaid
+   626→    md_path = ruta.rsplit('.', 1)[0] + '.md'
+   627→    with open(md_path, 'w', encoding='utf-8') as f:
+   628→        f.write(f"```mermaid\n{code}\n```\n")
+   629→    return (f"Mermaid CLI no disponible. Codigo guardado en: {md_path}\n"
+   630→            f"Para renderizar instala: npm install -g @mermaid-js/mermaid-cli\n\n"
+   631→            f"Codigo generado:\n```\n{code}\n```")
+   632→
+   633→
+   634→def _to_mermaid(tipo, datos_str, titulo=""):
+   635→    """Convierte datos JSON a codigo Mermaid."""
+   636→    datos = _parse_json(datos_str, {})
+   637→
+   638→    generators = {
+   639→        "flowchart": _mermaid_flowchart,
+   640→        "mindmap": _mermaid_mindmap,
+   641→        "tree": _mermaid_flowchart,  # Mismo que flowchart con direccion TD
+   642→        "org": _mermaid_flowchart,
+   643→        "architecture": _mermaid_flowchart,
+   644→        "network": _mermaid_graph,
+   645→        "er": _mermaid_er,
+   646→        "class": _mermaid_class,
+   647→        "gantt": _mermaid_gantt,
+   648→        "sequence": _mermaid_sequence,
+   649→        "swimlane": _mermaid_flowchart,
+   650→        "topology": _mermaid_graph,
+   651→        "knowledge_graph": _mermaid_graph,
+   652→    }
+   653→
+   654→    gen = generators.get(tipo, _mermaid_flowchart)
+   655→    code = gen(datos, titulo)
+   656→
+   657→    return code
+   658→
+   659→
+   660→def _mermaid_flowchart(datos, titulo=""):
+   661→    """Genera Mermaid flowchart."""
+   662→    direction = datos.get("direction", datos.get("direccion", "TD"))
+   663→    lines = [f"flowchart {direction}"]
+   664→
+   665→    if titulo:
+   666→        lines.append(f"    %% {titulo}")
+   667→
+   668→    nodes = datos.get("nodes", datos.get("nodos", []))
+   669→    edges = datos.get("edges", datos.get("aristas", datos.get("conexiones", [])))
+   670→
+   671→    # Nodos
+   672→    for node in nodes:
+   673→        if isinstance(node, str):
+   674→            safe_id = _mermaid_id(node)
+   675→            lines.append(f"    {safe_id}[\"{node}\"]")
+   676→        elif isinstance(node, dict):
+   677→            nid = _mermaid_id(node.get("id", node.get("nombre", "")))
+   678→            label = node.get("label", node.get("nombre", node.get("id", "")))
+   679→            shape = node.get("shape", "rect")
+   680→            if shape == "diamond":
+   681→                lines.append(f"    {nid}{{\"{label}\"}}")
+   682→            elif shape == "rounded":
+   683→                lines.append(f"    {nid}(\"{label}\")")
+   684→            elif shape == "circle":
+   685→                lines.append(f"    {nid}((\"{label}\"))")
+   686→            elif shape == "stadium":
+   687→                lines.append(f"    {nid}([\"{label}\"])")
+   688→            else:
+   689→                lines.append(f"    {nid}[\"{label}\"]")
+   690→
+   691→    # Aristas
+   692→    for edge in edges:
+   693→        if isinstance(edge, (list, tuple)) and len(edge) >= 2:
+   694→            src = _mermaid_id(str(edge[0]))
+   695→            dst = _mermaid_id(str(edge[1]))
+   696→            label = str(edge[2]) if len(edge) > 2 else ""
+   697→            arrow = "-->" + f"|{label}|" if label else "-->"
+   698→            lines.append(f"    {src} {arrow} {dst}")
+   699→        elif isinstance(edge, dict):
+   700→            src = _mermaid_id(edge.get("from", edge.get("source", "")))
+   701→            dst = _mermaid_id(edge.get("to", edge.get("target", "")))
+   702→            label = edge.get("label", edge.get("etiqueta", ""))
+   703→            arrow = "-->" + f"|{label}|" if label else "-->"
+   704→            lines.append(f"    {src} {arrow} {dst}")
+   705→
+   706→    # Jerarquia
+   707→    hierarchy = datos.get("hierarchy", datos.get("jerarquia", {}))
+   708→    if hierarchy and not nodes and not edges:
+   709→        _add_hierarchy_mermaid(lines, hierarchy, indent=4)
+   710→
+   711→    return "\n".join(lines)
+   712→
+   713→
+   714→def _mermaid_mindmap(datos, titulo=""):
+   715→    """Genera Mermaid mindmap."""
+   716→    lines = ["mindmap"]
+   717→
+   718→    hierarchy = datos.get("hierarchy", datos.get("jerarquia", {}))
+   719→    if hierarchy:
+   720→        _add_mindmap_mermaid(lines, hierarchy, indent=4)
+   721→    else:
+   722→        # Convertir nodos a mindmap
+   723→        root = datos.get("root", datos.get("raiz", "Root"))
+   724→        nodes = datos.get("nodes", datos.get("nodos", []))
+   725→        lines.append(f"  {root}")
+   726→        for node in nodes:
+   727→            label = node if isinstance(node, str) else node.get("label", node.get("id", ""))
+   728→            lines.append(f"    {label}")
+   729→
+   730→    return "\n".join(lines)
+   731→
+   732→
+   733→def _mermaid_graph(datos, titulo=""):
+   734→    """Genera Mermaid graph (no dirigido)."""
+   735→    lines = ["graph LR"]
+   736→    if titulo:
+   737→        lines.append(f"    %% {titulo}")
+   738→
+   739→    edges = datos.get("edges", datos.get("aristas", []))
+   740→    for edge in edges:
+   741→        if isinstance(edge, (list, tuple)) and len(edge) >= 2:
+   742→            src = _mermaid_id(str(edge[0]))
+   743→            dst = _mermaid_id(str(edge[1]))
+   744→            label = str(edge[2]) if len(edge) > 2 else ""
+   745→            link = f"---|{label}|" if label else "---"
+   746→            lines.append(f"    {src} {link} {dst}")
+   747→        elif isinstance(edge, dict):
+   748→            src = _mermaid_id(edge.get("from", edge.get("source", "")))
+   749→            dst = _mermaid_id(edge.get("to", edge.get("target", "")))
+   750→            label = edge.get("label", "")
+   751→            link = f"---|{label}|" if label else "---"
+   752→            lines.append(f"    {src} {link} {dst}")
+   753→
+   754→    return "\n".join(lines)
+   755→
+   756→
+   757→def _mermaid_er(datos, titulo=""):
+   758→    """Genera Mermaid ER diagram."""
+   759→    lines = ["erDiagram"]
+   760→    if titulo:
+   761→        lines.append(f"    %% {titulo}")
+   762→
+   763→    entities = datos.get("entities", datos.get("entidades", []))
+   764→    relationships = datos.get("relationships", datos.get("relaciones", []))
+   765→
+   766→    for entity in entities:
+   767→        if isinstance(entity, dict):
+   768→            name = entity.get("name", entity.get("nombre", ""))
+   769→            attrs = entity.get("attributes", entity.get("atributos", []))
+   770→            lines.append(f"    {name} {{")
+   771→            for attr in attrs:
+   772→                if isinstance(attr, str):
+   773→                    lines.append(f"        string {attr}")
+   774→                elif isinstance(attr, dict):
+   775→                    atype = attr.get("type", "string")
+   776→                    aname = attr.get("name", "")
+   777→                    lines.append(f"        {atype} {aname}")
+   778→            lines.append(f"    }}")
+   779→
+   780→    for rel in relationships:
+   781→        if isinstance(rel, dict):
+   782→            e1 = rel.get("from", rel.get("entity1", ""))
+   783→            e2 = rel.get("to", rel.get("entity2", ""))
+   784→            label = rel.get("label", rel.get("nombre", ""))
+   785→            card1 = rel.get("cardinality1", "||")
+   786→            card2 = rel.get("cardinality2", "o{")
+   787→            lines.append(f"    {e1} {card1}--{card2} {e2} : \"{label}\"")
+   788→
+   789→    return "\n".join(lines)
+   790→
+   791→
+   792→def _mermaid_class(datos, titulo=""):
+   793→    """Genera Mermaid class diagram."""
+   794→    lines = ["classDiagram"]
+   795→    if titulo:
+   796→        lines.append(f"    %% {titulo}")
+   797→
+   798→    classes = datos.get("classes", datos.get("clases", []))
+   799→    for cls in classes:
+   800→        name = cls.get("name", cls.get("nombre", ""))
+   801→        attrs = cls.get("attributes", cls.get("atributos", []))
+   802→        methods = cls.get("methods", cls.get("metodos", []))
+   803→
+   804→        lines.append(f"    class {name} {{")
+   805→        for attr in attrs:
+   806→            lines.append(f"        {attr}")
+   807→        for method in methods:
+   808→            lines.append(f"        {method}")
+   809→        lines.append(f"    }}")
+   810→
+   811→    # Relaciones
+   812→    relationships = datos.get("relationships", datos.get("relaciones", []))
+   813→    for rel in relationships:
+   814→        if isinstance(rel, dict):
+   815→            e1 = rel.get("from", "")
+   816→            e2 = rel.get("to", "")
+   817→            rtype = rel.get("type", "-->")
+   818→            lines.append(f"    {e1} {rtype} {e2}")
+   819→
+   820→    return "\n".join(lines)
+   821→
+   822→
+   823→def _mermaid_gantt(datos, titulo=""):
+   824→    """Genera Mermaid Gantt chart."""
+   825→    lines = ["gantt"]
+   826→    if titulo:
+   827→        lines.append(f"    title {titulo}")
+   828→
+   829→    date_format = datos.get("dateFormat", "YYYY-MM-DD")
+   830→    lines.append(f"    dateFormat {date_format}")
+   831→
+   832→    tasks = datos.get("tasks", datos.get("tareas", []))
+   833→    sections = {}
+   834→
+   835→    for task in tasks:
+   836→        section = task.get("section", "Default")
+   837→        name = task.get("nombre", task.get("name", ""))
+   838→        start = task.get("inicio", task.get("start", ""))
+   839→        duration = task.get("duracion", task.get("duration", "1d"))
+   840→        status = task.get("status", "")
+   841→
+   842→        if section not in sections:
+   843→            sections[section] = []
+   844→        status_prefix = "active " if status == "active" else "done " if status == "done" else ""
+   845→        sections[section].append(f"{status_prefix}{name} : {start}, {duration}")
+   846→
+   847→    for section, task_lines in sections.items():
+   848→        lines.append(f"    section {section}")
+   849→        for tl in task_lines:
+   850→            lines.append(f"    {tl}")
+   851→
+   852→    return "\n".join(lines)
+   853→
+   854→
+   855→def _mermaid_sequence(datos, titulo=""):
+   856→    """Genera Mermaid sequence diagram."""
+   857→    lines = ["sequenceDiagram"]
+   858→    if titulo:
+   859→        lines.append(f"    title {titulo}")
+   860→
+   861→    participants = datos.get("participants", datos.get("participantes", []))
+   862→    for p in participants:
+   863→        lines.append(f"    participant {p}")
+   864→
+   865→    messages = datos.get("messages", datos.get("mensajes", []))
+   866→    for msg in messages:
+   867→        src = msg.get("from", msg.get("desde", ""))
+   868→        dst = msg.get("to", msg.get("hasta", ""))
+   869→        text = msg.get("text", msg.get("texto", ""))
+   870→        mtype = msg.get("type", "")
+   871→
+   872→        if mtype == "dashed":
+   873→            lines.append(f"    {src}-->>{dst}: {text}")
+   874→        elif mtype == "note":
+   875→            lines.append(f"    Note right of {dst}: {text}")
+   876→        else:
+   877→            lines.append(f"    {src}->>{dst}: {text}")
+   878→
+   879→    return "\n".join(lines)
+   880→
+   881→
+   882→def _add_hierarchy_mermaid(lines, data, indent=4):
+   883→    """Agrega jerarquia a codigo Mermaid."""
+   884→    spaces = " " * indent
+   885→    if isinstance(data, dict):
+   886→        for key, children in data.items():
+   887→            safe_key = _mermaid_id(key)
+   888→            lines.append(f"{spaces}{safe_key}[\"{key}\"]")
+   889→            if isinstance(children, dict):
+   890→                for child_key in children:
+   891→                    safe_child = _mermaid_id(child_key)
+   892→                    lines.append(f"{spaces}{safe_key} --> {safe_child}")
+   893→                _add_hierarchy_mermaid(lines, children, indent)
+   894→            elif isinstance(children, list):
+   895→                for child in children:
+   896→                    if isinstance(child, str):
+   897→                        safe_child = _mermaid_id(child)
+   898→                        lines.append(f"{spaces}{safe_child}[\"{child}\"]")
+   899→                        lines.append(f"{spaces}{safe_key} --> {safe_child}")
+   900→
+   901→
+   902→def _add_mindmap_mermaid(lines, data, indent=4):
+   903→    """Agrega estructura de mindmap a codigo Mermaid."""
+   904→    spaces = " " * indent
+   905→    if isinstance(data, dict):
+   906→        for key, children in data.items():
+   907→            lines.append(f"{spaces}{key}")
+   908→            if isinstance(children, dict):
+   909→                _add_mindmap_mermaid(lines, children, indent + 2)
+   910→            elif isinstance(children, list):
+   911→                for child in children:
+   912→                    if isinstance(child, str):
+   913→                        lines.append(f"{spaces}  {child}")
+   914→                    elif isinstance(child, dict):
+   915→                        _add_mindmap_mermaid(lines, child, indent + 2)
+   916→
+   917→
+   918→def _mermaid_id(text: str) -> str:
+   919→    """Convierte texto a ID valido para Mermaid."""
+   920→    import re
+   921→    # Reemplazar caracteres no alfanumericos
+   922→    safe = re.sub(r'[^a-zA-Z0-9_]', '_', text)
+   923→    # Asegurar que empieza con letra
+   924→    if safe and safe[0].isdigit():
+   925→        safe = "n" + safe
+   926→    return safe or "node"
+   927→
+   928→
+   929→# ============================================================
+   930→# UTILIDADES COMUNES
+   931→# ============================================================
+   932→
+   933→PALETTE = {
+   934→    "primary": "#4472C4",
+   935→    "secondary": "#ED7D31",
+   936→    "tertiary": "#A5A5A5",
+   937→    "success": "#70AD47",
+   938→    "warning": "#FFC000",
+   939→    "danger": "#FF6B6B",
+   940→    "info": "#5B9BD5",
+   941→    "purple": "#9B59B6",
+   942→    "dark_blue": "#264478",
+   943→    "teal": "#1ABC9C",
+   944→}
+   945→
+   946→CHART_COLORS = [
+   947→    "#4472C4", "#ED7D31", "#A5A5A5", "#FFC000", "#5B9BD5",
+   948→    "#70AD47", "#264478", "#9B59B6", "#1ABC9C", "#FF6B6B",
+   949→]
+   950→
+   951→
+   952→def _setup_fonts():
+   953→    """Configura fuentes para soporte Unicode."""
+   954→    import matplotlib.font_manager as fm
+   955→    import matplotlib.pyplot as plt
+   956→    try:
+   957→        fm.fontManager.addfont('/usr/share/fonts/truetype/chinese/NotoSansSC[wght].ttf')
+   958→    except Exception:
+   959→        pass
+   960→    try:
+   961→        fm.fontManager.addfont('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf')
+   962→    except Exception:
+   963→        pass
+   964→    plt.rcParams['font.sans-serif'] = ['Noto Sans SC', 'DejaVu Sans']
+   965→    plt.rcParams['axes.unicode_minus'] = False
+   966→
+   967→
+   968→def _parse_json(s, default=None):
+   969→    """Parsea JSON de forma segura."""
+   970→    if not s or s in ("{}", "[]", ""):
+   971→        return default if default is not None else {}
+   972→    try:
+   973→        return json.loads(s)
+   974→    except (json.JSONDecodeError, TypeError):
+   975→        return default if default is not None else {}
+   976→
+   977→
+   978→def _has_graphviz():
+   979→    """Verifica si graphviz esta instalado."""
+   980→    try:
+   981→        import subprocess
+   982→        result = subprocess.run(["dot", "-V"], capture_output=True, timeout=3)
+   983→        return result.returncode == 0
+   984→    except Exception:
+   985→        return False
+   986→
+   987→
+   988→def _hierarchy_pos(G, root=None, width=1., vert_gap=0.2, vert_loc=0, xcenter=0.5):
+   989→    """Calcula posiciones jerarquicas para un grafo sin graphviz."""
+   990→    import networkx as nx
+   991→
+   992→    if root is None:
+   993→        roots = [n for n in G.nodes() if G.in_degree(n) == 0] if G.is_directed() else [list(G.nodes())[0]]
+   994→        root = roots[0] if roots else list(G.nodes())[0]
+   995→
+   996→    pos = {root: (xcenter, vert_loc)}
+   997→    children = list(G.successors(root)) if G.is_directed() else list(G.neighbors(root))
+   998→
+   999→    if children:
+  1000→        dx = width / len(children)
+  1001→        nextx = xcenter - width/2 - dx/2
+  1002→        for child in children:
+  1003→            nextx += dx
+  1004→            pos.update(_hierarchy_pos(G, root=child, width=dx, vert_gap=vert_gap,
+  1005→                                       vert_loc=vert_loc - vert_gap, xcenter=nextx))
+  1006→    return pos
+  1007→

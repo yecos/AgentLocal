@@ -1,0 +1,1004 @@
+     1→"""
+     2→=============================================================
+     3→AGENTE v14.7 - Esquemas de Function Calling para Ollama
+     4→=============================================================
+     5→Esquemas para function calling nativo de Ollama/qwen3.
+     6→v14.7: Incluye herramientas de Super Agente.
+     7→=============================================================
+     8→"""
+     9→
+    10→TOOL_SCHEMAS = [
+    11→    # ============================================================
+    12→    # HERRAMIENTAS ORIGINALES
+    13→    # ============================================================
+    14→    {
+    15→        "type": "function",
+    16→        "function": {
+    17→            "name": "ejecutar_comando",
+    18→            "description": "Ejecuta un comando en la terminal. Peligrosos requieren confirmacion.",
+    19→            "parameters": {
+    20→                "type": "object",
+    21→                "properties": {
+    22→                    "comando": {"type": "string", "description": "Comando a ejecutar"},
+    23→                    "confirmar_peligroso": {"type": "boolean", "description": "True si el usuario confirmo un comando peligroso"}
+    24→                },
+    25→                "required": ["comando"]
+    26→            }
+    27→        }
+    28→    },
+    29→    {
+    30→        "type": "function",
+    31→        "function": {
+    32→            "name": "abrir_aplicacion",
+    33→            "description": "Abre una aplicacion de escritorio por nombre. NO usar para abrir paginas web.",
+    34→            "parameters": {
+    35→                "type": "object",
+    36→                "properties": {
+    37→                    "app": {"type": "string", "description": "Nombre de la aplicacion (ej: whatsapp, chrome, vscode)"}
+    38→                },
+    39→                "required": ["app"]
+    40→            }
+    41→        }
+    42→    },
+    43→    {
+    44→        "type": "function",
+    45→        "function": {
+    46→            "name": "abrir_url",
+    47→            "description": "Abre una pagina web en el navegador. Reconoce nombres de sitios populares.",
+    48→            "parameters": {
+    49→                "type": "object",
+    50→                "properties": {
+    51→                    "url": {"type": "string", "description": "URL o nombre del sitio (ej: youtube, https://google.com)"}
+    52→                },
+    53→                "required": ["url"]
+    54→            }
+    55→        }
+    56→    },
+    57→    {
+    58→        "type": "function",
+    59→        "function": {
+    60→            "name": "buscar_youtube",
+    61→            "description": "Busca un video en YouTube y abre los resultados en el navegador.",
+    62→            "parameters": {
+    63→                "type": "object",
+    64→                "properties": {
+    65→                    "consulta": {"type": "string", "description": "Que buscar en YouTube"}
+    66→                },
+    67→                "required": ["consulta"]
+    68→            }
+    69→        }
+    70→    },
+    71→    {
+    72→        "type": "function",
+    73→        "function": {
+    74→            "name": "generar_codigo",
+    75→            "description": "Genera codigo COMPLETO usando el LLM y lo guarda en un archivo.",
+    76→            "parameters": {
+    77→                "type": "object",
+    78→                "properties": {
+    79→                    "descripcion": {"type": "string", "description": "Que crear (detallado)"},
+    80→                    "tipo": {"type": "string", "enum": ["html", "python", "javascript", "css", "json", "markdown", "texto"], "description": "Tipo de archivo"},
+    81→                    "ruta": {"type": "string", "description": "Ruta donde guardar (opcional)"}
+    82→                },
+    83→                "required": ["descripcion", "tipo"]
+    84→            }
+    85→        }
+    86→    },
+    87→    {
+    88→        "type": "function",
+    89→        "function": {
+    90→            "name": "leer_archivo",
+    91→            "description": "Lee el contenido de un archivo de texto.",
+    92→            "parameters": {
+    93→                "type": "object",
+    94→                "properties": {
+    95→                    "ruta": {"type": "string", "description": "Ruta del archivo"}
+    96→                },
+    97→                "required": ["ruta"]
+    98→            }
+    99→        }
+   100→    },
+   101→    {
+   102→        "type": "function",
+   103→        "function": {
+   104→            "name": "escribir_archivo",
+   105→            "description": "Crea o modifica un archivo de texto.",
+   106→            "parameters": {
+   107→                "type": "object",
+   108→                "properties": {
+   109→                    "ruta": {"type": "string", "description": "Ruta del archivo"},
+   110→                    "contenido": {"type": "string", "description": "Contenido a escribir"}
+   111→                },
+   112→                "required": ["ruta", "contenido"]
+   113→            }
+   114→        }
+   115→    },
+   116→    {
+   117→        "type": "function",
+   118→        "function": {
+   119→            "name": "listar_archivos",
+   120→            "description": "Lista archivos y carpetas de un directorio.",
+   121→            "parameters": {
+   122→                "type": "object",
+   123→                "properties": {
+   124→                    "ruta": {"type": "string", "description": "Ruta del directorio"}
+   125→                },
+   126→                "required": []
+   127→            }
+   128→        }
+   129→    },
+   130→    {
+   131→        "type": "function",
+   132→        "function": {
+   133→            "name": "analizar_proyecto",
+   134→            "description": "Analiza la estructura completa de un proyecto.",
+   135→            "parameters": {
+   136→                "type": "object",
+   137→                "properties": {
+   138→                    "ruta": {"type": "string", "description": "Ruta del proyecto"}
+   139→                },
+   140→                "required": ["ruta"]
+   141→            }
+   142→        }
+   143→    },
+   144→    {
+   145→        "type": "function",
+   146→        "function": {
+   147→            "name": "clonar_repositorio",
+   148→            "description": "Clona un repositorio de GitHub.",
+   149→            "parameters": {
+   150→                "type": "object",
+   151→                "properties": {
+   152→                    "url": {"type": "string", "description": "URL del repositorio"}
+   153→                },
+   154→                "required": ["url"]
+   155→            }
+   156→        }
+   157→    },
+   158→    {
+   159→        "type": "function",
+   160→        "function": {
+   161→            "name": "instalar_dependencias",
+   162→            "description": "Instala dependencias de un proyecto. Detecta npm/pip/poetry.",
+   163→            "parameters": {
+   164→                "type": "object",
+   165→                "properties": {
+   166→                    "ruta": {"type": "string", "description": "Ruta del proyecto"},
+   167→                    "gestor": {"type": "string", "description": "Gestor de paquetes (auto/npm/pip/poetry)"}
+   168→                },
+   169→                "required": ["ruta"]
+   170→            }
+   171→        }
+   172→    },
+   173→    {
+   174→        "type": "function",
+   175→        "function": {
+   176→            "name": "buscar_en_archivos",
+   177→            "description": "Busca texto dentro de archivos (como grep/findstr).",
+   178→            "parameters": {
+   179→                "type": "object",
+   180→                "properties": {
+   181→                    "ruta": {"type": "string", "description": "Directorio donde buscar"},
+   182→                    "patron": {"type": "string", "description": "Texto o patron a buscar"}
+   183→                },
+   184→                "required": ["ruta", "patron"]
+   185→            }
+   186→        }
+   187→    },
+   188→    {
+   189→        "type": "function",
+   190→        "function": {
+   191→            "name": "procesos_activos",
+   192→            "description": "Lista procesos corriendo. Opcionalmente filtra por nombre.",
+   193→            "parameters": {
+   194→                "type": "object",
+   195→                "properties": {
+   196→                    "filtro": {"type": "string", "description": "Filtro por nombre de proceso"}
+   197→                },
+   198→                "required": []
+   199→            }
+   200→        }
+   201→    },
+   202→    {
+   203→        "type": "function",
+   204→        "function": {
+   205→            "name": "matar_proceso",
+   206→            "description": "Termina un proceso por PID o nombre.",
+   207→            "parameters": {
+   208→                "type": "object",
+   209→                "properties": {
+   210→                    "pid_o_nombre": {"type": "string", "description": "PID numerico o nombre del proceso"}
+   211→                },
+   212→                "required": ["pid_o_nombre"]
+   213→            }
+   214→        }
+   215→    },
+   216→    {
+   217→        "type": "function",
+   218→        "function": {
+   219→            "name": "buscar_web",
+   220→            "description": "Busca en internet cuando no sabes algo. Retorna resultados con links.",
+   221→            "parameters": {
+   222→                "type": "object",
+   223→                "properties": {
+   224→                    "consulta": {"type": "string", "description": "Consulta de busqueda"}
+   225→                },
+   226→                "required": ["consulta"]
+   227→            }
+   228→        }
+   229→    },
+   230→    {
+   231→        "type": "function",
+   232→        "function": {
+   233→            "name": "analizar_imagen",
+   234→            "description": "Analiza una imagen usando vision AI. Describe lo que ve o responde preguntas. Necesita modelo de vision.",
+   235→            "parameters": {
+   236→                "type": "object",
+   237→                "properties": {
+   238→                    "ruta": {"type": "string", "description": "Ruta de la imagen"},
+   239→                    "pregunta": {"type": "string", "description": "Pregunta sobre la imagen"}
+   240→                },
+   241→                "required": ["ruta"]
+   242→            }
+   243→        }
+   244→    },
+   245→    # ============================================================
+   246→    # v14.7 SUPER AGENTE - LECTURA DE DOCUMENTOS
+   247→    # ============================================================
+   248→    {
+   249→        "type": "function",
+   250→        "function": {
+   251→            "name": "leer_documento",
+   252→            "description": "Lee cualquier documento detectando el formato automaticamente. Soporta PDF, DOCX, XLSX, PPTX, CSV, ZIP, TAR, SQLite, ePub y texto plano. HERRAMIENTA PRINCIPAL para leer documentos.",
+   253→            "parameters": {
+   254→                "type": "object",
+   255→                "properties": {
+   256→                    "ruta": {"type": "string", "description": "Ruta del archivo a leer"},
+   257→                    "hoja": {"type": "string", "description": "Nombre de hoja (solo XLSX)"},
+   258→                    "consulta": {"type": "string", "description": "Consulta SQL SELECT (solo SQLite)"},
+   259→                    "tabla": {"type": "string", "description": "Tabla a ver (solo SQLite/XLSX)"},
+   260→                    "archivo_interno": {"type": "string", "description": "Archivo interno a extraer (solo ZIP/TAR)"},
+   261→                    "pagina_inicio": {"type": "integer", "description": "Pagina inicial (solo PDF, 1-indexed)"},
+   262→                    "pagina_fin": {"type": "integer", "description": "Pagina final (solo PDF)"}
+   263→                },
+   264→                "required": ["ruta"]
+   265→            }
+   266→        }
+   267→    },
+   268→    {
+   269→        "type": "function",
+   270→        "function": {
+   271→            "name": "leer_pdf",
+   272→            "description": "Lee el contenido de un archivo PDF. Extrae texto, tablas e informacion de paginas.",
+   273→            "parameters": {
+   274→                "type": "object",
+   275→                "properties": {
+   276→                    "ruta": {"type": "string", "description": "Ruta del archivo PDF"},
+   277→                    "pagina_inicio": {"type": "integer", "description": "Pagina inicial (1-indexed)"},
+   278→                    "pagina_fin": {"type": "integer", "description": "Pagina final"}
+   279→                },
+   280→                "required": ["ruta"]
+   281→            }
+   282→        }
+   283→    },
+   284→    {
+   285→        "type": "function",
+   286→        "function": {
+   287→            "name": "leer_docx",
+   288→            "description": "Lee un documento Word (.docx). Extrae texto, tablas y estilos.",
+   289→            "parameters": {
+   290→                "type": "object",
+   291→                "properties": {
+   292→                    "ruta": {"type": "string", "description": "Ruta del archivo .docx"}
+   293→                },
+   294→                "required": ["ruta"]
+   295→            }
+   296→        }
+   297→    },
+   298→    {
+   299→        "type": "function",
+   300→        "function": {
+   301→            "name": "leer_xlsx",
+   302→            "description": "Lee un archivo Excel (.xlsx). Extrae datos de hojas con formato tabla.",
+   303→            "parameters": {
+   304→                "type": "object",
+   305→                "properties": {
+   306→                    "ruta": {"type": "string", "description": "Ruta del archivo .xlsx"},
+   307→                    "hoja": {"type": "string", "description": "Nombre de la hoja (opcional)"},
+   308→                    "max_filas": {"type": "integer", "description": "Maximo filas a leer (default 50)"}
+   309→                },
+   310→                "required": ["ruta"]
+   311→            }
+   312→        }
+   313→    },
+   314→    {
+   315→        "type": "function",
+   316→        "function": {
+   317→            "name": "leer_pptx",
+   318→            "description": "Lee una presentacion PowerPoint (.pptx). Extrae texto de diapositivas.",
+   319→            "parameters": {
+   320→                "type": "object",
+   321→                "properties": {
+   322→                    "ruta": {"type": "string", "description": "Ruta del archivo .pptx"}
+   323→                },
+   324→                "required": ["ruta"]
+   325→            }
+   326→        }
+   327→    },
+   328→    {
+   329→        "type": "function",
+   330→        "function": {
+   331→            "name": "consultar_sqlite",
+   332→            "description": "Consulta una base de datos SQLite. Lista tablas o ejecuta SELECT.",
+   333→            "parameters": {
+   334→                "type": "object",
+   335→                "properties": {
+   336→                    "ruta": {"type": "string", "description": "Ruta del archivo .db o .sqlite"},
+   337→                    "consulta": {"type": "string", "description": "Consulta SQL SELECT (opcional)"},
+   338→                    "tabla": {"type": "string", "description": "Tabla para ver contenido (opcional)"},
+   339→                    "max_filas": {"type": "integer", "description": "Maximo filas (default 50)"}
+   340→                },
+   341→                "required": ["ruta"]
+   342→            }
+   343→        }
+   344→    },
+   345→    # ============================================================
+   346→    # v14.7 SUPER AGENTE - CREACION DE DOCUMENTOS
+   347→    # ============================================================
+   348→    {
+   349→        "type": "function",
+   350→        "function": {
+   351→            "name": "crear_pdf",
+   352→            "description": "Crea un documento PDF con texto formateado. Soporta titulos, headers, listas y parrafos.",
+   353→            "parameters": {
+   354→                "type": "object",
+   355→                "properties": {
+   356→                    "ruta": {"type": "string", "description": "Ruta donde guardar el PDF"},
+   357→                    "titulo": {"type": "string", "description": "Titulo del documento"},
+   358→                    "contenido": {"type": "string", "description": "Contenido del documento (soporta # headers, - listas, saltos de linea)"}
+   359→                },
+   360→                "required": ["ruta", "contenido"]
+   361→            }
+   362→        }
+   363→    },
+   364→    {
+   365→        "type": "function",
+   366→        "function": {
+   367→            "name": "crear_docx",
+   368→            "description": "Crea un documento Word (.docx) con formato. Soporta Markdown basico.",
+   369→            "parameters": {
+   370→                "type": "object",
+   371→                "properties": {
+   372→                    "ruta": {"type": "string", "description": "Ruta donde guardar el .docx"},
+   373→                    "titulo": {"type": "string", "description": "Titulo del documento"},
+   374→                    "contenido": {"type": "string", "description": "Contenido (formato Markdown: # headers, - listas)"}
+   375→                },
+   376→                "required": ["ruta", "contenido"]
+   377→            }
+   378→        }
+   379→    },
+   380→    {
+   381→        "type": "function",
+   382→        "function": {
+   383→            "name": "crear_xlsx",
+   384→            "description": "Crea un archivo Excel (.xlsx) con datos. Los datos se pasan como CSV o JSON.",
+   385→            "parameters": {
+   386→                "type": "object",
+   387→                "properties": {
+   388→                    "ruta": {"type": "string", "description": "Ruta donde guardar el .xlsx"},
+   389→                    "datos": {"type": "string", "description": "Datos en formato CSV (filas por newline, columnas por coma) o JSON"},
+   390→                    "hoja": {"type": "string", "description": "Nombre de la hoja (default: Hoja1)"}
+   391→                },
+   392→                "required": ["ruta", "datos"]
+   393→            }
+   394→        }
+   395→    },
+   396→    {
+   397→        "type": "function",
+   398→        "function": {
+   399→            "name": "crear_grafico",
+   400→            "description": "Crea un grafico o visualizacion y lo guarda como PNG. Tipos: bar, line, pie, scatter, histogram, area.",
+   401→            "parameters": {
+   402→                "type": "object",
+   403→                "properties": {
+   404→                    "ruta": {"type": "string", "description": "Ruta donde guardar el PNG"},
+   405→                    "tipo": {"type": "string", "enum": ["bar", "line", "pie", "scatter", "histogram", "area"], "description": "Tipo de grafico"},
+   406→                    "datos": {"type": "string", "description": "Datos: etiqueta,valor por linea (CSV) o JSON"},
+   407→                    "titulo": {"type": "string", "description": "Titulo del grafico"},
+   408→                    "xlabel": {"type": "string", "description": "Etiqueta eje X"},
+   409→                    "ylabel": {"type": "string", "description": "Etiqueta eje Y"}
+   410→                },
+   411→                "required": ["ruta", "tipo", "datos"]
+   412→            }
+   413→        }
+   414→    },
+   415→    # ============================================================
+   416→    # v14.7 SUPER AGENTE - PERCEPCION
+   417→    # ============================================================
+   418→    {
+   419→        "type": "function",
+   420→        "function": {
+   421→            "name": "transcribir_audio",
+   422→            "description": "Transcribe un archivo de audio a texto. Soporta MP3, WAV, M4A, FLAC, OGG.",
+   423→            "parameters": {
+   424→                "type": "object",
+   425→                "properties": {
+   426→                    "ruta": {"type": "string", "description": "Ruta del archivo de audio"},
+   427→                    "idioma": {"type": "string", "description": "Idioma (es=espanol, en=ingles, auto=deteccion)"}
+   428→                },
+   429→                "required": ["ruta"]
+   430→            }
+   431→        }
+   432→    },
+   433→    {
+   434→        "type": "function",
+   435→        "function": {
+   436→            "name": "leer_imagen_ocr",
+   437→            "description": "Extrae texto de una imagen usando OCR. Para documentos escaneados, capturas de pantalla, etc.",
+   438→            "parameters": {
+   439→                "type": "object",
+   440→                "properties": {
+   441→                    "ruta": {"type": "string", "description": "Ruta de la imagen"},
+   442→                    "idioma": {"type": "string", "description": "Idioma OCR (spa=espanol, eng=ingles, spa+eng=ambos)"}
+   443→                },
+   444→                "required": ["ruta"]
+   445→            }
+   446→        }
+   447→    },
+   448→    {
+   449→        "type": "function",
+   450→        "function": {
+   451→            "name": "scrapear_web",
+   452→            "description": "Extrae el contenido textual de una pagina web. Lee HTML y extrae texto limpio.",
+   453→            "parameters": {
+   454→                "type": "object",
+   455→                "properties": {
+   456→                    "url": {"type": "string", "description": "URL de la pagina web"},
+   457→                    "selector": {"type": "string", "description": "Selector CSS para seccion especifica (opcional)"},
+   458→                    "max_caracteres": {"type": "integer", "description": "Maximo caracteres (default 5000)"}
+   459→                },
+   460→                "required": ["url"]
+   461→            }
+   462→        }
+   463→    },
+   464→    {
+   465→        "type": "function",
+   466→        "function": {
+   467→            "name": "automatizar_web",
+   468→            "description": "Interactua con paginas web: screenshots, clicks, escribir texto, extraer contenido. Requiere Playwright.",
+   469→            "parameters": {
+   470→                "type": "object",
+   471→                "properties": {
+   472→                    "url": {"type": "string", "description": "URL de la pagina"},
+   473→                    "accion": {"type": "string", "enum": ["screenshot", "click", "escribir", "extraer", "scroll"], "description": "Accion a realizar"},
+   474→                    "selector": {"type": "string", "description": "Selector CSS del elemento"},
+   475→                    "texto": {"type": "string", "description": "Texto a escribir (para accion escribir)"},
+   476→                    "esperar": {"type": "integer", "description": "Segundos a esperar (default 3)"}
+   477→                },
+   478→                "required": ["url", "accion"]
+   479→            }
+   480→        }
+   481→    },
+   482→    # ============================================================
+   483→    # v14.7 SUPER AGENTE - INTEGRACION
+   484→    # ============================================================
+   485→    {
+   486→        "type": "function",
+   487→        "function": {
+   488→            "name": "leer_email",
+   489→            "description": "Lee correos del inbox usando IMAP. Requiere configuracion previa con configurar_email.",
+   490→            "parameters": {
+   491→                "type": "object",
+   492→                "properties": {
+   493→                    "carpeta": {"type": "string", "description": "Carpeta (INBOX, Sent, etc.)"},
+   494→                    "limite": {"type": "integer", "description": "Maximo correos (default 10)"},
+   495→                    "no_leidos": {"type": "boolean", "description": "Solo no leidos (default True)"}
+   496→                },
+   497→                "required": []
+   498→            }
+   499→        }
+   500→    },
+   501→    {
+   502→        "type": "function",
+   503→        "function": {
+   504→            "name": "enviar_email",
+   505→            "description": "Envia un correo electronico. Requiere configuracion previa.",
+   506→            "parameters": {
+   507→                "type": "object",
+   508→                "properties": {
+   509→                    "para": {"type": "string", "description": "Email del destinatario"},
+   510→                    "asunto": {"type": "string", "description": "Asunto del correo"},
+   511→                    "cuerpo": {"type": "string", "description": "Cuerpo del mensaje"},
+   512→                    "html": {"type": "boolean", "description": "Si el cuerpo es HTML (default False)"}
+   513→                },
+   514→                "required": ["para", "asunto", "cuerpo"]
+   515→            }
+   516→        }
+   517→    },
+   518→    {
+   519→        "type": "function",
+   520→        "function": {
+   521→            "name": "configurar_email",
+   522→            "description": "Configura la cuenta de email para leer y enviar. Para Gmail necesitas App Password.",
+   523→            "parameters": {
+   524→                "type": "object",
+   525→                "properties": {
+   526→                    "host_imap": {"type": "string", "description": "Servidor IMAP (ej: imap.gmail.com)"},
+   527→                    "puerto_imap": {"type": "integer", "description": "Puerto IMAP (ej: 993)"},
+   528→                    "email_addr": {"type": "string", "description": "Direccion de email"},
+   529→                    "password": {"type": "string", "description": "Contrasena o App Password"},
+   530→                    "host_smtp": {"type": "string", "description": "Servidor SMTP (opcional)"},
+   531→                    "puerto_smtp": {"type": "integer", "description": "Puerto SMTP (default 587)"}
+   532→                },
+   533→                "required": ["host_imap", "puerto_imap", "email_addr", "password"]
+   534→            }
+   535→        }
+   536→    },
+   537→    {
+   538→        "type": "function",
+   539→        "function": {
+   540→            "name": "llamar_api",
+   541→            "description": "Realiza una peticion HTTP a cualquier API REST. Soporta GET, POST, PUT, DELETE.",
+   542→            "parameters": {
+   543→                "type": "object",
+   544→                "properties": {
+   545→                    "url": {"type": "string", "description": "URL de la API"},
+   546→                    "metodo": {"type": "string", "enum": ["GET", "POST", "PUT", "DELETE", "PATCH"], "description": "Metodo HTTP"},
+   547→                    "headers": {"type": "string", "description": "Headers en JSON (opcional)"},
+   548→                    "body": {"type": "string", "description": "Cuerpo JSON (opcional)"},
+   549→                    "timeout": {"type": "integer", "description": "Timeout en segundos (default 30)"}
+   550→                },
+   551→                "required": ["url"]
+   552→            }
+   553→        }
+   554→    },
+   555→    {
+   556→        "type": "function",
+   557→        "function": {
+   558→            "name": "programar_tarea",
+   559→            "description": "Programa una tarea para ejecutarse en el futuro.",
+   560→            "parameters": {
+   561→                "type": "object",
+   562→                "properties": {
+   563→                    "nombre": {"type": "string", "description": "Nombre descriptivo"},
+   564→                    "comando": {"type": "string", "description": "Comando a ejecutar"},
+   565→                    "cuando": {"type": "string", "description": "Cuando ejecutar (ej: 'manana 8am', '2025-01-15 09:00')"},
+   566→                    "repetir": {"type": "string", "description": "Repeticion: 'diario', 'cada 2 horas', 'semanal' (vacio = una vez)"}
+   567→                },
+   568→                "required": ["nombre", "comando"]
+   569→            }
+   570→        }
+   571→    },
+   572→    {
+   573→        "type": "function",
+   574→        "function": {
+   575→            "name": "leer_portapapeles",
+   576→            "description": "Lee el contenido del portapapeles del sistema.",
+   577→            "parameters": {
+   578→                "type": "object",
+   579→                "properties": {},
+   580→                "required": []
+   581→            }
+   582→        }
+   583→    },
+   584→    {
+   585→        "type": "function",
+   586→        "function": {
+   587→            "name": "escribir_portapapeles",
+   588→            "description": "Escribe texto en el portapapeles del sistema.",
+   589→            "parameters": {
+   590→                "type": "object",
+   591→                "properties": {
+   592→                    "texto": {"type": "string", "description": "Texto a copiar"}
+   593→                },
+   594→                "required": ["texto"]
+   595→            }
+   596→        }
+   597→    },
+   598→    # ============================================================
+   599→    # v15 SUPER AGENTE - VISUALIZACION AVANZADA
+   600→    # ============================================================
+   601→    {
+   602→        "type": "function",
+   603→        "function": {
+   604→            "name": "crear_grafico_avanzado",
+   605→            "description": "Crea un grafico avanzado (15+ tipos) y lo guarda como PNG/SVG. Tipos: bar, line, pie, scatter, histogram, area, heatmap, radar, candlestick, boxplot, waterfall, regression, distribution, violin, stem.",
+   606→            "parameters": {
+   607→                "type": "object",
+   608→                "properties": {
+   609→                    "ruta": {"type": "string", "description": "Ruta donde guardar (PNG o SVG)"},
+   610→                    "tipo": {"type": "string", "enum": ["bar", "line", "pie", "scatter", "histogram", "area", "heatmap", "radar", "candlestick", "boxplot", "waterfall", "regression", "distribution", "violin", "stem"], "description": "Tipo de grafico"},
+   611→                    "datos": {"type": "string", "description": "Datos en JSON o CSV"},
+   612→                    "titulo": {"type": "string", "description": "Titulo del grafico"},
+   613→                    "xlabel": {"type": "string", "description": "Etiqueta eje X"},
+   614→                    "ylabel": {"type": "string", "description": "Etiqueta eje Y"},
+   615→                    "opciones": {"type": "string", "description": "Opciones extra en JSON (colores, leyenda, grid, etc.)"}
+   616→                },
+   617→                "required": ["ruta", "tipo", "datos"]
+   618→            }
+   619→        }
+   620→    },
+   621→    {
+   622→        "type": "function",
+   623→        "function": {
+   624→            "name": "crear_dashboard",
+   625→            "description": "Crea un dashboard con multiples graficos en una sola imagen. Cada grafico se define como JSON con tipo, datos y opciones.",
+   626→            "parameters": {
+   627→                "type": "object",
+   628→                "properties": {
+   629→                    "ruta": {"type": "string", "description": "Ruta donde guardar el dashboard (PNG o SVG)"},
+   630→                    "graficos": {"type": "string", "description": "Lista JSON de graficos: [{tipo, datos, titulo}, ...]"},
+   631→                    "titulo": {"type": "string", "description": "Titulo del dashboard"},
+   632→                    "layout": {"type": "string", "description": "Layout: auto, 2x2, 3x2, 2x3, 1x3, 3x1"}
+   633→                },
+   634→                "required": ["ruta", "graficos"]
+   635→            }
+   636→        }
+   637→    },
+   638→    # ============================================================
+   639→    # v15 SUPER AGENTE - DIAGRAMAS
+   640→    # ============================================================
+   641→    {
+   642→        "type": "function",
+   643→        "function": {
+   644→            "name": "crear_diagrama",
+   645→            "description": "Crea un diagrama (13+ tipos) y lo guarda como imagen PNG. Tipos: flowchart, mindmap, tree, org, architecture, network, er, class, gantt, swimlane, sequence, topology, knowledge_graph, mermaid.",
+   646→            "parameters": {
+   647→                "type": "object",
+   648→                "properties": {
+   649→                    "ruta": {"type": "string", "description": "Ruta donde guardar (PNG, SVG, o .md para Mermaid)"},
+   650→                    "tipo": {"type": "string", "description": "Tipo de diagrama"},
+   651→                    "datos": {"type": "string", "description": "Datos del diagrama en JSON (nodes, edges, hierarchy, etc.)"},
+   652→                    "titulo": {"type": "string", "description": "Titulo del diagrama"},
+   653→                    "opciones": {"type": "string", "description": "Opciones extra en JSON"}
+   654→                },
+   655→                "required": ["ruta", "tipo", "datos"]
+   656→            }
+   657→        }
+   658→    },
+   659→    {
+   660→        "type": "function",
+   661→        "function": {
+   662→            "name": "generar_mermaid",
+   663→            "description": "Genera codigo Mermaid para un diagrama sin renderizar. Retorna el codigo listo para usar.",
+   664→            "parameters": {
+   665→                "type": "object",
+   666→                "properties": {
+   667→                    "tipo": {"type": "string", "description": "Tipo de diagrama"},
+   668→                    "datos": {"type": "string", "description": "Datos del diagrama en JSON"},
+   669→                    "titulo": {"type": "string", "description": "Titulo (opcional)"}
+   670→                },
+   671→                "required": ["tipo", "datos"]
+   672→            }
+   673→        }
+   674→    },
+   675→    # ============================================================
+   676→    # v15 SUPER AGENTE - PROCESAMIENTO DE DATOS
+   677→    # ============================================================
+   678→    {
+   679→        "type": "function",
+   680→        "function": {
+   681→            "name": "ejecutar_python",
+   682→            "description": "Ejecuta codigo Python en un subproceso aislado y retorna la salida.",
+   683→            "parameters": {
+   684→                "type": "object",
+   685→                "properties": {
+   686→                    "codigo": {"type": "string", "description": "Codigo Python a ejecutar"},
+   687→                    "timeout": {"type": "integer", "description": "Timeout en segundos (default 60)"}
+   688→                },
+   689→                "required": ["codigo"]
+   690→            }
+   691→        }
+   692→    },
+   693→    {
+   694→        "type": "function",
+   695→        "function": {
+   696→            "name": "ejecutar_bash",
+   697→            "description": "Ejecuta un comando Bash/Linux y retorna la salida.",
+   698→            "parameters": {
+   699→                "type": "object",
+   700→                "properties": {
+   701→                    "comando": {"type": "string", "description": "Comando Bash a ejecutar"},
+   702→                    "timeout": {"type": "integer", "description": "Timeout en segundos (default 30)"}
+   703→                },
+   704→                "required": ["comando"]
+   705→            }
+   706→        }
+   707→    },
+   708→    {
+   709→        "type": "function",
+   710→        "function": {
+   711→            "name": "ejecutar_nodo",
+   712→            "description": "Ejecuta codigo JavaScript/Node.js y retorna la salida.",
+   713→            "parameters": {
+   714→                "type": "object",
+   715→                "properties": {
+   716→                    "codigo": {"type": "string", "description": "Codigo JavaScript a ejecutar"},
+   717→                    "timeout": {"type": "integer", "description": "Timeout en segundos (default 30)"}
+   718→                },
+   719→                "required": ["codigo"]
+   720→            }
+   721→        }
+   722→    },
+   723→    {
+   724→        "type": "function",
+   725→        "function": {
+   726→            "name": "estadisticas",
+   727→            "description": "Calcula estadisticas descriptivas de un dataset: media, mediana, desv.est, percentiles, etc.",
+   728→            "parameters": {
+   729→                "type": "object",
+   730→                "properties": {
+   731→                    "datos": {"type": "string", "description": "Datos en formato CSV o JSON"},
+   732→                    "columna": {"type": "string", "description": "Columna especifica (opcional)"}
+   733→                },
+   734→                "required": ["datos"]
+   735→            }
+   736→        }
+   737→    },
+   738→    {
+   739→        "type": "function",
+   740→        "function": {
+   741→            "name": "tabla_pivote",
+   742→            "description": "Crea una tabla pivote a partir de datos tabulares.",
+   743→            "parameters": {
+   744→                "type": "object",
+   745→                "properties": {
+   746→                    "datos": {"type": "string", "description": "Datos en CSV o JSON"},
+   747→                    "filas": {"type": "string", "description": "Columna para las filas"},
+   748→                    "columnas": {"type": "string", "description": "Columna para las columnas"},
+   749→                    "valores": {"type": "string", "description": "Columna de valores a agregar"},
+   750→                    "funcion": {"type": "string", "description": "Funcion: sum, mean, count, min, max"}
+   751→                },
+   752→                "required": ["datos", "filas"]
+   753→            }
+   754→        }
+   755→    },
+   756→    {
+   757→        "type": "function",
+   758→        "function": {
+   759→            "name": "merge_datos",
+   760→            "description": "Combina dos datasets usando merge/join (como SQL JOIN).",
+   761→            "parameters": {
+   762→                "type": "object",
+   763→                "properties": {
+   764→                    "datos1": {"type": "string", "description": "Primer dataset (CSV o JSON)"},
+   765→                    "datos2": {"type": "string", "description": "Segundo dataset (CSV o JSON)"},
+   766→                    "clave": {"type": "string", "description": "Columna clave para el join"},
+   767→                    "tipo": {"type": "string", "description": "Tipo: inner, left, right, outer"}
+   768→                },
+   769→                "required": ["datos1", "datos2"]
+   770→            }
+   771→        }
+   772→    },
+   773→    {
+   774→        "type": "function",
+   775→        "function": {
+   776→            "name": "limpiar_datos",
+   777→            "description": "Limpia un dataset: elimina duplicados, trata nulos, elimina outliers, normaliza.",
+   778→            "parameters": {
+   779→                "type": "object",
+   780→                "properties": {
+   781→                    "datos": {"type": "string", "description": "Datos en CSV o JSON"},
+   782→                    "operaciones": {"type": "string", "description": "Operaciones: duplicados, nulos, outliers, normalizar, tipos, todo"}
+   783→                },
+   784→                "required": ["datos"]
+   785→            }
+   786→        }
+   787→    },
+   788→    {
+   789→        "type": "function",
+   790→        "function": {
+   791→            "name": "transformar_datos",
+   792→            "description": "Transforma datos: filtrar, ordenar, agrupar, seleccionar, renombrar columnas.",
+   793→            "parameters": {
+   794→                "type": "object",
+   795→                "properties": {
+   796→                    "datos": {"type": "string", "description": "Datos en CSV o JSON"},
+   797→                    "operacion": {"type": "string", "description": "Operacion: filtrar, ordenar, agrupar, seleccionar, renombrar, agregar_columna, head, sample"},
+   798→                    "parametros": {"type": "string", "description": "Parametros en JSON"}
+   799→                },
+   800→                "required": ["datos", "operacion"]
+   801→            }
+   802→        }
+   803→    },
+   804→    {
+   805→        "type": "function",
+   806→        "function": {
+   807→            "name": "parsear_datos",
+   808→            "description": "Convierte datos entre formatos: CSV, JSON, TSV, YAML, XML.",
+   809→            "parameters": {
+   810→                "type": "object",
+   811→                "properties": {
+   812→                    "datos": {"type": "string", "description": "Datos en formato de origen"},
+   813→                    "formato_origen": {"type": "string", "description": "Formato: auto, csv, json, tsv, yaml, xml"},
+   814→                    "formato_destino": {"type": "string", "description": "Formato: json, csv, tsv, yaml, tabla"}
+   815→                },
+   816→                "required": ["datos"]
+   817→            }
+   818→        }
+   819→    },
+   820→    {
+   821→        "type": "function",
+   822→        "function": {
+   823→            "name": "exportar_datos",
+   824→            "description": "Exporta datos a un archivo en formato CSV, JSON, XLSX o TSV.",
+   825→            "parameters": {
+   826→                "type": "object",
+   827→                "properties": {
+   828→                    "datos": {"type": "string", "description": "Datos en CSV o JSON"},
+   829→                    "ruta": {"type": "string", "description": "Ruta del archivo de salida"},
+   830→                    "formato": {"type": "string", "description": "Formato: csv, json, xlsx, tsv"}
+   831→                },
+   832→                "required": ["datos", "ruta"]
+   833→            }
+   834→        }
+   835→    },
+   836→    # ============================================================
+   837→    # v15 SUPER AGENTE - MULTIMEDIA
+   838→    # ============================================================
+   839→    {
+   840→        "type": "function",
+   841→        "function": {
+   842→            "name": "texto_a_voz",
+   843→            "description": "Convierte texto a voz (TTS). Genera un archivo de audio con el texto hablado.",
+   844→            "parameters": {
+   845→                "type": "object",
+   846→                "properties": {
+   847→                    "texto": {"type": "string", "description": "Texto a convertir a voz"},
+   848→                    "ruta": {"type": "string", "description": "Ruta donde guardar el audio (opcional)"},
+   849→                    "voz": {"type": "string", "description": "Idioma/voz: es, en, fr, de, pt, it, ja, ko, zh"},
+   850→                    "velocidad": {"type": "number", "description": "Velocidad (0.5=lenta, 1.0=normal, 2.0=rapida)"},
+   851→                    "formato": {"type": "string", "description": "Formato: mp3, wav"}
+   852→                },
+   853→                "required": ["texto"]
+   854→            }
+   855→        }
+   856→    },
+   857→    {
+   858→        "type": "function",
+   859→        "function": {
+   860→            "name": "generar_imagen",
+   861→            "description": "Genera una imagen a partir de una descripcion usando IA (Stable Diffusion, etc.).",
+   862→            "parameters": {
+   863→                "type": "object",
+   864→                "properties": {
+   865→                    "descripcion": {"type": "string", "description": "Descripcion de la imagen (prompt)"},
+   866→                    "ruta": {"type": "string", "description": "Ruta donde guardar (opcional)"},
+   867→                    "tamano": {"type": "string", "description": "Tamano: 256x256, 512x512, 768x768"},
+   868→                    "estilo": {"type": "string", "description": "Estilo: realista, anime, pintura, etc."},
+   869→                    "negativo": {"type": "string", "description": "Prompt negativo (que NO incluir)"}
+   870→                },
+   871→                "required": ["descripcion"]
+   872→            }
+   873→        }
+   874→    },
+   875→    {
+   876→        "type": "function",
+   877→        "function": {
+   878→            "name": "editar_imagen",
+   879→            "description": "Edita una imagen: redimensionar, recortar, rotar, convertir, grayscale, ajustar brillo/contraste.",
+   880→            "parameters": {
+   881→                "type": "object",
+   882→                "properties": {
+   883→                    "ruta_entrada": {"type": "string", "description": "Ruta de la imagen"},
+   884→                    "accion": {"type": "string", "description": "Accion: info, redimensionar, recortar, rotar, convertir, espejo, grayscale, ajustar"},
+   885→                    "parametros": {"type": "string", "description": "Parametros en JSON segun la accion"},
+   886→                    "ruta_salida": {"type": "string", "description": "Ruta de salida (opcional, sobreescribe si vacio)"}
+   887→                },
+   888→                "required": ["ruta_entrada", "accion"]
+   889→            }
+   890→        }
+   891→    },
+   892→    {
+   893→        "type": "function",
+   894→        "function": {
+   895→            "name": "buscar_imagenes",
+   896→            "description": "Busca imagenes en internet a partir de una consulta.",
+   897→            "parameters": {
+   898→                "type": "object",
+   899→                "properties": {
+   900→                    "consulta": {"type": "string", "description": "Texto de busqueda"},
+   901→                    "cantidad": {"type": "integer", "description": "Cantidad de imagenes (max 10)"}
+   902→                },
+   903→                "required": ["consulta"]
+   904→            }
+   905→        }
+   906→    },
+   907→    {
+   908→        "type": "function",
+   909→        "function": {
+   910→            "name": "analizar_video",
+   911→            "description": "Analiza un archivo de video: info, extraer frames, analizar con VLM, transcribir audio.",
+   912→            "parameters": {
+   913→                "type": "object",
+   914→                "properties": {
+   915→                    "ruta": {"type": "string", "description": "Ruta del video"},
+   916→                    "accion": {"type": "string", "description": "Accion: info, frames, analizar, transcribir"},
+   917→                    "parametros": {"type": "string", "description": "Parametros extra en JSON"}
+   918→                },
+   919→                "required": ["ruta", "accion"]
+   920→            }
+   921→        }
+   922→    },
+   923→    # ============================================================
+   924→    # v15 SUPER AGENTE - SUB-AGENTES
+   925→    # ============================================================
+   926→    {
+   927→        "type": "function",
+   928→        "function": {
+   929→            "name": "ejecutar_subagente",
+   930→            "description": "Ejecuta un sub-agente especializado: researcher, coder, analyst, writer, reviewer, general.",
+   931→            "parameters": {
+   932→                "type": "object",
+   933→                "properties": {
+   934→                    "tipo": {"type": "string", "description": "Tipo: researcher, coder, analyst, writer, reviewer, general"},
+   935→                    "tarea": {"type": "string", "description": "Descripcion de la tarea"},
+   936→                    "contexto": {"type": "string", "description": "Contexto adicional (opcional)"},
+   937→                    "timeout": {"type": "integer", "description": "Timeout en segundos (default 60)"}
+   938→                },
+   939→                "required": ["tipo", "tarea"]
+   940→            }
+   941→        }
+   942→    },
+   943→    {
+   944→        "type": "function",
+   945→        "function": {
+   946→            "name": "ejecutar_paralelo",
+   947→            "description": "Ejecuta multiples sub-agentes en paralelo. Lista JSON de tareas con tipo y descripcion.",
+   948→            "parameters": {
+   949→                "type": "object",
+   950→                "properties": {
+   951→                    "tareas": {"type": "string", "description": "Lista JSON: [{tipo, tarea, contexto?}, ...]"},
+   952→                    "agregar_resultados": {"type": "boolean", "description": "Sintetizar resultados (default True)"}
+   953→                },
+   954→                "required": ["tareas"]
+   955→            }
+   956→        }
+   957→    },
+   958→    {
+   959→        "type": "function",
+   960→        "function": {
+   961→            "name": "orquestar",
+   962→            "description": "Orquesta automaticamente sub-agentes para una tarea compleja. Divide, asigna y sintetiza.",
+   963→            "parameters": {
+   964→                "type": "object",
+   965→                "properties": {
+   966→                    "tarea_principal": {"type": "string", "description": "Descripcion de la tarea compleja"},
+   967→                    "estrategia": {"type": "string", "description": "Estrategia: auto, secuencial, paralelo, mixto"},
+   968→                    "max_subagentes": {"type": "integer", "description": "Max sub-agentes (default 4)"}
+   969→                },
+   970→                "required": ["tarea_principal"]
+   971→            }
+   972→        }
+   973→    },
+   974→    {
+   975→        "type": "function",
+   976→        "function": {
+   977→            "name": "crear_pptx",
+   978→            "description": "Crea una presentacion PowerPoint (.pptx) con diapositivas formateadas.",
+   979→            "parameters": {
+   980→                "type": "object",
+   981→                "properties": {
+   982→                    "ruta": {"type": "string", "description": "Ruta donde guardar el .pptx"},
+   983→                    "titulo": {"type": "string", "description": "Titulo de la presentacion"},
+   984→                    "diapositivas": {"type": "string", "description": "Lista JSON: [{titulo, contenido, notas}, ...]"},
+   985→                    "autor": {"type": "string", "description": "Autor de la presentacion"}
+   986→                },
+   987→                "required": ["ruta"]
+   988→            }
+   989→        }
+   990→    },
+   991→    {
+   992→        "type": "function",
+   993→        "function": {
+   994→            "name": "listar_subagentes",
+   995→            "description": "Lista los tipos de sub-agentes disponibles y sus capacidades.",
+   996→            "parameters": {
+   997→                "type": "object",
+   998→                "properties": {},
+   999→                "required": []
+  1000→            }
+  1001→        }
+  1002→    },
+  1003→]
+  1004→
