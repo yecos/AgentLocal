@@ -56,6 +56,12 @@ from .subagentes import (
     listar_subagentes, ver_contexto_compartido, limpiar_contexto
 )
 
+# Importar herramientas v15.2 (Super Agente Avanzado)
+from .avanzado import (
+    busqueda_profunda, editar_multiples, generacion_batch,
+    buscar_patron, listar_glob, crear_proyecto_web, resumir_url
+)
+
 # Importar schemas predefinidos (para herramientas de sub-modulos)
 from .schemas import TOOL_SCHEMAS as _SCHEMAS_FROM_FILE
 
@@ -148,6 +154,16 @@ def _register_submodule_tools():
         "ejecutar_paralelo": ejecutar_paralelo,
         "orquestar": orquestar,
         "listar_subagentes": listar_subagentes,
+        "ver_contexto_compartido": ver_contexto_compartido,
+        "limpiar_contexto": limpiar_contexto,
+        # v15.2 Super Agente - Herramientas avanzadas
+        "busqueda_profunda": busqueda_profunda,
+        "editar_multiples": editar_multiples,
+        "generacion_batch": generacion_batch,
+        "buscar_patron": buscar_patron,
+        "listar_glob": listar_glob,
+        "crear_proyecto_web": crear_proyecto_web,
+        "resumir_url": resumir_url,
     }
 
     for name, func in submod_tools.items():

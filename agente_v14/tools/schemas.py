@@ -1000,4 +1000,146 @@ TOOL_SCHEMAS = [
             }
         }
     },
+    # ============================================================
+    # v15.2 SUPER AGENTE - HERRAMIENTAS AVANZADAS
+    # ============================================================
+    {
+        "type": "function",
+        "function": {
+            "name": "busqueda_profunda",
+            "description": "Realiza una busqueda profunda multi-ronda sobre un tema. Busca en multiples fuentes, sigue enlaces relevantes y sintetiza un informe completo. Ideal para investigaciones.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tema": {"type": "string", "description": "Tema a investigar en profundidad"},
+                    "profundidad": {"type": "integer", "description": "Nivel de profundidad: 1=rapido, 2=medio, 3=profundo (default 3)"},
+                    "idioma": {"type": "string", "description": "Idioma preferido: es, en, fr, de, pt (default es)"},
+                    "guardar": {"type": "boolean", "description": "Guardar informe en archivo (default True)"}
+                },
+                "required": ["tema"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "editar_multiples",
+            "description": "Realiza multiples ediciones en uno o varios archivos en una sola operacion. Cada edicion especifica archivo, texto a buscar y texto nuevo.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ediciones": {"type": "string", "description": "Lista JSON: [{archivo, buscar, reemplazar, reemplazar_todo?}, ...]"},
+                    "crear_archivos": {"type": "boolean", "description": "Crear archivos que no existen (default True)"}
+                },
+                "required": ["ediciones"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generacion_batch",
+            "description": "Genera multiples archivos en una sola operacion. Ideal para crear estructuras de proyecto o templates.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "archivos": {"type": "string", "description": "Lista JSON: [{ruta, contenido, sobreescribir?}, ...]"}
+                },
+                "required": ["archivos"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "buscar_patron",
+            "description": "Busca un patron de texto o regex en archivos (como grep). Busca en el contenido de archivos del directorio.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "patron": {"type": "string", "description": "Patron de texto o expresion regular"},
+                    "directorio": {"type": "string", "description": "Directorio donde buscar (default .)"},
+                    "tipo_archivo": {"type": "string", "description": "Filtrar por extension: .py, .js, .txt, .md"},
+                    "max_resultados": {"type": "integer", "description": "Max resultados (default 30)"},
+                    "ignorar_case": {"type": "boolean", "description": "Ignorar mayusculas/minusculas (default True)"},
+                    "contexto": {"type": "integer", "description": "Lineas de contexto antes/despues (default 2)"}
+                },
+                "required": ["patron"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "listar_glob",
+            "description": "Lista archivos usando glob patterns (ej: **/*.py, src/**/*.ts, **/test_*.js). Busqueda flexible por nombre.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "patron": {"type": "string", "description": "Patron glob: **/*.py, **/test_*.js, *.md (default **/*)"},
+                    "directorio": {"type": "string", "description": "Directorio base (default actual)"},
+                    "solo_tipo": {"type": "string", "description": "Filtrar: todos, archivos, directorios"},
+                    "max_resultados": {"type": "integer", "description": "Max resultados (default 100)"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "crear_proyecto_web",
+            "description": "Crea un proyecto web con scaffolding completo. Soporta Next.js, React, Vue, Express y sitios estaticos.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "nombre": {"type": "string", "description": "Nombre del proyecto"},
+                    "tipo": {"type": "string", "description": "Tipo: nextjs, react, vue, express, static (default nextjs)"},
+                    "directorio": {"type": "string", "description": "Directorio donde crear el proyecto (default REPOS_DIR)"},
+                    "opciones": {"type": "string", "description": "Opciones JSON: {typescript, tailwind, prisma}"}
+                },
+                "required": ["nombre"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "resumir_url",
+            "description": "Lee y extrae contenido de una URL web. Puede extraer texto, metadatos, links, imagenes o HTML crudo.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL de la pagina web"},
+                    "max_caracteres": {"type": "integer", "description": "Max caracteres a extraer (default 5000)"},
+                    "extraer": {"type": "string", "description": "Que extraer: texto, metadatos, html, links, imagenes (default texto)"}
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ver_contexto_compartido",
+            "description": "Muestra el contenido del contexto compartido entre sub-agentes.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "limpiar_contexto",
+            "description": "Limpia el contexto compartido entre sub-agentes.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
 ]
