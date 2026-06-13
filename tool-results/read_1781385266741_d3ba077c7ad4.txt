@@ -634,18 +634,46 @@
    634→   634→
    635→   635→
    636→   636→# ============================================================
-   637→   637→# FACTORY: Retorna ChromaVectorStore o SimpleVectorStore
+   637→   637→# FACTORY: Retorna HybridVectorStore(ChromaVectorStore/SimpleVectorStore)
    638→   638→# ============================================================
-   639→   639→def create_vector_store(store_dir=None):
-   640→   640→    """Factory que retorna el mejor vector store disponible."""
-   641→   641→    if CHROMADB_AVAILABLE:
-   642→   642→        try:
-   643→   643→            store = ChromaVectorStore(store_dir=store_dir)
-   644→   644→            logger.info("Usando ChromaDB como vector store")
-   645→   645→            return store
-   646→   646→        except Exception as e:
-   647→   647→            logger.warning(f"Error inicializando ChromaDB, fallback a casero: {e}")
-   648→   648→
-   649→   649→    logger.info("Usando SimpleVectorStore (VectorStore + decay + dedup) como fallback")
-   650→   650→    return SimpleVectorStore(store_dir=store_dir)
-   651→   651→
+   639→   639→def create_vector_store(store_dir=None, use_hybrid=True, use_reranker=True):
+   640→   640→    """Factory que retorna el mejor vector store disponible.
+   641→   641→
+   642→   642→    v14.5: Por defecto retorna HybridVectorStore que envuelve el backend
+   643→   643→    y anade busqueda BM25 + fusion RRF. Opcionalmente anade re-ranker.
+   644→   644→
+   645→   645→    Args:
+   646→   646→        store_dir: Directorio de persistencia
+   647→   647→        use_hybrid: Si True, envuelve en HybridVectorStore con BM25+RRF
+   648→   648→        use_reranker: Si True, anade MultiSignalReranker al TripleMemory
+   649→   649→    """
+   650→   650→    # 1. Seleccionar backend base
+   651→   651→    base_store = None
+   652→   652→    if CHROMADB_AVAILABLE:
+   653→   653→        try:
+   654→   654→            base_store = ChromaVectorStore(store_dir=store_dir)
+   655→   655→            logger.info("Backend base: ChromaDB")
+   656→   656→        except Exception as e:
+   657→   657→            logger.warning(f"Error inicializando ChromaDB, fallback a casero: {e}")
+   658→   658→
+   659→   659→    if base_store is None:
+   660→   660→        base_store = SimpleVectorStore(store_dir=store_dir)
+   661→   661→        logger.info("Backend base: SimpleVectorStore (casero)")
+   662→   662→
+   663→   663→    # 2. Envolver en Hibrido si se solicita
+   664→   664→    if use_hybrid:
+   665→   665→        try:
+   666→   666→            from memory.hybrid import HybridVectorStore
+   667→   667→            hybrid_store = HybridVectorStore(base_store)
+   668→   668→            logger.info(
+   669→   669→                f"Vector store hibrido activado: "
+   670→   670→                f"{hybrid_store.count()} docs, BM25 + RRF"
+   671→   671→            )
+   672→   672→            return hybrid_store
+   673→   673→        except ImportError as e:
+   674→   674→            logger.warning(f"HybridVectorStore no disponible ({e}), usando base store")
+   675→   675→        except Exception as e:
+   676→   676→            logger.warning(f"Error inicializando HybridVectorStore: {e}, usando base store")
+   677→   677→
+   678→   678→    return base_store
+   679→   679→
