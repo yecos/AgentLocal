@@ -1,0 +1,943 @@
+     1→"""
+     2→=============================================================
+     3→AGENTE v14 - Herramientas de Proyectos (MEJORADO v14.2)
+     4→=============================================================
+     5→analizar_proyecto: Analisis profundo en 3 fases
+     6→  Fase 1 - Estructura: arbol, lenguajes, estadisticas
+     7→  Fase 2 - Lectura profunda: configs, README, Docker, CI/CD
+     8→  Fase 3 - Sintesis: arquitectura, tipo, stack, riesgos
+     9→clonar_repositorio, instalar_dependencias
+    10→=============================================================
+    11→"""
+    12→
+    13→import os
+    14→import json
+    15→import re
+    16→import shutil
+    17→import glob as glob_mod
+    18→
+    19→from config import REPOS_DIR, logger
+    20→from utils.helpers import safe_read_file
+    21→from utils.security import sanitize_input, validate_url
+    22→from tools.sistema import ejecutar_comando
+    23→
+    24→# Extensiones reconocidas por lenguaje
+    25→LANG_EXTENSIONS = {
+    26→    ".py": "Python", ".js": "JavaScript", ".ts": "TypeScript",
+    27→    ".jsx": "React JSX", ".tsx": "React TSX", ".vue": "Vue",
+    28→    ".html": "HTML", ".css": "CSS", ".scss": "SCSS",
+    29→    ".json": "JSON", ".md": "Markdown", ".yaml": "YAML",
+    30→    ".yml": "YAML", ".toml": "TOML", ".rs": "Rust",
+    31→    ".go": "Go", ".java": "Java", ".rb": "Ruby",
+    32→    ".c": "C", ".cpp": "C++", ".h": "C/C++ Header",
+    33→    ".sh": "Shell", ".bat": "Batch", ".ps1": "PowerShell",
+    34→    ".sql": "SQL", ".graphql": "GraphQL",
+    35→}
+    36→
+    37→# Directorios a ignorar al escanear
+    38→SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".next", "dist", "build", ".venv", "venv", ".cache", ".tox"}
+    39→
+    40→
+    41→def _analyze_package_json(ruta):
+    42→    """Lee y analiza package.json del proyecto."""
+    43→    pj_path = os.path.join(ruta, "package.json")
+    44→    content = safe_read_file(pj_path, 3000)
+    45→    if not content:
+    46→        return ""
+    47→    try:
+    48→        data = json.loads(content)
+    49→    except json.JSONDecodeError:
+    50→        return "  package.json existe pero no es JSON valido\n"
+    51→
+    52→    result = ""
+    53→    result += f"  Nombre: {data.get('name', 'desconocido')}\n"
+    54→    result += f"  Version: {data.get('version', '?')}\n"
+    55→    if data.get("description"):
+    56→        result += f"  Descripcion: {data['description'][:200]}\n"
+    57→    if data.get("scripts"):
+    58→        scripts = ", ".join(list(data["scripts"].keys())[:8])
+    59→        result += f"  Scripts: {scripts}\n"
+    60→    deps = {**data.get("dependencies", {}), **data.get("devDependencies", {})}
+    61→    if deps:
+    62→        frameworks = []
+    63→        fw_map = {
+    64→            "next": "Next.js", "react": "React", "vue": "Vue",
+    65→            "express": "Express", "fastify": "Fastify",
+    66→            "typescript": "TypeScript", "tailwindcss": "Tailwind",
+    67→            "eslint": "ESLint", "jest": "Jest", "vitest": "Vitest",
+    68→            "vite": "Vite", "nuxt": "Nuxt", "svelte": "Svelte",
+    69→            "@anthropic-ai/sdk": "Anthropic SDK", "openai": "OpenAI SDK",
+    70→        }
+    71→        for dep, fw_name in fw_map.items():
+    72→            if dep in deps:
+    73→                frameworks.append(f"{fw_name}({deps[dep]})")
+    74→        if frameworks:
+    75→            result += f"  Frameworks: {', '.join(frameworks)}\n"
+    76→        result += f"  Dependencias: {len(data.get('dependencies', {}))} prod, {len(data.get('devDependencies', {}))} dev\n"
+    77→    if data.get("workspaces"):
+    78→        result += f"  MONOREPO con workspaces: {data['workspaces']}\n"
+    79→    return result
+    80→
+    81→
+    82→def _analyze_readme(ruta):
+    83→    """Lee los primeros 500 chars del README como descripcion."""
+    84→    for name in ["README.md", "readme.md", "README.MD"]:
+    85→        readme_path = os.path.join(ruta, name)
+    86→        content = safe_read_file(readme_path, 1500)
+    87→        if content:
+    88→            clean = re.sub(r'[#*`>\-]', '', content[:500])
+    89→            clean = re.sub(r'\n{2,}', '\n', clean).strip()
+    90→            return f"  Descripcion del proyecto: {clean[:400]}\n"
+    91→    return ""
+    92→
+    93→
+    94→def _detect_monorepo(ruta):
+    95→    """Detecta si es un monorepo."""
+    96→    indicators = ["pnpm-workspace.yaml", "lerna.json", "turbo.json", ".nx"]
+    97→    found = []
+    98→    for ind in indicators:
+    99→        if os.path.exists(os.path.join(ruta, ind)):
+   100→            found.append(ind)
+   101→    # Verificar workspaces en package.json
+   102→    pj_path = os.path.join(ruta, "package.json")
+   103→    content = safe_read_file(pj_path, 3000)
+   104→    if content:
+   105→        try:
+   106→            if json.loads(content).get("workspaces"):
+   107→                found.append("package.json workspaces")
+   108→        except Exception:
+   109→            pass
+   110→    if found:
+   111→        return f"  MONOREPO detectado: {', '.join(found)}\n"
+   112→    return ""
+   113→
+   114→
+   115→def _count_languages(ruta, max_depth=3):
+   116→    """Cuenta archivos por lenguaje."""
+   117→    counts = {}
+   118→    for root, dirs, files in os.walk(ruta):
+   119→        depth = root.replace(ruta, "").count(os.sep)
+   120→        if depth > max_depth:
+   121→            dirs.clear()
+   122→            continue
+   123→        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+   124→        for f in files:
+   125→            ext = os.path.splitext(f)[1].lower()
+   126→            lang = LANG_EXTENSIONS.get(ext, "Otro")
+   127→            counts[lang] = counts.get(lang, 0) + 1
+   128→    return counts
+   129→
+   130→
+   131→# ============================================================
+   132→# FASE 2: LECTURA PROFUNDA - Helpers
+   133→# ============================================================
+   134→
+   135→def _deep_read_configs(ruta):
+   136→    """Lee y parsea todos los archivos de configuracion del proyecto.
+   137→    
+   138→    Returns:
+   139→        dict con claves: package_json, pyproject_toml, requirements_txt,
+   140→                         cargo_toml, go_mod, dockerfile, cicd, env_vars,
+   141→                         readme_full, entry_points
+   142→    """
+   143→    config_data = {
+   144→        "package_json": None,
+   145→        "pyproject_toml": None,
+   146→        "requirements_txt": None,
+   147→        "cargo_toml": None,
+   148→        "go_mod": None,
+   149→        "dockerfile": None,
+   150→        "cicd": [],
+   151→        "env_vars": [],
+   152→        "readme_full": None,
+   153→        "entry_points": [],
+   154→    }
+   155→
+   156→    # --- package.json ---
+   157→    pj_path = os.path.join(ruta, "package.json")
+   158→    content = safe_read_file(pj_path, 5000)
+   159→    if content:
+   160→        try:
+   161→            data = json.loads(content)
+   162→            config_data["package_json"] = data
+   163→            # Entry points
+   164→            if data.get("main"):
+   165→                config_data["entry_points"].append(f"main: {data['main']}")
+   166→            if data.get("bin"):
+   167→                if isinstance(data["bin"], str):
+   168→                    config_data["entry_points"].append(f"bin: {data['bin']}")
+   169→                elif isinstance(data["bin"], dict):
+   170→                    for name, path in data["bin"].items():
+   171→                        config_data["entry_points"].append(f"bin({name}): {path}")
+   172→            if data.get("exports"):
+   173→                config_data["entry_points"].append(f"exports: {json.dumps(data['exports'])[:100]}")
+   174→        except json.JSONDecodeError:
+   175→            pass
+   176→
+   177→    # --- pyproject.toml ---
+   178→    pp_path = os.path.join(ruta, "pyproject.toml")
+   179→    pp_content = safe_read_file(pp_path, 5000)
+   180→    if pp_content:
+   181→        config_data["pyproject_toml"] = pp_content
+   182→        # Parse basic info from TOML (simple regex-based, no tomllib dependency)
+   183→        name_match = re.search(r'name\s*=\s*["\']([^"\']+)["\']', pp_content)
+   184→        if name_match:
+   185→            config_data["entry_points"].append(f"pyproject.name: {name_match.group(1)}")
+   186→        # Detect entry points: scripts, console_scripts
+   187→        scripts_match = re.search(r'scripts\s*=\s*\{([^}]+)\}', pp_content)
+   188→        if scripts_match:
+   189→            config_data["entry_points"].append(f"pyproject.scripts: {scripts_match.group(1)[:100]}")
+   190→
+   191→    # --- requirements.txt ---
+   192→    req_path = os.path.join(ruta, "requirements.txt")
+   193→    req_content = safe_read_file(req_path, 5000)
+   194→    if req_content:
+   195→        config_data["requirements_txt"] = req_content
+   196→
+   197→    # --- Cargo.toml ---
+   198→    cargo_path = os.path.join(ruta, "Cargo.toml")
+   199→    cargo_content = safe_read_file(cargo_path, 3000)
+   200→    if cargo_content:
+   201→        config_data["cargo_toml"] = cargo_content
+   202→        name_match = re.search(r'name\s*=\s*["\']([^"\']+)["\']', cargo_content)
+   203→        if name_match:
+   204→            config_data["entry_points"].append(f"cargo.name: {name_match.group(1)}")
+   205→
+   206→    # --- go.mod ---
+   207→    gomod_path = os.path.join(ruta, "go.mod")
+   208→    gomod_content = safe_read_file(gomod_path, 3000)
+   209→    if gomod_content:
+   210→        config_data["go_mod"] = gomod_content
+   211→        module_match = re.search(r'module\s+(\S+)', gomod_content)
+   212→        if module_match:
+   213→            config_data["entry_points"].append(f"go.module: {module_match.group(1)}")
+   214→
+   215→    # --- Dockerfile ---
+   216→    dockerfile_path = os.path.join(ruta, "Dockerfile")
+   217→    df_content = safe_read_file(dockerfile_path, 5000)
+   218→    if df_content:
+   219→        config_data["dockerfile"] = df_content
+   220→
+   221→    # --- CI/CD configs ---
+   222→    # GitHub Actions
+   223→    gh_dir = os.path.join(ruta, ".github", "workflows")
+   224→    if os.path.isdir(gh_dir):
+   225→        for yml_file in sorted(os.listdir(gh_dir))[:5]:
+   226→            if yml_file.endswith((".yml", ".yaml")):
+   227→                yml_path = os.path.join(gh_dir, yml_file)
+   228→                yml_content = safe_read_file(yml_path, 3000)
+   229→                if yml_content:
+   230→                    config_data["cicd"].append({
+   231→                        "type": "GitHub Actions",
+   232→                        "file": yml_file,
+   233→                        "content": yml_content,
+   234→                    })
+   235→    # GitLab CI
+   236→    gitlab_path = os.path.join(ruta, ".gitlab-ci.yml")
+   237→    gitlab_content = safe_read_file(gitlab_path, 3000)
+   238→    if gitlab_content:
+   239→        config_data["cicd"].append({
+   240→            "type": "GitLab CI",
+   241→            "file": ".gitlab-ci.yml",
+   242→            "content": gitlab_content,
+   243→        })
+   244→    # Jenkins
+   245→    jenkins_path = os.path.join(ruta, "Jenkinsfile")
+   246→    jenkins_content = safe_read_file(jenkins_path, 3000)
+   247→    if jenkins_content:
+   248→        config_data["cicd"].append({
+   249→            "type": "Jenkins",
+   250→            "file": "Jenkinsfile",
+   251→            "content": jenkins_content,
+   252→        })
+   253→
+   254→    # --- .env.example ---
+   255→    env_example_path = os.path.join(ruta, ".env.example")
+   256→    env_content = safe_read_file(env_example_path, 5000)
+   257→    if env_content:
+   258→        for line in env_content.splitlines():
+   259→            line = line.strip()
+   260→            if line and not line.startswith("#") and "=" in line:
+   261→                var_name = line.split("=")[0].strip()
+   262→                config_data["env_vars"].append(var_name)
+   263→
+   264→    # --- README completo ---
+   265→    for name in ["README.md", "readme.md", "README.MD", "README.rst", "README"]:
+   266→        readme_path = os.path.join(ruta, name)
+   267→        readme_content = safe_read_file(readme_path, 10000)
+   268→        if readme_content:
+   269→            config_data["readme_full"] = readme_content
+   270→            break
+   271→
+   272→    return config_data
+   273→
+   274→
+   275→def _detect_architecture(ruta, lang_counts, config_data):
+   276→    """Detecta el patron de arquitectura del proyecto.
+   277→    
+   278→    Returns:
+   279→        str: Descripcion del patron detectado (MVC, microservices, monolith, 
+   280→             serverless, monorepo, library, etc.)
+   281→    """
+   282→    patterns = []
+   283→
+   284→    # Monorepo detection
+   285→    for indicator in ["packages/", "apps/", "libs/"]:
+   286→        if os.path.isdir(os.path.join(ruta, indicator.rstrip("/"))):
+   287→            patterns.append("Monorepo")
+   288→            break
+   289→    pj = config_data.get("package_json") or {}
+   290→    if pj.get("workspaces"):
+   291→        patterns.append("Monorepo")
+   292→    if os.path.exists(os.path.join(ruta, "lerna.json")) or os.path.exists(os.path.join(ruta, "turbo.json")):
+   293→        patterns.append("Monorepo")
+   294→
+   295→    # Microservices indicators
+   296→    has_docker_compose = os.path.exists(os.path.join(ruta, "docker-compose.yml")) or \
+   297→                         os.path.exists(os.path.join(ruta, "docker-compose.yaml"))
+   298→    has_dockerfile = os.path.exists(os.path.join(ruta, "Dockerfile"))
+   299→    multiple_dockerfiles = []
+   300→    for root, dirs, files in os.walk(ruta):
+   301→        depth = root.replace(ruta, "").count(os.sep)
+   302→        if depth > 2:
+   303→            dirs.clear()
+   304→            continue
+   305→        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+   306→        for f in files:
+   307→            if f == "Dockerfile":
+   308→                multiple_dockerfiles.append(root)
+   309→    if has_docker_compose and len(multiple_dockerfiles) > 1:
+   310→        patterns.append("Microservicios")
+   311→    elif has_docker_compose:
+   312→        patterns.append("Contenerizado")
+   313→
+   314→    # MVC / Web framework patterns
+   315→    has_controllers = os.path.isdir(os.path.join(ruta, "controllers")) or \
+   316→                      os.path.isdir(os.path.join(ruta, "src", "controllers"))
+   317→    has_views = os.path.isdir(os.path.join(ruta, "views")) or \
+   318→                os.path.isdir(os.path.join(ruta, "templates")) or \
+   319→                os.path.isdir(os.path.join(ruta, "src", "views"))
+   320→    has_models = os.path.isdir(os.path.join(ruta, "models")) or \
+   321→                 os.path.isdir(os.path.join(ruta, "src", "models"))
+   322→    if has_controllers and has_views and has_models:
+   323→        patterns.append("MVC")
+   324→    elif has_controllers and has_models:
+   325→        patterns.append("API/Backend")
+   326→
+   327→    # Next.js app router pattern
+   328→    has_app_dir = os.path.isdir(os.path.join(ruta, "app")) or \
+   329→                  os.path.isdir(os.path.join(ruta, "src", "app"))
+   330→    has_pages_dir = os.path.isdir(os.path.join(ruta, "pages")) or \
+   331→                    os.path.isdir(os.path.join(ruta, "src", "pages"))
+   332→    pj = config_data.get("package_json") or {}
+   333→    deps = {**pj.get("dependencies", {}), **pj.get("devDependencies", {})}
+   334→    if "next" in deps:
+   335→        if has_app_dir:
+   336→            patterns.append("Next.js App Router")
+   337→        elif has_pages_dir:
+   338→            patterns.append("Next.js Pages Router")
+   339→
+   340→    # Serverless indicators
+   341→    has_serverless = os.path.exists(os.path.join(ruta, "serverless.yml")) or \
+   342→                     os.path.exists(os.path.join(ruta, "serverless.yaml"))
+   343→    has_vercel = os.path.exists(os.path.join(ruta, "vercel.json"))
+   344→    has_netlify = os.path.exists(os.path.join(ruta, "netlify.toml"))
+   345→    if has_serverless or has_vercel or has_netlify:
+   346→        patterns.append("Serverless")
+   347→
+   348→    # Monolith fallback
+   349→    if not patterns:
+   350→        has_src = os.path.isdir(os.path.join(ruta, "src"))
+   351→        has_lib = os.path.isdir(os.path.join(ruta, "lib"))
+   352→        py_count = lang_counts.get("Python", 0)
+   353→        js_count = lang_counts.get("JavaScript", 0) + lang_counts.get("TypeScript", 0)
+   354→        if has_dockerfile or (py_count + js_count > 10):
+   355→            patterns.append("Monolito")
+   356→        elif has_src or has_lib:
+   357→            patterns.append("Libreria/Modulo")
+   358→
+   359→    return " + ".join(patterns) if patterns else "No determinado"
+   360→
+   361→
+   362→def _classify_project(config_data, lang_counts):
+   363→    """Clasifica el tipo de proyecto.
+   364→    
+   365→    Returns:
+   366→        str: Tipo de proyecto (web app, CLI tool, library, API, etc.)
+   367→    """
+   368→    pj = config_data.get("package_json") or {}
+   369→    deps = {**pj.get("dependencies", {}), **pj.get("devDependencies", {})}
+   370→    scripts = pj.get("scripts", {})
+   371→
+   372→    py_count = lang_counts.get("Python", 0)
+   373→    js_count = lang_counts.get("JavaScript", 0) + lang_counts.get("TypeScript", 0)
+   374→    rs_count = lang_counts.get("Rust", 0)
+   375→    go_count = lang_counts.get("Go", 0)
+   376→
+   377→    # Check for web app indicators
+   378→    web_frameworks = ["next", "react", "vue", "nuxt", "svelte", "angular",
+   379→                      "@angular/core", "vite", "gatsby", "remix"]
+   380→    if any(fw in deps for fw in web_frameworks):
+   381→        if "next" in deps:
+   382→            return "Web App (Next.js)"
+   383→        if "nuxt" in deps:
+   384→            return "Web App (Nuxt)"
+   385→        if "vue" in deps:
+   386→            return "Web App (Vue)"
+   387→        if "svelte" in deps:
+   388→            return "Web App (Svelte)"
+   389→        return "Web App (Frontend)"
+   390→
+   391→    # Check for API/Backend indicators
+   392→    api_frameworks = ["express", "fastify", "koa", "hapi", "flask", "django",
+   393→                      "fastapi", "tornado", "starlette", "sanic"]
+   394→    if any(fw in deps for fw in api_frameworks):
+   395→        return "API/Backend"
+   396→
+   397→    # Check for CLI tool indicators
+   398→    has_bin = pj.get("bin") is not None
+   399→    has_cli_deps = "commander" in deps or "yargs" in deps or "click" in deps or \
+   400→                   "typer" in deps or "argparse" in deps or "inquirer" in deps
+   401→    has_cli_script = "cli" in scripts or "start" in scripts
+   402→    if has_bin or has_cli_deps:
+   403→        return "CLI Tool"
+   404→
+   405→    # Check for library indicators
+   406→    has_main = pj.get("main") is not None
+   407→    has_exports = pj.get("exports") is not None
+   408→    has_typings = pj.get("types") is not None or pj.get("typings") is not None
+   409→    has_pyproject = config_data.get("pyproject_toml") is not None
+   410→    has_setup_py = os.path.exists(os.path.join(
+   411→        os.path.dirname(config_data.get("pyproject_toml", "")), "setup.py"
+   412→    )) if config_data.get("pyproject_toml") else False
+   413→
+   414→    if has_exports or has_typings:
+   415→        return "Libreria (NPM)"
+   416→    if has_pyproject and py_count > js_count:
+   417→        return "Libreria/Modulo (Python)"
+   418→
+   419→    # Check for desktop/mobile
+   420→    if "electron" in deps:
+   421→        return "App Desktop (Electron)"
+   422→    if "react-native" in deps or "expo" in deps:
+   423→        return "App Mobile (React Native)"
+   424→
+   425→    # Check for Rust/Go binary
+   426→    if config_data.get("cargo_toml"):
+   427→        return "Binario/Tool (Rust)"
+   428→    if config_data.get("go_mod"):
+   429→        return "Binario/Tool (Go)"
+   430→
+   431→    # Fallback by language dominance
+   432→    if py_count > js_count and py_count > 5:
+   433→        return "Proyecto Python"
+   434→    if js_count > py_count and js_count > 5:
+   435→        return "Proyecto JavaScript/TypeScript"
+   436→    if rs_count > 3:
+   437→        return "Proyecto Rust"
+   438→    if go_count > 3:
+   439→        return "Proyecto Go"
+   440→
+   441→    return "Proyecto generico"
+   442→
+   443→
+   444→def _assess_dependencies(config_data):
+   445→    """Analiza las dependencias del proyecto y evalua riesgos.
+   446→    
+   447→    Returns:
+   448→        dict con: total_deps, prod_deps, dev_deps, outdated_patterns, 
+   449→                  risk_notes, stack_versions
+   450→    """
+   451→    result = {
+   452→        "total_deps": 0,
+   453→        "prod_deps": 0,
+   454→        "dev_deps": 0,
+   455→        "outdated_patterns": [],
+   456→        "risk_notes": [],
+   457→        "stack_versions": {},
+   458→    }
+   459→
+   460→    pj = config_data.get("package_json")
+   461→    if pj:
+   462→        prod = pj.get("dependencies", {})
+   463→        dev = pj.get("devDependencies", {})
+   464→        result["prod_deps"] = len(prod)
+   465→        result["dev_deps"] = len(dev)
+   466→        result["total_deps"] = len(prod) + len(dev)
+   467→
+   468→        # Extract versions
+   469→        for name, version in {**prod, **dev}.items():
+   470→            # Clean version string
+   471→            ver = re.sub(r'[\^~>=<]', '', version)
+   472→            result["stack_versions"][name] = ver
+   473→
+   474→        # Check for potentially outdated/vulnerable patterns
+   475→        risk_deps = {
+   476→            "node-uuid": "Usa 'uuid' en vez de 'node-uuid' (deprecado)",
+   477→            "request": "'request' esta deprecado, usa 'node-fetch' o 'axios'",
+   478→            "express@3": "Express v3 es muy antiguo, actualizar a v4+",
+   479→            "lodash": "Considera usar funciones nativas de ES6+ en vez de lodash",
+   480→            "moment": "Moment.js esta en mantenimiento, considera 'date-fns' o 'dayjs'",
+   481→            "jquery": "jQuery puede no ser necesario en apps modernas",
+   482→            "babel-core": "Usa @babel/core en vez de babel-core (Babel 7+)",
+   483→            "@types/react": "Verifica que la version de @types/react coincida con react",
+   484→        }
+   485→        for dep, note in risk_deps.items():
+   486→            dep_name = dep.split("@")[0] if "@" in dep and not dep.startswith("@") else dep
+   487→            if dep_name in prod or dep_name in dev:
+   488→                result["outdated_patterns"].append(f"{dep_name}: {note}")
+   489→
+   490→        # General risk notes
+   491→        if len(prod) > 50:
+   492→            result["risk_notes"].append("Muchas dependencias de produccion (>50). Considera reducir.")
+   493→        if len(prod) > 0 and len(dev) == 0:
+   494→            result["risk_notes"].append("Sin devDependencies. Las herramientas de desarrollo deberian estar en devDeps.")
+   495→
+   496→    # Python dependency analysis
+   497→    req = config_data.get("requirements_txt")
+   498→    if req:
+   499→        req_lines = [l.strip() for l in req.splitlines() if l.strip() and not l.startswith("#")]
+   500→        result["prod_deps"] = len(req_lines)
+   501→        result["total_deps"] = len(req_lines)
+   502→
+   503→        # Check for unpinned deps
+   504→        unpinned = [l for l in req_lines if "==" not in l and ">=" not in l and "<=" not in l and "~=" not in l]
+   505→        if unpinned:
+   506→            result["risk_notes"].append(f"{len(unpinned)} dependencias sin version fija en requirements.txt")
+   507→            result["outdated_patterns"].append(f"Unpinned: {', '.join(unpinned[:5])}")
+   508→
+   509→        # Check for risky patterns
+   510→        py_risk_deps = {
+   511→            "pickle": "pickle es inseguro para datos no confiables",
+   512→            "subprocess.call": "subprocess.call sin shell=False es riesgoso",
+   513→            "flask<1": "Flask <1.0 es muy antiguo",
+   514→            "django<2": "Django <2.0 tiene vulnerabilidades conocidas",
+   515→        }
+   516→        for pattern, note in py_risk_deps.items():
+   517→            if any(pattern in l.lower() for l in req_lines):
+   518→                result["outdated_patterns"].append(note)
+   519→
+   520→    # Go dependency analysis
+   521→    gomod = config_data.get("go_mod")
+   522→    if gomod:
+   523→        # Count indirect dependencies
+   524→        indirect_count = gomod.count("// indirect")
+   525→        direct_lines = [l for l in gomod.splitlines() if l.strip().startswith("require") or 
+   526→                       (l.strip() and not l.strip().startswith("//") and not l.strip().startswith("module") and 
+   527→                        not l.strip().startswith("go ") and l.strip() not in ("require (", ")"))]
+   528→        result["total_deps"] = len(direct_lines)
+   529→        result["prod_deps"] = len(direct_lines) - indirect_count
+   530→
+   531→    # Rust dependency analysis  
+   532→    cargo = config_data.get("cargo_toml")
+   533→    if cargo:
+   534→        dep_count = cargo.count('version =')
+   535→        result["total_deps"] = dep_count
+   536→        result["prod_deps"] = dep_count
+   537→
+   538→    if not result["risk_notes"]:
+   539→        result["risk_notes"].append("No se detectaron riesgos obvios en las dependencias.")
+   540→
+   541→    return result
+   542→
+   543→
+   544→def analizar_proyecto(ruta: str) -> str:
+   545→    """Analisis profundo de un proyecto en 3 fases:
+   546→    Fase 1 - Estructura: arbol, lenguajes, estadisticas
+   547→    Fase 2 - Lectura profunda: configs, README, Docker, CI/CD
+   548→    Fase 3 - Sintesis: arquitectura, tipo, stack, riesgos
+   549→    """
+   550→    # Resolver ruta
+   551→    if not os.path.exists(ruta):
+   552→        alt = os.path.join(REPOS_DIR, ruta) if not os.path.isabs(ruta) else ruta
+   553→        if os.path.exists(alt):
+   554→            ruta = alt
+   555→        else:
+   556→            return f"Directorio no existe: {ruta}"
+   557→
+   558→    result = f"=== ANALISIS DE PROYECTO (3 FASES) ===\n"
+   559→    result += f"Ruta: {ruta}\n\n"
+   560→
+   561→    # ================================================================
+   562→    # FASE 1: ESTRUCTURA
+   563→    # ================================================================
+   564→    result += "--- FASE 1: ESTRUCTURA ---\n"
+   565→
+   566→    # 1.1 Arbol de directorios con estadisticas
+   567→    file_count = 0
+   568→    for root, dirs, files in os.walk(ruta):
+   569→        depth = root.replace(ruta, "").count(os.sep)
+   570→        if depth > 3:
+   571→            dirs.clear()
+   572→            continue
+   573→        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+   574→        indent = "  " * depth
+   575→        result += f"{indent}{os.path.basename(root)}/\n"
+   576→        subindent = "  " * (depth + 1)
+   577→        for f in sorted(files)[:15]:
+   578→            result += f"{subindent}{f}\n"
+   579→            file_count += 1
+   580→        if len(files) > 15:
+   581→            result += f"{subindent}... y {len(files)-15} mas\n"
+   582→    result += f"\nTotal archivos visibles: ~{file_count}\n\n"
+   583→
+   584→    # 1.2 Lenguajes
+   585→    lang_counts = _count_languages(ruta)
+   586→    if lang_counts:
+   587→        sorted_langs = sorted(lang_counts.items(), key=lambda x: x[1], reverse=True)
+   588→        lang_str = ", ".join(f"{lang}({cnt})" for lang, cnt in sorted_langs[:8])
+   589→        result += f"LENGUAJES: {lang_str}\n\n"
+   590→
+   591→    # 1.3 Analisis de archivos clave (keep existing)
+   592→    result += "DETALLES DEL PROYECTO:\n"
+   593→    result += _analyze_package_json(ruta)
+   594→    result += _analyze_readme(ruta)
+   595→    result += _detect_monorepo(ruta)
+   596→
+   597→    # 1.4 Deteccion por patrones
+   598→    result += "\nTECNOLOGIAS DETECTADAS:\n"
+   599→    tech_patterns = {
+   600→        "Dockerfile": "Docker", "docker-compose.yml": "Docker Compose",
+   601→        "docker-compose.yaml": "Docker Compose",
+   602→        ".github/workflows": "GitHub Actions CI/CD",
+   603→        ".gitlab-ci.yml": "GitLab CI", "Jenkinsfile": "Jenkins CI",
+   604→        "requirements.txt": "Python (pip)", "pyproject.toml": "Python (modern)",
+   605→        "Pipfile": "Python (pipenv)", "poetry.lock": "Python (poetry)",
+   606→        "Cargo.toml": "Rust", "go.mod": "Go", "Gemfile": "Ruby",
+   607→        ".eslintrc.js": "ESLint", ".eslintrc.json": "ESLint",
+   608→        "jest.config.js": "Jest", "vitest.config.ts": "Vitest",
+   609→        "pytest.ini": "pytest", "conftest.py": "pytest",
+   610→        "tsconfig.json": "TypeScript",
+   611→        "next.config.js": "Next.js", "next.config.ts": "Next.js",
+   612→        "nuxt.config.ts": "Nuxt", "vite.config.ts": "Vite",
+   613→        ".env": "Variables de entorno", ".env.example": "Env template",
+   614→        "mcp.json": "MCP Server", "mcp-config.json": "MCP Config",
+   615→        ".git": "Git",
+   616→    }
+   617→    for pattern, tech in tech_patterns.items():
+   618→        if os.path.exists(os.path.join(ruta, pattern)):
+   619→            result += f"  - {tech}\n"
+   620→
+   621→    # 1.5 Subproyectos (si es monorepo)
+   622→    packages_dir = os.path.join(ruta, "packages")
+   623→    apps_dir = os.path.join(ruta, "apps")
+   624→    sub_dirs = []
+   625→    for d in [packages_dir, apps_dir]:
+   626→        if os.path.exists(d):
+   627→            for sub in os.listdir(d)[:5]:
+   628→                sub_path = os.path.join(d, sub)
+   629→                if os.path.isdir(sub_path):
+   630→                    sub_dirs.append(sub)
+   631→    if sub_dirs:
+   632→        result += f"\nSUBPROYECTOS: {', '.join(sub_dirs)}\n"
+   633→
+   634→    # ================================================================
+   635→    # FASE 2: LECTURA PROFUNDA
+   636→    # ================================================================
+   637→    result += "\n\n--- FASE 2: LECTURA PROFUNDA ---\n"
+   638→
+   639→    config_data = _deep_read_configs(ruta)
+   640→
+   641→    # 2.1 README completo
+   642→    readme = config_data.get("readme_full")
+   643→    if readme:
+   644→        # Extract key sections from README
+   645→        clean = re.sub(r'[#*`>\-]', '', readme[:2000])
+   646→        clean = re.sub(r'\n{2,}', '\n', clean).strip()
+   647→        result += f"README (completo):\n  {clean[:1500]}\n\n"
+   648→    else:
+   649→        result += "README: No encontrado\n\n"
+   650→
+   651→    # 2.2 Config files
+   652→    pj = config_data.get("package_json")
+   653→    if pj:
+   654→        result += f"package.json:\n"
+   655→        result += f"  Nombre: {pj.get('name', '?')}\n"
+   656→        result += f"  Version: {pj.get('version', '?')}\n"
+   657→        if pj.get("description"):
+   658→            result += f"  Descripcion: {pj['description'][:300]}\n"
+   659→        if pj.get("scripts"):
+   660→            result += f"  Scripts:\n"
+   661→            for script_name, script_cmd in list(pj["scripts"].items())[:10]:
+   662→                result += f"    {script_name}: {script_cmd[:100]}\n"
+   663→        deps = pj.get("dependencies", {})
+   664→        dev_deps = pj.get("devDependencies", {})
+   665→        if deps:
+   666→            result += f"  Dependencias prod ({len(deps)}):\n"
+   667→            for name, ver in list(deps.items())[:15]:
+   668→                result += f"    {name}: {ver}\n"
+   669→            if len(deps) > 15:
+   670→                result += f"    ... y {len(deps)-15} mas\n"
+   671→        if dev_deps:
+   672→            result += f"  Dependencias dev ({len(dev_deps)}):\n"
+   673→            for name, ver in list(dev_deps.items())[:10]:
+   674→                result += f"    {name}: {ver}\n"
+   675→            if len(dev_deps) > 10:
+   676→                result += f"    ... y {len(dev_deps)-10} mas\n"
+   677→        result += "\n"
+   678→
+   679→    pp = config_data.get("pyproject_toml")
+   680→    if pp:
+   681→        result += f"pyproject.toml:\n"
+   682→        # Extract key info
+   683→        for line in pp.splitlines()[:30]:
+   684→            stripped = line.strip()
+   685→            if stripped and not stripped.startswith("#"):
+   686→                result += f"  {stripped}\n"
+   687→        if len(pp.splitlines()) > 30:
+   688→            result += f"  ... ({len(pp.splitlines())-30} lineas mas)\n"
+   689→        result += "\n"
+   690→
+   691→    req = config_data.get("requirements_txt")
+   692→    if req:
+   693→        result += f"requirements.txt:\n"
+   694→        req_lines = [l.strip() for l in req.splitlines() if l.strip() and not l.startswith("#")]
+   695→        for line in req_lines[:20]:
+   696→            result += f"  {line}\n"
+   697→        if len(req_lines) > 20:
+   698→            result += f"  ... y {len(req_lines)-20} mas\n"
+   699→        result += "\n"
+   700→
+   701→    cargo = config_data.get("cargo_toml")
+   702→    if cargo:
+   703→        result += f"Cargo.toml:\n"
+   704→        for line in cargo.splitlines()[:20]:
+   705→            stripped = line.strip()
+   706→            if stripped:
+   707→                result += f"  {stripped}\n"
+   708→        result += "\n"
+   709→
+   710→    gomod = config_data.get("go_mod")
+   711→    if gomod:
+   712→        result += f"go.mod:\n"
+   713→        for line in gomod.splitlines()[:20]:
+   714→            stripped = line.strip()
+   715→            if stripped:
+   716→                result += f"  {stripped}\n"
+   717→        result += "\n"
+   718→
+   719→    # 2.3 Dockerfile
+   720→    dockerfile = config_data.get("dockerfile")
+   721→    if dockerfile:
+   722→        result += f"Dockerfile:\n"
+   723→        for line in dockerfile.splitlines()[:25]:
+   724→            result += f"  {line}\n"
+   725→        # Extract base image and exposed ports
+   726→        from_match = re.search(r'FROM\s+(\S+)', dockerfile)
+   727→        expose_match = re.findall(r'EXPOSE\s+(\d+)', dockerfile)
+   728→        if from_match:
+   729→            result += f"  [Imagen base: {from_match.group(1)}]\n"
+   730→        if expose_match:
+   731→            result += f"  [Puertos expuestos: {', '.join(expose_match)}]\n"
+   732→        result += "\n"
+   733→
+   734→    # 2.4 CI/CD
+   735→    cicd_list = config_data.get("cicd", [])
+   736→    if cicd_list:
+   737→        result += f"CI/CD ({len(cicd_list)} config(s)):\n"
+   738→        for cicd in cicd_list:
+   739→            result += f"  {cicd['type']}: {cicd['file']}\n"
+   740→            # Extract key info (triggers, stages)
+   741→            content = cicd.get("content", "")
+   742→            # GitHub Actions: extract on.trigger
+   743→            if "GitHub Actions" in cicd["type"]:
+   744→                triggers = re.findall(r'(push|pull_request|workflow_dispatch|schedule):', content)
+   745→                if triggers:
+   746→                    result += f"    Triggers: {', '.join(set(triggers))}\n"
+   747→            # GitLab CI: extract stages
+   748→            stages_match = re.search(r'stages:\s*\n((\s+-\s+.+\n)+)', content)
+   749→            if stages_match:
+   750→                stages = re.findall(r'-\s+(\S+)', stages_match.group(0))
+   751→                if stages:
+   752→                    result += f"    Stages: {', '.join(stages[:10])}\n"
+   753→        result += "\n"
+   754→
+   755→    # 2.5 Entry points
+   756→    entry_points = config_data.get("entry_points", [])
+   757→    if entry_points:
+   758→        result += f"ENTRY POINTS:\n"
+   759→        for ep in entry_points[:8]:
+   760→            result += f"  {ep}\n"
+   761→        result += "\n"
+   762→
+   763→    # 2.6 Environment variables
+   764→    env_vars = config_data.get("env_vars", [])
+   765→    if env_vars:
+   766→        result += f"VARIABLES DE ENTORNO (.env.example):\n"
+   767→        for var in env_vars[:20]:
+   768→            result += f"  {var}\n"
+   769→        if len(env_vars) > 20:
+   770→            result += f"  ... y {len(env_vars)-20} mas\n"
+   771→        result += "\n"
+   772→
+   773→    # ================================================================
+   774→    # FASE 3: SINTESIS
+   775→    # ================================================================
+   776→    result += "\n--- FASE 3: SINTESIS ---\n"
+   777→
+   778→    # 3.1 Architecture pattern
+   779→    architecture = _detect_architecture(ruta, lang_counts, config_data)
+   780→    result += f"ARQUITECTURA: {architecture}\n"
+   781→
+   782→    # 3.2 Project classification
+   783→    project_type = _classify_project(config_data, lang_counts)
+   784→    result += f"TIPO DE PROYECTO: {project_type}\n"
+   785→
+   786→    # 3.3 Tech stack summary with versions
+   787→    dep_assessment = _assess_dependencies(config_data)
+   788→    result += f"STACK TECNOLOGICO:\n"
+   789→    result += f"  Dependencias: {dep_assessment['total_deps']} total ({dep_assessment['prod_deps']} prod, {dep_assessment['dev_deps']} dev)\n"
+   790→
+   791→    # Show key stack versions
+   792→    stack_versions = dep_assessment.get("stack_versions", {})
+   793→    key_stack = {}
+   794→    # Highlight important deps
+   795→    important_deps = {"next", "react", "vue", "nuxt", "svelte", "express", "fastify",
+   796→                      "typescript", "tailwindcss", "vite", "webpack", "eslint",
+   797→                      "flask", "django", "fastapi", "python", "node",
+   798→                      "@prisma/client", "prisma", "drizzle-orm",
+   799→                      "trpc", "zod", "@tanstack/react-query"}
+   800→    for dep_name, version in stack_versions.items():
+   801→        dep_base = dep_name.split("/")[-1] if "/" in dep_name else dep_name
+   802→        if dep_base.lower() in important_deps or dep_name.lower() in important_deps:
+   803→            key_stack[dep_name] = version
+   804→    if key_stack:
+   805→        result += f"  Versiones clave:\n"
+   806→        for name, ver in key_stack.items():
+   807→            result += f"    {name}: {ver}\n"
+   808→
+   809→    # Language versions from config files
+   810→    if config_data.get("pyproject_toml"):
+   811→        requires_python = re.search(r'requires-python\s*=\s*["\']([^"\']+)["\']', config_data["pyproject_toml"])
+   812→        if requires_python:
+   813→            result += f"    Python: {requires_python.group(1)}\n"
+   814→    if config_data.get("package_json"):
+   815→        engines = config_data["package_json"].get("engines", {})
+   816→        if engines:
+   817→            for engine, ver in engines.items():
+   818→                result += f"    {engine}: {ver}\n"
+   819→    if config_data.get("go_mod"):
+   820→        go_version = re.search(r'^go\s+(\S+)', config_data["go_mod"], re.MULTILINE)
+   821→        if go_version:
+   822→            result += f"    Go: {go_version.group(1)}\n"
+   823→    result += "\n"
+   824→
+   825→    # 3.4 Dependency risk assessment
+   826→    result += f"EVALUACION DE DEPENDENCIAS:\n"
+   827→    if dep_assessment["outdated_patterns"]:
+   828→        result += f"  Patrones potencialmente problematicos:\n"
+   829→        for pattern in dep_assessment["outdated_patterns"][:8]:
+   830→            result += f"    - {pattern}\n"
+   831→    else:
+   832→        result += f"  Sin patrones problematicos detectados.\n"
+   833→    if dep_assessment["risk_notes"]:
+   834→        result += f"  Notas de riesgo:\n"
+   835→        for note in dep_assessment["risk_notes"]:
+   836→            result += f"    - {note}\n"
+   837→    result += "\n"
+   838→
+   839→    # 3.5 Key insights and recommendations
+   840→    result += f"INSIGHTS Y RECOMENDACIONES:\n"
+   841→    insights = []
+   842→
+   843→    # Check for missing configs
+   844→    if not config_data.get("dockerfile") and dep_assessment["total_deps"] > 5:
+   845→        insights.append("Sin Dockerfile: considera contenerizar la aplicacion para despliegue consistente.")
+   846→    if not config_data.get("cicd"):
+   847→        insights.append("Sin CI/CD detectado: configura pipelines para testeo y despliegue automatico.")
+   848→    if not config_data.get("readme_full"):
+   849→        insights.append("Sin README: agrega documentacion basica del proyecto.")
+   850→    if config_data.get("env_vars") and not os.path.exists(os.path.join(ruta, ".gitignore")):
+   851→        insights.append("Variables de entorno detectadas pero sin .gitignore: asegurate de excluir .env del repositorio.")
+   852→    if pj:
+   853→        deps = pj.get("dependencies", {})
+   854→        dev_deps = pj.get("devDependencies", {})
+   855→        if "typescript" in deps and "typescript" not in dev_deps:
+   856→            insights.append("TypeScript esta en dependencies en vez de devDependencies.")
+   857→        test_frameworks = {"jest", "vitest", "mocha", "pytest"}
+   858→        all_deps = {**deps, **dev_deps}
+   859→        if not any(tf in all_deps for tf in test_frameworks) and dep_assessment["total_deps"] > 3:
+   860→            insights.append("Sin framework de testing detectado: considera agregar tests.")
+   861→        if "eslint" not in all_deps and (lang_counts.get("JavaScript", 0) + lang_counts.get("TypeScript", 0)) > 5:
+   862→            insights.append("Sin ESLint: considera agregar linting para mantener calidad de codigo.")
+   863→    if req and not config_data.get("pyproject_toml"):
+   864→        insights.append("Usa requirements.txt pero no pyproject.toml: considera migrar a pyproject para mejor gestion.")
+   865→
+   866→    # Architecture insights
+   867→    if "Monorepo" in architecture:
+   868→        insights.append("Monorepo detectado: asegurate de tener configuracion de build incremental para velocidad.")
+   869→    if "Microservicios" in architecture:
+   870→        insights.append("Microservicios detectados: verifica la comunicacion entre servicios y el manejo de errores.")
+   871→
+   872→    # Deployment readiness
+   873→    if config_data.get("dockerfile") and config_data.get("cicd"):
+   874→        insights.append("Proyecto listo para CI/CD con Docker: buen setup de despliegue.")
+   875→    if pj and "build" in pj.get("scripts", {}):
+   876→        insights.append("Script de build configurado: listo para produccion.")
+   877→
+   878→    if insights:
+   879→        for i, insight in enumerate(insights[:10], 1):
+   880→            result += f"  {i}. {insight}\n"
+   881→    else:
+   882→        result += "  Proyecto bien configurado. No hay recomendaciones adicionales.\n"
+   883→
+   884→    return result
+   885→
+   886→
+   887→def clonar_repositorio(url: str) -> str:
+   888→    """Clona un repositorio de GitHub."""
+   889→    # Validar que la URL sea un repo Git legitimo
+   890→    url = url.strip()
+   891→    
+   892→    # Validar URL HTTPS con validate_url
+   893→    if url.startswith("https://") or url.startswith("http://"):
+   894→        if not validate_url(url):
+   895→            return f"URL no valida o protocolo no permitido: {url[:100]}"
+   896→    elif not re.match(r'^git@github\.com:[\w\-\.]+/[\w\-\.]+(?:\.git)?$', url):
+   897→        # Si no es SSH, sanitizar
+   898→        url = sanitize_input(url)
+   899→
+   900→    repo_name = url.rstrip("/").split("/")[-1].replace(".git", "")
+   901→    target_dir = os.path.join(REPOS_DIR, repo_name)
+   902→
+   903→    if os.path.exists(target_dir):
+   904→        git_dir = os.path.join(target_dir, ".git")
+   905→        contenido = os.listdir(target_dir) if os.path.isdir(target_dir) else []
+   906→        archivos_reales = [f for f in contenido if f != ".git"]
+   907→        if os.path.exists(git_dir) and len(archivos_reales) > 1:
+   908→            return f"Ya existe en: {target_dir}"
+   909→        else:
+   910→            try:
+   911→                shutil.rmtree(target_dir)
+   912→            except Exception as e:
+   913→                return f"Carpeta vacia, no se pudo borrar: {e}"
+   914→
+   915→    resultado = ejecutar_comando(f'git clone {url} "{target_dir}"')
+   916→    if os.path.exists(target_dir) and len(os.listdir(target_dir)) > 1:
+   917→        return f"CLONADO OK en: {target_dir}"
+   918→    return f"ERROR al clonar:\n{resultado}"
+   919→
+   920→
+   921→def instalar_dependencias(ruta: str, gestor: str = "auto") -> str:
+   922→    """Instala dependencias de un proyecto. Detecta automaticamente npm/pip/poetry."""
+   923→    if not os.path.exists(ruta):
+   924→        return f"Ruta no existe: {ruta}"
+   925→
+   926→    if gestor == "auto":
+   927→        if os.path.exists(os.path.join(ruta, "package.json")):
+   928→            gestor = "npm"
+   929→        elif os.path.exists(os.path.join(ruta, "requirements.txt")):
+   930→            gestor = "pip"
+   931→        elif os.path.exists(os.path.join(ruta, "pyproject.toml")):
+   932→            gestor = "poetry"
+   933→        else:
+   934→            return "No se detecto gestor de paquetes"
+   935→
+   936→    comandos = {
+   937→        "npm": f'cd "{ruta}" && npm install',
+   938→        "pip": f'cd "{ruta}" && pip install -r requirements.txt',
+   939→        "poetry": f'cd "{ruta}" && poetry install',
+   940→        "bun": f'cd "{ruta}" && bun install',
+   941→    }
+   942→    return ejecutar_comando(comandos.get(gestor, f'cd "{ruta}" && {gestor} install'))
+   943→
