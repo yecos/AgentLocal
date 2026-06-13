@@ -105,18 +105,27 @@ FILE_SEARCH_MAX_DEPTH = 10        # Profundidad maxima de busqueda recursiva
 FILE_SEARCH_MAX_RESULTS = 50      # Max resultados de busqueda en archivos
 
 # ============================================================
-# PENSAMIENTO PROFUNDO (v14.6)
+# PENSAMIENTO PROFUNDO (v14.7)
 # ============================================================
 DEEP_THINKING_MODE = "full"        # "off", "native", "cot", "reflection", "full"
                                    # off: deshabilitado
                                    # native: solo usar <think> nativo del modelo (qwen3, deepseek-r1)
                                    # cot: solo Chain-of-Thought antes de actuar
-                                   # reflection: solo post-reflexión de la respuesta
+                                   # reflection: solo post-reflexion de la respuesta
                                    # full: cot + native + reflection (recomendado)
-DEEP_THINKING_MIN_COMPLEXITY = 0.3 # Umbral mínimo de complejidad para activar (0-1)
-DEEP_THINKING_MAX_THINKING_TOKENS = 1024  # Max tokens para razonamiento interno
+DEEP_THINKING_MIN_COMPLEXITY = 0.3 # Umbral minimo de complejidad para activar (0-1)
+DEEP_THINKING_MAX_THINKING_TOKENS = 1024  # Max tokens (palabras) para razonamiento interno
 DEEP_THINKING_REFLECT_ON_ERRORS = True    # Siempre reflexionar si hubo errores
 DEEP_THINKING_SHOW_THOUGHTS = True        # Mostrar pensamientos al usuario en UI
+
+# Niveles de profundidad progresivos (v14.7)
+DEEP_THINKING_DEPTH_QUICK_THRESHOLD = 0.3   # >= 0.3: analisis rapido
+DEEP_THINKING_DEPTH_FULL_THRESHOLD = 0.5    # >= 0.5: CoT completo + plan
+DEEP_THINKING_DEPTH_DEEP_THRESHOLD = 0.75   # >= 0.75: razonamiento multi-vuelta
+DEEP_THINKING_MAX_CRITIQUE_ROUNDS = 2       # Max rondas de auto-critica
+DEEP_THINKING_LLM_COMPLEXITY = True         # Usar LLM para evaluar complejidad en casos ambiguos
+DEEP_THINKING_PERSIST_THOUGHTS = True       # Guardar pensamientos en archivo para futuro
+DEEP_THINKING_MAX_PERSISTED = 100           # Max pensamientos guardados
 
 # ============================================================
 # TIMEOUTS

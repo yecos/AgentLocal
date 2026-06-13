@@ -55,7 +55,7 @@ class ReactAgent:
     def run(self, user_message):
         """
         Bucle ReAct principal. Retorna (respuesta, thinking_log).
-        v14.6: Incluye fase de pensamiento profundo antes del bucle.
+        v14.7: Pensamiento profundo con profundidad progresiva y reflexion con contexto.
         """
         self.thinking_log = []
         self.metacognition.reset()
@@ -65,22 +65,24 @@ class ReactAgent:
 
         messages = self._build_messages(user_message)
 
-        # ---- PENSAMIENTO PROFUNDO (v14.6) ----
+        # ---- PENSAMIENTO PROFUNDO (v14.7) ----
         deep_result = self.deep_thinking.think(
             user_message,
             context=self.memory.get_context_for(user_message)
         )
         if deep_result.should_deep_think:
             _nsteps = len(deep_result.plan)
+            depth_labels = {0: "ninguno", 1: "rapido", 2: "completo", 3: "profundo"}
             self._log(
                 f"Pensamiento profundo: complejidad={deep_result.complexity:.2f}, "
-                f"tipo={deep_result.query_type}, pasos={_nsteps}",
+                f"tipo={deep_result.query_type}, profundidad={depth_labels.get(deep_result.depth, '?')}, "
+                f"pasos={_nsteps}",
                 "deep_thinking"
             )
             thinking_prompt = self.deep_thinking.get_thinking_prompt(deep_result)
             if thinking_prompt:
                 messages.append({"role": "user", "content": thinking_prompt})
-                messages.append({"role": "assistant", "content": "Entendido. Analizaré la situación antes de actuar."})
+                messages.append({"role": "assistant", "content": "Entendido. Analizare la situacion con el nivel de profundidad indicado."})
 
         if self.supports_tool_calling is None:
             self.supports_tool_calling = self._detect_tool_calling_support()
@@ -179,10 +181,13 @@ class ReactAgent:
                 for lesson in reflection.get("lessons", []):
                     learning.add_knowledge(lesson, source="metacognition")
 
-                # ---- POST-REFLEXIÓN DEEP THINKING (v14.6) ----
+                # ---- POST-REFLEXION DEEP THINKING (v14.7) ----
+                # Pasar resultados de tools para reflexion informada
                 had_errors = self.metacognition.error_count > 0
+                tool_results_for_reflection = self._collect_tool_results()
                 improved_response, was_improved = self.deep_thinking.reflect(
-                    user_message, final_response, had_errors=had_errors
+                    user_message, final_response, had_errors=had_errors,
+                    tool_results=tool_results_for_reflection
                 )
                 if was_improved:
                     final_response = improved_response
@@ -225,7 +230,7 @@ class ReactAgent:
         """
         Bucle ReAct con streaming REAL. Yields cada token al instante.
         Eventos: {"type": "text"|"tool_start"|"tool_result"|"meta"|"thinking"|"done", "data": ...}
-        v14.6: Incluye fase de pensamiento profundo y evento "thinking".
+        v14.7: Pensamiento profundo con profundidad progresiva y reflexion con contexto.
         """
         self.thinking_log = []
         self.metacognition.reset()
@@ -235,16 +240,18 @@ class ReactAgent:
 
         messages = self._build_messages(user_message)
 
-        # ---- PENSAMIENTO PROFUNDO (v14.6) ----
+        # ---- PENSAMIENTO PROFUNDO (v14.7) ----
         deep_result = self.deep_thinking.think(
             user_message,
             context=self.memory.get_context_for(user_message)
         )
         if deep_result.should_deep_think:
             _nsteps = len(deep_result.plan)
+            depth_labels = {0: "ninguno", 1: "rapido", 2: "completo", 3: "profundo"}
             self._log(
                 f"Pensamiento profundo: complejidad={deep_result.complexity:.2f}, "
-                f"tipo={deep_result.query_type}, pasos={_nsteps}",
+                f"tipo={deep_result.query_type}, profundidad={depth_labels.get(deep_result.depth, '?')}, "
+                f"pasos={_nsteps}",
                 "deep_thinking"
             )
             # Emitir evento de thinking para la UI
@@ -255,13 +262,15 @@ class ReactAgent:
                     "plan": deep_result.plan,
                     "complexity": deep_result.complexity,
                     "query_type": deep_result.query_type,
+                    "depth": deep_result.depth,
+                    "native_thinking": deep_result.native_thinking[:200] if deep_result.native_thinking else None,
                 }
             }
-            # Inyectar razonamiento en la conversación
+            # Inyectar razonamiento en la conversacion
             thinking_prompt = self.deep_thinking.get_thinking_prompt(deep_result)
             if thinking_prompt:
                 messages.append({"role": "user", "content": thinking_prompt})
-                messages.append({"role": "assistant", "content": "Entendido. Analizaré la situación antes de actuar."})
+                messages.append({"role": "assistant", "content": "Entendido. Analizare la situacion con el nivel de profundidad indicado."})
 
         if self.supports_tool_calling is None:
             self.supports_tool_calling = self._detect_tool_calling_support()
@@ -372,10 +381,12 @@ class ReactAgent:
                 for lesson in reflection.get("lessons", []):
                     learning.add_knowledge(lesson, source="metacognition")
 
-                # ---- POST-REFLEXIÓN DEEP THINKING (v14.6) ----
+                # ---- POST-REFLEXION DEEP THINKING (v14.7) ----
                 had_errors = self.metacognition.error_count > 0
+                tool_results_for_reflection = self._collect_tool_results()
                 improved_response, was_improved = self.deep_thinking.reflect(
-                    user_message, full_text, had_errors=had_errors
+                    user_message, full_text, had_errors=had_errors,
+                    tool_results=tool_results_for_reflection
                 )
                 if was_improved:
                     full_text = improved_response
@@ -681,6 +692,30 @@ class ReactAgent:
         return cleaned if cleaned else text
 
     # ----------------------------------------------------------
+    # RECOLECCION DE RESULTADOS DE TOOLS (v14.7)
+    # ----------------------------------------------------------
+    def _collect_tool_results(self):
+        """
+        Recolecta los resultados de las herramientas ejecutadas en esta conversacion.
+        Se usa para pasar contexto a la reflexion profunda.
+        Retorna: Lista de (tool_name, result_summary)
+        """
+        results = []
+        # Buscar en el thinking_log las entradas de tool execution
+        for entry in self.thinking_log:
+            # Formato: "[HH:MM:SS] [TOOL] tool_name: resultado..."
+            if "[TOOL]" in entry and ":" in entry:
+                try:
+                    # Extraer nombre de herramienta y resultado
+                    tool_part = entry.split("[TOOL]")[1].strip()
+                    if ":" in tool_part:
+                        tool_name, result = tool_part.split(":", 1)
+                        results.append((tool_name.strip(), result.strip()[:200]))
+                except (IndexError, ValueError):
+                    pass
+        return results[:5]  # Max 5 resultados para no saturar
+
+    # ----------------------------------------------------------
     # EJECUCION DE TOOLS (paralelo + retry)
     # ----------------------------------------------------------
     def _execute_tool_calls(self, tool_calls, messages):
@@ -767,6 +802,8 @@ class ReactAgent:
             get_metrics().record_error("tool:" + tool_name)
 
         self._log(f"Resultado: {tool_result[:150]}...", "observation")
+        # Registrar en formato [TOOL] para _collect_tool_results (v14.7)
+        self._log(f"[TOOL] {tool_name}: {tool_result[:200]}", "tool_result")
 
         # Alimentar memoria de trabajo
         self.memory.add_step(f"{tool_name}({tool_params})", tool_result[:200])
