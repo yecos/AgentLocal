@@ -1,0 +1,917 @@
+     1→"""
+     2→=============================================================
+     3→AGENTE LOCAL AUTONOMO v14 - Cliente Ollama Optimizado
+     4→=============================================================
+     5→Singleton con cache de conexion persistente.
+     6→- Cache en archivo JSON (sobrevive reinicios)
+     7→- Timeout agresivo con 1 solo reintento
+     8→- Modelo dual: chat rapido vs code potente
+     9→- Streaming para respuestas en tiempo real
+    10→- Deteccion de GPU para diagnosticar lentitud
+    11→=============================================================
+    12→"""
+    13→
+    14→import json
+    15→import os
+    16→import logging
+    17→from datetime import datetime
+    18→
+    19→from config import (
+    20→    PREFERRED_MODELS, CHAT_MODEL_PATTERNS, CODE_MODEL_PATTERNS,
+    21→    EMBED_MODEL_CANDIDATES, LEARN_DIR, CONNECTION_CACHE_FILE,
+    22→    CONNECTION_CACHE_DAYS, LLM_TIMEOUT_SMALL, LLM_TIMEOUT_LARGE,
+    23→    EMBED_TIMEOUT, logger
+    24→)
+    25→from utils.metrics import timed, get_metrics
+    26→
+    27→# ============================================================
+    28→# CACHE LRU PARA EMBEDDINGS
+    29→# ============================================================
+    30→from collections import OrderedDict
+    31→
+    32→
+    33→class LRUCache:
+    34→    """Cache LRU real usando OrderedDict. Reemplaza el FIFO del v13."""
+    35→
+    36→    def __init__(self, maxsize=200):
+    37→        self._cache = OrderedDict()
+    38→        self._maxsize = maxsize
+    39→
+    40→    def get(self, key):
+    41→        if key in self._cache:
+    42→            self._cache.move_to_end(key)  # Mas reciente al final
+    43→            return self._cache[key]
+    44→        return None
+    45→
+    46→    def put(self, key, value):
+    47→        if key in self._cache:
+    48→            self._cache.move_to_end(key)
+    49→            self._cache[key] = value  # Actualizar valor existente
+    50→        else:
+    51→            if len(self._cache) >= self._maxsize:
+    52→                self._cache.popitem(last=False)  # Elimina el mas viejo
+    53→            self._cache[key] = value
+    54→
+    55→    def __len__(self):
+    56→        return len(self._cache)
+    57→
+    58→    def clear(self):
+    59→        self._cache.clear()
+    60→
+    61→
+    62→# Instancia global del cache de embeddings
+    63→embed_cache = LRUCache(maxsize=200)
+    64→
+    65→
+    66→# ============================================================
+    67→# CLIENTE OLLAMA SINGLETON
+    68→# ============================================================
+    69→
+    70→class OllamaClient:
+    71→    """
+    72→    Singleton que maneja la conexion a Ollama.
+    73→    Cachea la conexion exitosa en archivo JSON para sobrevivir reinicios.
+    74→    Soporta streaming para respuestas en tiempo real.
+    75→    """
+    76→
+    77→    _instance = None
+    78→
+    79→    def __init__(self):
+    80→        self.model = None
+    81→        self.fallback_model = None
+    82→        self.chat_model = None
+    83→        self.code_model = None
+    84→        self.host = None
+    85→        self.method = None  # 'client' or 'http'
+    86→        self.embed_model = None
+    87→        self._models_list = None
+    88→        self._detected = False
+    89→        self._client = None
+    90→        self._gpu_status = None  # None = no verificado, True/False
+    91→
+    92→    @classmethod
+    93→    def get(cls):
+    94→        if cls._instance is None:
+    95→            cls._instance = cls()
+    96→        return cls._instance
+    97→
+    98→    # ----------------------------------------------------------
+    99→    # DETECCION DE MODELOS
+   100→    # ----------------------------------------------------------
+   101→
+   102→    def _fetch_available_models(self, refresh=False):
+   103→        """Obtiene la lista de modelos disponibles en Ollama."""
+   104→        if self._models_list is not None and not refresh:
+   105→            return self._models_list
+   106→        try:
+   107→            import urllib.request
+   108→            req = urllib.request.Request("http://localhost:11434/api/tags")
+   109→            with urllib.request.urlopen(req, timeout=3) as resp:
+   110→                data = json.loads(resp.read().decode("utf-8"))
+   111→                self._models_list = [m["name"] for m in data.get("models", [])]
+   112→                return self._models_list
+   113→        except Exception as e:
+   114→            logger.warning(f"No se pudo conectar a Ollama: {e}")
+   115→            return []
+   116→
+   117→    def detect_models(self):
+   118→        """Detecta el mejor modelo disponible. Se ejecuta 1 vez."""
+   119→        if self._detected:
+   120→            return self.model
+   121→
+   122→        # Intentar cargar cache persistente primero
+   123→        cached = self._load_connection_cache()
+   124→        if cached:
+   125→            self.model = cached.get("model")
+   126→            self.host = cached.get("host")
+   127→            self.method = cached.get("method")
+   128→            logger.info(f"Cache de conexion cargado: {self.model}@{self.host}")
+   129→            # IMPORTANTE: Verificar que el modelo cacheado siga instalado
+   130→            available_check = self._fetch_available_models(refresh=True)
+   131→            if self.model and self.model not in available_check:
+   132→                logger.warning(f"Modelo cacheado '{self.model}' ya no esta instalado. Reseteando cache.")
+   133→                self.model = None
+   134→                self.host = None
+   135→                self.method = None
+   136→                # Borrar cache invalido
+   137→                try:
+   138→                    if os.path.exists(CONNECTION_CACHE_FILE):
+   139→                        os.remove(CONNECTION_CACHE_FILE)
+   140→                except Exception as e:
+   141→                    logger.debug(f"Error eliminando cache invalido: {e}")
+   142→
+   143→        available = self._fetch_available_models()
+   144→        if not available:
+   145→            self.model = "qwen2.5:14b"
+   146→            self.fallback_model = "llama3.1:8b"
+   147→            self.chat_model = "llama3.1:8b"
+   148→            self.code_model = "qwen2.5:14b"
+   149→            self._detected = True
+   150→            return self.model
+   151→
+   152→        # Buscar el mejor modelo en orden de preferencia (match EXACTO primero)
+   153→        for preferred in PREFERRED_MODELS:
+   154→            # 1. Match exacto: "qwen3:4b" == "qwen3:4b"
+   155→            for avail in available:
+   156→                if avail == preferred or avail.startswith(preferred + ":"):
+   157→                    self.model = avail
+   158→                    break
+   159→            if not self.model:
+   160→                # 2. Match parcial: modelo base coincide ("qwen3" en "qwen3:30b-a3b")
+   161→                #    PERO solo si no hay ya un match exacto de otro preferred
+   162→                preferred_base = preferred.split(":")[0]
+   163→                for avail in available:
+   164→                    if avail.split(":")[0] == preferred_base:
+   165→                        self.model = avail
+   166→                        break
+   167→            if self.model:
+   168→                # El fallback es el segundo mejor
+   169→                for fb in PREFERRED_MODELS:
+   170→                    if fb != preferred:
+   171→                        for avail2 in available:
+   172→                            if avail2 == fb or avail2.startswith(fb + ":"):
+   173→                                self.fallback_model = avail2
+   174→                                break
+   175→                        if self.fallback_model:
+   176→                            break
+   177→                if not self.fallback_model:
+   178→                    # Buscar fallback por modelo base
+   179→                    for fb in PREFERRED_MODELS:
+   180→                        if fb != preferred:
+   181→                            fb_base = fb.split(":")[0]
+   182→                            for avail2 in available:
+   183→                                if avail2.split(":")[0] == fb_base:
+   184→                                    self.fallback_model = avail2
+   185→                                    break
+   186→                            if self.fallback_model:
+   187→                                break
+   188→                if not self.fallback_model:
+   189→                    self.fallback_model = available[0] if len(available) > 1 else self.model
+   190→                break
+   191→
+   192→        if not self.model:
+   193→            self.model = available[0]
+   194→            self.fallback_model = available[1] if len(available) > 1 else available[0]
+   195→
+   196→        # Detectar modelos especializados
+   197→        self._detect_specialized_models(available)
+   198→
+   199→        # Detectar modelo de embeddings
+   200→        self._detect_embed_model(available)
+   201→
+   202→        self._detected = True
+   203→        logger.info(f"Modelo principal: {self.model}, Fallback: {self.fallback_model}")
+   204→        logger.info(f"Chat: {self.chat_model}, Code: {self.code_model}, Embed: {self.embed_model}")
+   205→        return self.model
+   206→
+   207→    def _detect_specialized_models(self, available):
+   208→        """Detecta modelos para chat rapido y codigo potente."""
+   209→        available_lower = [m.lower() for m in available]
+   210→        # Chat model: el mas rapido
+   211→        for pattern in CHAT_MODEL_PATTERNS:
+   212→            for i, al in enumerate(available_lower):
+   213→                if pattern.lower() in al:
+   214→                    self.chat_model = available[i]
+   215→                    break
+   216→            if self.chat_model:
+   217→                break
+   218→        if not self.chat_model:
+   219→            self.chat_model = self.fallback_model or self.model
+   220→
+   221→        # Code model: el mas potente
+   222→        for pattern in CODE_MODEL_PATTERNS:
+   223→            for i, al in enumerate(available_lower):
+   224→                if pattern.lower() in al:
+   225→                    self.code_model = available[i]
+   226→                    break
+   227→            if self.code_model:
+   228→                break
+   229→        if not self.code_model:
+   230→            self.code_model = self.model
+   231→
+   232→    def _detect_embed_model(self, available):
+   233→        """Detecta que modelo de embeddings esta disponible.
+   234→        v3: Guarda el modelo detectado en cache para consistencia entre sesiones.
+   235→        """
+   236→        # Primero intentar cargar modelo de embeddings desde cache
+   237→        cached_embed = self._load_embed_model_cache()
+   238→        if cached_embed:
+   239→            # Verificar que el modelo cacheado siga instalado
+   240→            available_lower = [m.lower() for m in available]
+   241→            if any(cached_embed.lower() in al for al in available_lower):
+   242→                self.embed_model = cached_embed
+   243→                logger.info(f"Modelo de embeddings (desde cache): {cached_embed}")
+   244→                return
+   245→            else:
+   246→                logger.warning(f"Modelo de embeddings cacheado '{cached_embed}' ya no esta instalado. Detectando nuevo...")
+   247→        
+   248→        available_lower = [m.lower() for m in available]
+   249→        for candidate in EMBED_MODEL_CANDIDATES:
+   250→            for al in available_lower:
+   251→                if candidate in al:
+   252→                    self.embed_model = candidate
+   253→                    logger.info(f"Modelo de embeddings detectado: {candidate}")
+   254→                    # Guardar en cache para consistencia
+   255→                    self._save_embed_model_cache(candidate)
+   256→                    return
+   257→        self.embed_model = "nomic-embed-text"  # Default
+   258→        self._save_embed_model_cache(self.embed_model)
+   259→
+   260→    def _load_embed_model_cache(self):
+   261→        """Carga el modelo de embeddings desde cache."""
+   262→        try:
+   263→            cache_file = os.path.join(LEARN_DIR, "embed_model_cache.json")
+   264→            if os.path.exists(cache_file):
+   265→                with open(cache_file, "r", encoding="utf-8") as f:
+   266→                    data = json.load(f)
+   267→                return data.get("embed_model")
+   268→        except Exception:
+   269→            pass
+   270→        return None
+   271→
+   272→    def _save_embed_model_cache(self, model_name):
+   273→        """Guarda el modelo de embeddings en cache para consistencia."""
+   274→        try:
+   275→            cache_file = os.path.join(LEARN_DIR, "embed_model_cache.json")
+   276→            with open(cache_file, "w", encoding="utf-8") as f:
+   277→                json.dump({"embed_model": model_name, "saved_at": datetime.now().isoformat()}, f)
+   278→        except Exception:
+   279→            pass
+   280→
+   281→    # ----------------------------------------------------------
+   282→    # DETECCION DE GPU
+   283→    # ----------------------------------------------------------
+   284→
+   285→    def check_gpu_status(self):
+   286→        """
+   287→        Verifica si Ollama esta usando la GPU.
+   288→        Retorna: True (GPU), False (CPU), None (no se pudo determinar)
+   289→        """
+   290→        if self._gpu_status is not None:
+   291→            return self._gpu_status
+   292→
+   293→        try:
+   294→            import subprocess
+   295→            result = subprocess.run(
+   296→                ["ollama", "ps"],
+   297→                capture_output=True, text=True, timeout=5
+   298→            )
+   299→            output = result.stdout
+   300→            if "100% CPU" in output:
+   301→                self._gpu_status = False
+   302→                logger.warning("GPU NO detectada por Ollama - corriendo en CPU (LENTO)")
+   303→            elif "GPU" in output:
+   304→                self._gpu_status = True
+   305→                logger.info("Ollama esta usando GPU")
+   306→            else:
+   307→                # No hay modelo cargado, verificar con nvidia-smi
+   308→                try:
+   309→                    nvidia = subprocess.run(
+   310→                        ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+   311→                        capture_output=True, text=True, timeout=5
+   312→                    )
+   313→                    if nvidia.returncode == 0 and nvidia.stdout.strip():
+   314→                        logger.info(f"GPU NVIDIA detectada: {nvidia.stdout.strip()}")
+   315→                        # GPU existe pero no sabemos si Ollama la usa
+   316→                        self._gpu_status = None
+   317→                    else:
+   318→                        self._gpu_status = False
+   319→                except Exception as e:
+   320→                    logger.debug(f"Error verificando GPU con nvidia-smi: {e}")
+   321→                    self._gpu_status = False
+   322→        except Exception as e:
+   323→            logger.debug(f"No se pudo verificar GPU: {e}")
+   324→            self._gpu_status = None
+   325→
+   326→        return self._gpu_status
+   327→
+   328→    # ----------------------------------------------------------
+   329→    # CACHE PERSISTENTE DE CONEXION
+   330→    # ----------------------------------------------------------
+   331→
+   332→    def _load_connection_cache(self):
+   333→        """Carga la conexion cacheada desde archivo JSON."""
+   334→        try:
+   335→            if os.path.exists(CONNECTION_CACHE_FILE):
+   336→                with open(CONNECTION_CACHE_FILE, "r", encoding="utf-8") as f:
+   337→                    data = json.load(f)
+   338→                saved_at = data.get("saved_at", "")
+   339→                if saved_at:
+   340→                    saved_time = datetime.fromisoformat(saved_at)
+   341→                    days_ago = (datetime.now() - saved_time).days
+   342→                    if days_ago < CONNECTION_CACHE_DAYS:
+   343→                        return data
+   344→        except Exception as e:
+   345→            logger.debug(f"Error cargando cache de conexion: {e}")
+   346→        return None
+   347→
+   348→    def _save_connection_cache(self):
+   349→        """Guarda la conexion exitosa en archivo JSON."""
+   350→        try:
+   351→            data = {
+   352→                "host": self.host,
+   353→                "method": self.method,
+   354→                "model": self.model,
+   355→                "saved_at": datetime.now().isoformat()
+   356→            }
+   357→            with open(CONNECTION_CACHE_FILE, "w", encoding="utf-8") as f:
+   358→                json.dump(data, f, ensure_ascii=False, indent=2)
+   359→        except Exception as e:
+   360→            logger.debug(f"Error guardando cache de conexion: {e}")
+   361→
+   362→    # ----------------------------------------------------------
+   363→    # GENERACION (sin streaming)
+   364→    # ----------------------------------------------------------
+   365→
+   366→    def _get_timeout(self, model_name):
+   367→        """Timeout adaptativo segun tamano del modelo."""
+   368→        if any(x in (model_name or "").lower() for x in ["14b", "30b", "70b", "32b"]):
+   369→            return LLM_TIMEOUT_LARGE
+   370→        return LLM_TIMEOUT_SMALL
+   371→
+   372→    @timed("llm")
+   373→    def generate(self, messages, tools=None, model_override=None, timeout_overwrite=None):
+   374→        """
+   375→        Genera respuesta del LLM. Usa cache de conexion persistente.
+   376→        Retorna: str (texto) o dict (respuesta completa con tool_calls).
+   377→        Retorna "" si todo falla.
+   378→        """
+   379→        self.detect_models()
+   380→        model = model_override or self.model
+   381→        timeout = timeout_overwrite or self._get_timeout(model)
+   382→
+   383→        errors = []
+   384→
+   385→        # ---- ESTRATEGIA 1: Probar conexion cacheada ----
+   386→        if self.host and self.method:
+   387→            result = self._try_method(self.host, self.method, model, messages, tools, timeout)
+   388→            if result is not None:
+   389→                return result
+   390→            # Cache fallo, resetear
+   391→            self.method = None
+   392→            errors.append("cached connection failed")
+   393→
+   394→        # ---- ESTRATEGIA 2: Buscar conexion que funcione ----
+   395→        models_to_try = [model]
+   396→        fallback = self.fallback_model
+   397→        if fallback and fallback != model:
+   398→            models_to_try.append(fallback)
+   399→
+   400→        hosts = ['http://localhost:11434', 'http://127.0.0.1:11434']
+   401→
+   402→        for m in models_to_try:
+   403→            for host in hosts:
+   404→                for method in ['client', 'http']:
+   405→                    result = self._try_method(host, method, m, messages, tools, timeout)
+   406→                    if result is not None:
+   407→                        # Guardar conexion exitosa
+   408→                        self.host = host
+   409→                        self.method = method
+   410→                        self._save_connection_cache()
+   411→                        logger.info(f"LLM conectado: {m}@{host} via {method}")
+   412→                        return result
+   413→                    errors.append(f"{m}@{host}/{method}: fallo")
+   414→
+   415→        # Si llegamos aqui, todo fallo
+   416→        self._log_errors(errors)
+   417→        return ""
+   418→
+   419→    @timed("llm")
+   420→    def generate_chat(self, messages):
+   421→        """Para conversacion: usa modelo rapido."""
+   422→        return self.generate(messages, model_override=self.chat_model)
+   423→
+   424→    @timed("llm")
+   425→    def generate_code(self, messages):
+   426→        """Para codigo: usa modelo potente."""
+   427→        return self.generate(messages, model_override=self.code_model)
+   428→
+   429→    # ----------------------------------------------------------
+   430→    # MULTIMODAL (vision - imagenes)
+   431→    # ----------------------------------------------------------
+   432→
+   433→    def generate_with_image(self, text, image_path, model_override=None):
+   434→        """
+   435→        Genera respuesta del LLM con una imagen (multimodal/vision).
+   436→        Soporta modelos como llava, llama3.2-vision, etc.
+   437→        Retorna: str con la descripcion/respuesta sobre la imagen.
+   438→        """
+   439→        self.detect_models()
+   440→        
+   441→        # Buscar modelo con capacidad de vision
+   442→        vision_model = self._detect_vision_model()
+   443→        model = model_override or vision_model or self.model
+   444→        
+   445→        try:
+   446→            import base64
+   447→            with open(image_path, "rb") as f:
+   448→                image_data = base64.b64encode(f.read()).decode("utf-8")
+   449→            
+   450→            # Detectar tipo de imagen
+   451→            ext = image_path.lower().split(".")[-1]
+   452→            mime_type = {
+   453→                "jpg": "image/jpeg", "jpeg": "image/jpeg",
+   454→                "png": "image/png", "gif": "image/gif",
+   455→                "webp": "image/webp",
+   456→            }.get(ext, "image/jpeg")
+   457→
+   458→            messages = [{
+   459→                "role": "user",
+   460→                "content": text,
+   461→                "images": [image_data]
+   462→            }]
+   463→
+   464→            # Intentar via HTTP
+   465→            for host in ['http://localhost:11434', 'http://127.0.0.1:11434']:
+   466→                try:
+   467→                    payload = {
+   468→                        "model": model,
+   469→                        "messages": messages,
+   470→                        "stream": False
+   471→                    }
+   472→                    data = json.dumps(payload).encode("utf-8")
+   473→                    req = urllib.request.Request(
+   474→                        f"{host}/api/chat",
+   475→                        data=data,
+   476→                        headers={"Content-Type": "application/json"}
+   477→                    )
+   478→                    with urllib.request.urlopen(req, timeout=LLM_TIMEOUT_LARGE) as resp:
+   479→                        result = json.loads(resp.read().decode("utf-8"))
+   480→                        content = result.get("message", {}).get("content", "")
+   481→                        if content:
+   482→                            return content
+   483→                except Exception as e:
+   484→                    logger.debug(f"Vision HTTP failed on {host}: {e}")
+   485→
+   486→            # Intentar via ollama client
+   487→            try:
+   488→                import ollama as ollama_lib
+   489→                client = ollama_lib.Client(host='http://localhost:11434')
+   490→                response = client.chat(
+   491→                    model=model,
+   492→                    messages=messages
+   493→                )
+   494→                return response.get("message", {}).get("content", "")
+   495→            except Exception as e:
+   496→                logger.debug(f"Vision client failed: {e}")
+   497→
+   498→        except FileNotFoundError:
+   499→            return f"ERROR: Imagen no encontrada: {image_path}"
+   500→        except Exception as e:
+   501→            return f"ERROR en vision: {e}"
+   502→
+   503→        return "No se pudo procesar la imagen. Puede que el modelo no soporte vision."
+   504→
+   505→    def _detect_vision_model(self):
+   506→        """Detecta si hay un modelo de vision disponible."""
+   507→        available = self._fetch_available_models(refresh=False)
+   508→        # Modelos con capacidad de vision
+   509→        vision_patterns = ["llava", "llama3.2-vision", "minicpm-v", "bakllava", 
+   510→                          "moondream", "llama3.1:8b", "qwen2.5-coder"]
+   511→        for pattern in vision_patterns:
+   512→            for model in available:
+   513→                if pattern in model.lower():
+   514→                    return model
+   515→        return None
+   516→
+   517→    # ----------------------------------------------------------
+   518→    # GENERACION CON STREAMING
+   519→    # ----------------------------------------------------------
+   520→
+   521→    def generate_stream(self, messages, tools=None, model_override=None):
+   522→        """
+   523→        Genera respuesta del LLM con streaming.
+   524→        Yields: str (tokens de texto) o dict (resultado final con tool_calls).
+   525→        El llamador itera sobre los chunks para streaming en tiempo real.
+   526→        Retorna None si todo falla (el llamador debe usar generate() como fallback).
+   527→        """
+   528→        self.detect_models()
+   529→        model = model_override or self.model
+   530→
+   531→        # Probar hosts en orden
+   532→        hosts = [self.host] if self.host else ['http://localhost:11434', 'http://127.0.0.1:11434']
+   533→        hosts = [h for h in hosts if h]  # Filtrar None
+   534→        if not hosts:
+   535→            hosts = ['http://localhost:11434', 'http://127.0.0.1:11434']
+   536→
+   537→        for host in hosts:
+   538→            # Intentar streaming HTTP directo (mas rapido)
+   539→            stream = self._try_stream_http(host, model, messages, tools)
+   540→            if stream is not None:
+   541→                yield from stream
+   542→                return
+   543→
+   544→            # Intentar streaming via client
+   545→            stream = self._try_stream_client(host, model, messages, tools)
+   546→            if stream is not None:
+   547→                yield from stream
+   548→                return
+   549→
+   550→        # Ultimo fallback: sin streaming
+   551→        result = self.generate(messages, tools=tools, model_override=model_override)
+   552→        if result:
+   553→            if isinstance(result, str):
+   554→                yield result
+   555→            elif isinstance(result, dict):
+   556→                yield result
+   557→            return
+   558→        return
+   559→
+   560→    def _try_stream_http(self, host, model, messages, tools):
+   561→        """Intenta streaming HTTP. Retorna generador o None si falla."""
+   562→        try:
+   563→            import urllib.request
+   564→            payload = {
+   565→                "model": model,
+   566→                "messages": messages,
+   567→                "stream": True
+   568→            }
+   569→            if tools:
+   570→                payload["tools"] = tools
+   571→            data = json.dumps(payload).encode("utf-8")
+   572→            req = urllib.request.Request(
+   573→                f"{host}/api/chat",
+   574→                data=data,
+   575→                headers={"Content-Type": "application/json"}
+   576→            )
+   577→
+   578→            def _stream():
+   579→                with urllib.request.urlopen(req, timeout=LLM_TIMEOUT_LARGE) as resp:
+   580→                    full_content = ""
+   581→                    full_tool_calls = []
+   582→                    for line in resp:
+   583→                        line = line.decode("utf-8").strip()
+   584→                        if not line:
+   585→                            continue
+   586→                        try:
+   587→                            chunk = json.loads(line)
+   588→                        except json.JSONDecodeError:
+   589→                            continue
+   590→
+   591→                        msg = chunk.get("message", {})
+   592→                        content = msg.get("content", "")
+   593→                        tool_calls = msg.get("tool_calls", [])
+   594→
+   595→                        if content:
+   596→                            full_content += content
+   597→                            yield content
+   598→
+   599→                        if tool_calls:
+   600→                            full_tool_calls.extend(tool_calls)
+   601→
+   602→                        if chunk.get("done", False):
+   603→                            self.host = host
+   604→                            self.method = 'http'
+   605→                            self._save_connection_cache()
+   606→
+   607→                            if full_tool_calls:
+   608→                                yield {
+   609→                                    "message": {
+   610→                                        "content": full_content,
+   611→                                        "tool_calls": full_tool_calls
+   612→                                    }
+   613→                                }
+   614→                            return
+   615→
+   616→            # Test rapido: verificar que podemos abrir la conexion
+   617→            test_req = urllib.request.Request(
+   618→                f"{host}/api/tags",
+   619→                headers={"Content-Type": "application/json"}
+   620→            )
+   621→            urllib.request.urlopen(test_req, timeout=3)
+   622→            return _stream()
+   623→        except Exception as e:
+   624→            logger.debug(f"HTTP streaming setup failed: {e}")
+   625→        return None
+   626→
+   627→    def _try_stream_client(self, host, model, messages, tools):
+   628→        """Intenta streaming via ollama.Client. Retorna generador o None si falla."""
+   629→        try:
+   630→            import ollama as ollama_lib
+   631→            client = ollama_lib.Client(host=host)
+   632→
+   633→            def _stream():
+   634→                full_content = ""
+   635→                full_tool_calls = []
+   636→
+   637→                if tools:
+   638→                    # ollama client no soporta streaming con tools
+   639→                    # Usar modo no-streaming y yield todo de golpe
+   640→                    response = client.chat(model=model, messages=messages, tools=tools)
+   641→                    msg = response.get("message", response)
+   642→                    content = msg.get("content", "")
+   643→                    tool_calls = msg.get("tool_calls", [])
+   644→
+   645→                    if content:
+   646→                        full_content = content
+   647→                        yield content
+   648→                    if tool_calls:
+   649→                        full_tool_calls = tool_calls
+   650→
+   651→                    self.host = host
+   652→                    self.method = 'client'
+   653→                    self._save_connection_cache()
+   654→
+   655→                    if full_tool_calls:
+   656→                        yield {"message": {"content": full_content, "tool_calls": full_tool_calls}}
+   657→                    return
+   658→                else:
+   659→                    stream = client.chat(model=model, messages=messages, stream=True)
+   660→                    for chunk in stream:
+   661→                        msg = chunk.get("message", {})
+   662→                        content = msg.get("content", "")
+   663→                        if content:
+   664→                            full_content += content
+   665→                            yield content
+   666→
+   667→                        if chunk.get("done", False):
+   668→                            self.host = host
+   669→                            self.method = 'client'
+   670→                            self._save_connection_cache()
+   671→                            return
+   672→
+   673→            return _stream()
+   674→        except Exception as e:
+   675→            logger.debug(f"Client streaming setup failed: {e}")
+   676→        return None
+   677→
+   678→    # ----------------------------------------------------------
+   679→    # METODOS INTERNOS
+   680→    # ----------------------------------------------------------
+   681→
+   682→    def _try_method(self, host, method, model, messages, tools, timeout):
+   683→        """Intenta una combinacion de host/metodo/modelo. Retorna None si falla."""
+   684→        if method == 'client':
+   685→            return self._try_client(host, model, messages, tools, timeout)
+   686→        elif method == 'http':
+   687→            return self._try_http(host, model, messages, tools, timeout)
+   688→        return None
+   689→
+   690→    def _try_client(self, host, model, messages, tools, timeout):
+   691→        """Intenta via ollama.Client."""
+   692→        try:
+   693→            import ollama
+   694→            client = self._get_or_create_client(host)
+   695→            if tools:
+   696→                response = client.chat(model=model, messages=messages, tools=tools)
+   697→                msg = response.get("message", response)
+   698→                if msg.get("content") or msg.get("tool_calls"):
+   699→                    return response
+   700→            else:
+   701→                response = client.chat(model=model, messages=messages)
+   702→                content = response.get("message", {}).get("content", "")
+   703→                if content:
+   704→                    return content
+   705→        except Exception as e:
+   706→            logger.debug(f"Client method failed: {e}")
+   707→        return None
+   708→
+   709→    def _try_http(self, host, model, messages, tools, timeout):
+   710→        """Intenta via HTTP directo (sin lib ollama)."""
+   711→        try:
+   712→            import urllib.request
+   713→            payload = {
+   714→                "model": model,
+   715→                "messages": messages,
+   716→                "stream": False
+   717→            }
+   718→            if tools:
+   719→                payload["tools"] = tools
+   720→            data = json.dumps(payload).encode("utf-8")
+   721→            req = urllib.request.Request(
+   722→                f"{host}/api/chat",
+   723→                data=data,
+   724→                headers={"Content-Type": "application/json"}
+   725→            )
+   726→            with urllib.request.urlopen(req, timeout=timeout) as resp:
+   727→                result = json.loads(resp.read().decode("utf-8"))
+   728→                if tools:
+   729→                    msg = result.get("message", result)
+   730→                    if msg.get("content") or msg.get("tool_calls"):
+   731→                        return result
+   732→                else:
+   733→                    content = result.get("message", {}).get("content", "")
+   734→                    if content:
+   735→                        return content
+   736→        except Exception as e:
+   737→            logger.debug(f"HTTP method failed: {e}")
+   738→        return None
+   739→
+   740→    def _get_or_create_client(self, host):
+   741→        """Obtiene o crea un ollama.Client."""
+   742→        if self._client is None:
+   743→            try:
+   744→                import ollama
+   745→                self._client = ollama.Client(host=host)
+   746→            except Exception as e:
+   747→                logger.debug(f"Error creando ollama.Client: {e}")
+   748→        return self._client
+   749→
+   750→    def _log_errors(self, errors):
+   751→        """Guarda errores en log para debug."""
+   752→        if errors:
+   753→            try:
+   754→                log_path = os.path.join(LEARN_DIR, "llm_errors.log")
+   755→                with open(log_path, "a", encoding="utf-8") as f:
+   756→                    f.write(f"\n--- {datetime.now().isoformat()} ---\n")
+   757→                    for err in errors[-5:]:
+   758→                        f.write(f"  {err}\n")
+   759→            except Exception as e:
+   760→                logger.debug(f"Error escribiendo log de errores LLM: {e}")
+   761→
+   762→    # ----------------------------------------------------------
+   763→    # EMBEDDINGS (con cache optimizado)
+   764→    # ----------------------------------------------------------
+   765→
+   766→    def get_embedding(self, text):
+   767→        """Obtiene el embedding de un texto usando Ollama. Con cache LRU.
+   768→        v3: Retry con modelo alternativo si falla el principal.
+   769→        """
+   770→        import hashlib
+   771→        cache_key = hashlib.md5(text[:500].encode()).hexdigest()[:16]
+   772→
+   773→        # Cache hit
+   774→        cached = embed_cache.get(cache_key)
+   775→        if cached is not None:
+   776→            return cached
+   777→
+   778→        self.detect_models()
+   779→        
+   780→        # Intentar con el modelo principal de embeddings
+   781→        embedding = self._try_get_embedding(text, self.embed_model)
+   782→        if embedding:
+   783→            embed_cache.put(cache_key, embedding)
+   784→            get_metrics().record_embedding_call()
+   785→            return embedding
+   786→        
+   787→        # Fallback: intentar con otros modelos de embedding disponibles
+   788→        for fallback_model in EMBED_MODEL_CANDIDATES:
+   789→            if fallback_model == self.embed_model:
+   790→                continue
+   791→            embedding = self._try_get_embedding(text, fallback_model)
+   792→            if embedding:
+   793→                logger.warning(f"Embedding fallback exitoso con modelo: {fallback_model}")
+   794→                # Actualizar modelo de embeddings al que funciona
+   795→                self.embed_model = fallback_model
+   796→                self._save_embed_model_cache(fallback_model)
+   797→                embed_cache.put(cache_key, embedding)
+   798→                get_metrics().record_embedding_call()
+   799→                return embedding
+   800→        
+   801→        logger.warning("No se pudo obtener embedding con ningun modelo")
+   802→        get_metrics().record_error("embedding")
+   803→        return []
+   804→
+   805→    def _try_get_embedding(self, text, model_name):
+   806→        """Intenta obtener embedding con un modelo especifico. Retorna [] si falla."""
+   807→        try:
+   808→            import urllib.request
+   809→            data = json.dumps({
+   810→                "model": model_name,
+   811→                "prompt": text[:2000]
+   812→            }).encode("utf-8")
+   813→            req = urllib.request.Request(
+   814→                "http://localhost:11434/api/embeddings",
+   815→                data=data,
+   816→                headers={"Content-Type": "application/json"}
+   817→            )
+   818→            with urllib.request.urlopen(req, timeout=EMBED_TIMEOUT) as resp:
+   819→                result = json.loads(resp.read().decode("utf-8"))
+   820→                return result.get("embedding", [])
+   821→        except Exception as e:
+   822→            logger.debug(f"Embedding falló con modelo {model_name}: {e}")
+   823→            return []
+   824→
+   825→    @staticmethod
+   826→    def cosine_similarity(vec1, vec2):
+   827→        """Calcula similitud coseno entre dos vectores.
+   828→        Usa numpy si esta disponible (10-50x mas rapido en batch).
+   829→        """
+   830→        if not vec1 or not vec2 or len(vec1) != len(vec2):
+   831→            return 0.0
+   832→        try:
+   833→            import numpy as np
+   834→            a = np.array(vec1, dtype=np.float32)
+   835→            b = np.array(vec2, dtype=np.float32)
+   836→            norm_a = np.linalg.norm(a)
+   837→            norm_b = np.linalg.norm(b)
+   838→            if norm_a == 0 or norm_b == 0:
+   839→                return 0.0
+   840→            return float(np.dot(a, b) / (norm_a * norm_b))
+   841→        except ImportError:
+   842→            # Fallback: Python puro
+   843→            dot_product = sum(a * b for a, b in zip(vec1, vec2))
+   844→            norm1 = sum(a * a for a in vec1) ** 0.5
+   845→            norm2 = sum(b * b for b in vec2) ** 0.5
+   846→            if norm1 == 0 or norm2 == 0:
+   847→                return 0.0
+   848→            return dot_product / (norm1 * norm2)
+   849→
+   850→    @staticmethod
+   851→    def cosine_similarity_batch(query_vec, vectors_dict):
+   852→        """Calcula similitud coseno de un vector contra muchos vectores de una vez.
+   853→        
+   854→        Args:
+   855→            query_vec: Lista[float] - vector de consulta
+   856→            vectors_dict: Dict[id, Lista[float]] - diccionario de vectores
+   857→            
+   858→        Returns:
+   859→            Dict[id, float] - similitud de cada vector vs query
+   860→            
+   861→        Usa numpy para calculo vectorizado (10-50x mas rapido que bucle Python).
+   862→        Fallback a Python puro si numpy no esta disponible.
+   863→        """
+   864→        if not query_vec or not vectors_dict:
+   865→            return {}
+   866→
+   867→        ids = list(vectors_dict.keys())
+   868→        vecs = list(vectors_dict.values())
+   869→
+   870→        # Filtrar vectores de tamano incompatible
+   871→        valid_pairs = [(eid, v) for eid, v in zip(ids, vecs)
+   872→                       if v and len(v) == len(query_vec)]
+   873→        if not valid_pairs:
+   874→            return {}
+   875→
+   876→        valid_ids, valid_vecs = zip(*valid_pairs)
+   877→
+   878→        try:
+   879→            import numpy as np
+   880→            query = np.array(query_vec, dtype=np.float32)
+   881→            matrix = np.array(valid_vecs, dtype=np.float32)  # shape: (N, D)
+   882→
+   883→            # Normalizar query
+   884→            query_norm = np.linalg.norm(query)
+   885→            if query_norm == 0:
+   886→                return {eid: 0.0 for eid in valid_ids}
+   887→            query_normalized = query / query_norm
+   888→
+   889→            # Normalizar filas de la matriz
+   890→            row_norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+   891→            row_norms = np.where(row_norms == 0, 1.0, row_norms)  # Evitar div/0
+   892→            matrix_normalized = matrix / row_norms
+   893→
+   894→            # Producto punto vectorizado: (D,) @ (N, D).T -> (N,)
+   895→            similarities = matrix_normalized @ query_normalized
+   896→
+   897→            return {eid: float(sim) for eid, sim in zip(valid_ids, similarities)}
+   898→
+   899→        except ImportError:
+   900→            # Fallback: Python puro (bucle)
+   901→            results = {}
+   902→            for eid, vec in valid_pairs:
+   903→                dot_product = sum(a * b for a, b in zip(query_vec, vec))
+   904→                norm1 = sum(a * a for a in query_vec) ** 0.5
+   905→                norm2 = sum(b * b for b in vec) ** 0.5
+   906→                if norm1 > 0 and norm2 > 0:
+   907→                    results[eid] = dot_product / (norm1 * norm2)
+   908→                else:
+   909→                    results[eid] = 0.0
+   910→            return results
+   911→
+   912→
+   913→# ============================================================
+   914→# INSTANCIA GLOBAL
+   915→# ============================================================
+   916→ollama = OllamaClient.get()
+   917→
