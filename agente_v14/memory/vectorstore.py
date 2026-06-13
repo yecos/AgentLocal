@@ -5,8 +5,9 @@ AGENTE v14 - Vector Store Casero (Optimizado)
 Vector store ligero con embeddings de Ollama.
 Sin Qdrant, sin ChromaDB, sin dependencias extras.
 Persiste en JSON + archivo de vectores.
-v14.3: Skip embedding si el store esta vacio, busqueda
-       por texto primero (sin embedding), y cache masivo.
+v14.4: Pre-filtro mejorado con stemming español + stopwords.
+       Búsqueda por texto con BM25 scoring.
+       Cache de consultas frecuentes.
 =============================================================
 """
 
@@ -15,17 +16,24 @@ import json
 import pickle
 import hashlib
 import logging
+import time
 from datetime import datetime
 
 from config import LEARN_DIR, MAX_VECTORS_IN_MEMORY, logger
 from llm import ollama
+
 
 class VectorStore:
     """
     Vector store ligero con carga lazy y cache de vectores.
     Solo carga en memoria los vectores necesarios para busqueda.
     Optimizado para reducir llamadas de embedding innecesarias.
+    v14.4: Pre-filtro con stemming, cache de consultas.
     """
+
+    # Cache de consultas: evita llamadas embedding repetidas
+    _QUERY_CACHE_MAX = 50
+    _QUERY_CACHE_TTL = 300  # 5 minutos
 
     def __init__(self, store_dir=None):
         self.store_dir = store_dir or os.path.join(LEARN_DIR, "vectors")
@@ -36,7 +44,10 @@ class VectorStore:
         self.index = self._load_index()
         self._vectors_cache = None
         self._dirty = False
-        self._last_search_cache = {}  # Cache de busquedas recientes
+        # Cache de consultas frecuentes: {query_hash: (results, timestamp)}
+        self._query_cache = {}
+        # Pre-computed stems para pre-filtro rápido
+        self._stems_cache = None
         # Auto-migrar de JSON a Pickle si existe el archivo legacy
         self._migrate_json_to_pickle()
 
@@ -100,6 +111,23 @@ class VectorStore:
         if self._dirty:
             self._save_index()
             self._dirty = False
+            # Invalidar cache de stems cuando cambia el índice
+            self._stems_cache = None
+
+    def _get_stems_cache(self):
+        """Pre-computa stems de todos los documentos para pre-filtro rápido."""
+        if self._stems_cache is not None:
+            return self._stems_cache
+        try:
+            from memory.bm25 import tokenize
+            self._stems_cache = []
+            for entry in self.index:
+                stems = set(tokenize(entry["text"]))
+                self._stems_cache.append((entry, stems))
+        except ImportError:
+            # Fallback si bm25 no disponible
+            self._stems_cache = None
+        return self._stems_cache
 
     def add(self, text, metadata=None, entry_id=None, skip_embedding=False):
         """
@@ -129,6 +157,8 @@ class VectorStore:
             })
             self._dirty = True
             self._flush()
+            # Invalidar cache de consultas (datos nuevos)
+            self._query_cache.clear()
             return entry_id
 
         # Obtener embedding (con cache LRU)
@@ -143,6 +173,7 @@ class VectorStore:
             })
             self._dirty = True
             self._flush()
+            self._query_cache.clear()
             return entry_id
 
         # Guardar vector
@@ -159,10 +190,49 @@ class VectorStore:
         })
         self._dirty = True
         self._flush()
+        self._query_cache.clear()
         return entry_id
 
     def _pre_filter(self, query, max_candidates=50):
-        """Pre-filtra entradas por texto antes de busqueda semantica."""
+        """Pre-filtra entradas usando stemming español para mejor recall.
+
+        v14.4: Usa tokenización con stemming del módulo bm25.
+               Encuentra 'configurar' cuando se busca 'configuración'.
+        """
+        # Intentar pre-filtro con stemming
+        try:
+            from memory.bm25 import tokenize
+            query_stems = set(tokenize(query))
+            if not query_stems:
+                return self.index[:max_candidates]
+
+            # Usar cache de stems si está disponible
+            stems_cache = self._get_stems_cache()
+            if stems_cache:
+                candidates = []
+                for entry, doc_stems in stems_cache:
+                    overlap = len(query_stems & doc_stems)
+                    if overlap > 0:
+                        candidates.append((overlap, entry))
+                candidates.sort(key=lambda x: x[0], reverse=True)
+                return [c[1] for c in candidates[:max_candidates]]
+
+            # Sin cache: computar stems al vuelo
+            candidates = []
+            for entry in self.index:
+                doc_stems = set(tokenize(entry["text"]))
+                overlap = len(query_stems & doc_stems)
+                if overlap > 0:
+                    candidates.append((overlap, entry))
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            return [c[1] for c in candidates[:max_candidates]]
+
+        except ImportError:
+            # Fallback: pre-filtro original (sin stemming)
+            return self._pre_filter_legacy(query, max_candidates)
+
+    def _pre_filter_legacy(self, query, max_candidates=50):
+        """Pre-filtro legacy: coincidencia de texto simple (fallback)."""
         query_words = [w.lower() for w in query.split() if len(w) > 3]
         if not query_words:
             return self.index[:max_candidates]
@@ -175,25 +245,56 @@ class VectorStore:
         candidates.sort(key=lambda x: x[0], reverse=True)
         return [c[1] for c in candidates[:max_candidates]]
 
+    def _check_query_cache(self, query, limit, min_similarity):
+        """Verifica cache de consultas frecuentes."""
+        cache_key = hashlib.md5(f"{query}:{limit}:{min_similarity}".encode()).hexdigest()[:16]
+        if cache_key in self._query_cache:
+            results, timestamp = self._query_cache[cache_key]
+            if time.time() - timestamp < self._QUERY_CACHE_TTL:
+                logger.debug(f"Cache hit para consulta: {query[:50]}")
+                return results
+            else:
+                del self._query_cache[cache_key]
+        return None
+
+    def _store_query_cache(self, query, limit, min_similarity, results):
+        """Almacena resultado en cache de consultas."""
+        cache_key = hashlib.md5(f"{query}:{limit}:{min_similarity}".encode()).hexdigest()[:16]
+        self._query_cache[cache_key] = (results, time.time())
+        # Evicción LRU si cache muy grande
+        if len(self._query_cache) > self._QUERY_CACHE_MAX:
+            oldest_key = min(self._query_cache, key=lambda k: self._query_cache[k][1])
+            del self._query_cache[oldest_key]
+
     def search(self, query, limit=5, min_similarity=0.3):
         """
         Busca entradas semanticamente similares al query.
         Optimizado: si no hay vectores, usa solo busqueda por texto (sin llamar embedding).
         Usa cosine_similarity_batch para calculo vectorizado con numpy.
+        v14.4: Cache de consultas frecuentes.
         """
         if not self.index:
             return []
 
+        # Check cache
+        cached = self._check_query_cache(query, limit, min_similarity)
+        if cached is not None:
+            return cached
+
         # OPTIMIZACION: Si no hay entradas con vector, solo busqueda por texto
         has_any_vectors = any(e.get("has_vector") for e in self.index)
         if not has_any_vectors:
-            return self._text_search(query, limit)
+            results = self._text_search(query, limit)
+            self._store_query_cache(query, limit, min_similarity, results)
+            return results
 
         # Busqueda semantica (con embedding)
         query_embedding = ollama.get_embedding(query)
         if not query_embedding:
             # Fallback: busqueda por texto (sin gastar mas tiempo en embedding)
-            return self._text_search(query, limit)
+            results = self._text_search(query, limit)
+            self._store_query_cache(query, limit, min_similarity, results)
+            return results
 
         # Pre-filtrar por texto (rapido, sin cargar todos los vectores)
         candidates = self._pre_filter(query, max_candidates=50)
@@ -216,10 +317,44 @@ class VectorStore:
                 scored.append({**entry, "score": round(score, 3)})
 
         scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:limit]
+        results = scored[:limit]
+        self._store_query_cache(query, limit, min_similarity, results)
+        return results
 
     def _text_search(self, query, limit=5):
-        """Busqueda por texto cuando no hay embeddings."""
+        """Busqueda por texto cuando no hay embeddings.
+
+        v14.4: Usa tokenización con stemming para mejor recall.
+        """
+        # Intentar búsqueda con stemming
+        try:
+            from memory.bm25 import tokenize
+            query_stems = tokenize(query)
+            if not query_stems:
+                return []
+
+            results = []
+            for entry in self.index:
+                doc_stems = tokenize(entry["text"])
+                if not doc_stems:
+                    continue
+                # Score: ratio de stems de la query que aparecen en el documento
+                query_set = set(query_stems)
+                doc_set = set(doc_stems)
+                matches = len(query_set & doc_set)
+                if matches > 0:
+                    score = matches / len(query_set)
+                    results.append({**entry, "score": round(score, 3)})
+
+            results.sort(key=lambda x: x["score"], reverse=True)
+            return results[:limit]
+
+        except ImportError:
+            # Fallback: búsqueda original
+            return self._text_search_legacy(query, limit)
+
+    def _text_search_legacy(self, query, limit=5):
+        """Busqueda por texto legacy (sin stemming)."""
         query_lower = query.lower()
         query_words = [w for w in query_lower.split() if len(w) > 3]
         results = []
@@ -256,6 +391,9 @@ class VectorStore:
             self._save_vectors(vectors)
         self._dirty = True
         self._flush()
+        # Invalidar caches
+        self._query_cache.clear()
+        self._stems_cache = None
         # Limpiar archivo JSON legacy si existe
         try:
             if os.path.exists(self._vectors_legacy_file):

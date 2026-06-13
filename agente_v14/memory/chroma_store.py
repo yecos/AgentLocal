@@ -634,17 +634,45 @@ class SimpleVectorStore(VectorStore):
 
 
 # ============================================================
-# FACTORY: Retorna ChromaVectorStore o SimpleVectorStore
+# FACTORY: Retorna HybridVectorStore(ChromaVectorStore/SimpleVectorStore)
 # ============================================================
-def create_vector_store(store_dir=None):
-    """Factory que retorna el mejor vector store disponible."""
+def create_vector_store(store_dir=None, use_hybrid=True, use_reranker=True):
+    """Factory que retorna el mejor vector store disponible.
+
+    v14.5: Por defecto retorna HybridVectorStore que envuelve el backend
+    y anade busqueda BM25 + fusion RRF. Opcionalmente anade re-ranker.
+
+    Args:
+        store_dir: Directorio de persistencia
+        use_hybrid: Si True, envuelve en HybridVectorStore con BM25+RRF
+        use_reranker: Si True, anade MultiSignalReranker al TripleMemory
+    """
+    # 1. Seleccionar backend base
+    base_store = None
     if CHROMADB_AVAILABLE:
         try:
-            store = ChromaVectorStore(store_dir=store_dir)
-            logger.info("Usando ChromaDB como vector store")
-            return store
+            base_store = ChromaVectorStore(store_dir=store_dir)
+            logger.info("Backend base: ChromaDB")
         except Exception as e:
             logger.warning(f"Error inicializando ChromaDB, fallback a casero: {e}")
 
-    logger.info("Usando SimpleVectorStore (VectorStore + decay + dedup) como fallback")
-    return SimpleVectorStore(store_dir=store_dir)
+    if base_store is None:
+        base_store = SimpleVectorStore(store_dir=store_dir)
+        logger.info("Backend base: SimpleVectorStore (casero)")
+
+    # 2. Envolver en Hibrido si se solicita
+    if use_hybrid:
+        try:
+            from memory.hybrid import HybridVectorStore
+            hybrid_store = HybridVectorStore(base_store)
+            logger.info(
+                f"Vector store hibrido activado: "
+                f"{hybrid_store.count()} docs, BM25 + RRF"
+            )
+            return hybrid_store
+        except ImportError as e:
+            logger.warning(f"HybridVectorStore no disponible ({e}), usando base store")
+        except Exception as e:
+            logger.warning(f"Error inicializando HybridVectorStore: {e}, usando base store")
+
+    return base_store

@@ -79,6 +79,32 @@ USE_STREAMING = True              # Usar streaming por defecto
 GPU_CHECK_ON_START = True         # Verificar GPU al iniciar el agente
 
 # ============================================================
+# BUSQUEDA HIBRIDA (v14.5)
+# ============================================================
+USE_HYBRID_SEARCH = True          # Usar HybridVectorStore (BM25 + Vectorial + RRF)
+USE_RERANKER = True               # Usar MultiSignalReranker en recall()
+BM25_K1 = 1.5                     # Parametro k1 de BM25 (saturacion TF)
+BM25_B = 0.75                     # Parametro b de BM25 (normalizacion longitud)
+RRF_K = 60                        # Constante de suavizado Reciprocal Rank Fusion
+HYBRID_MIN_SIMILARITY = 0.25      # Umbral minimo para busqueda hibrida (menor que solo vectorial)
+RERANK_OVER_RETRIEVE = 2          # Over-retrieve factor para re-ranking (limit * 2)
+
+# ============================================================
+# BUSQUEDA WEB (v14.5)
+# ============================================================
+WEB_SEARCH_MAX_RETRIES = 3        # Max reintentos para busqueda web
+WEB_SEARCH_CACHE_TTL = 300        # TTL del cache en segundos (5 min)
+WEB_SEARCH_CACHE_MAX = 50         # Max entradas en cache de busqueda web
+WEB_SEARCH_FALLBACK_WIKI = True   # Fallback a Wikipedia si DDG falla
+
+# ============================================================
+# BUSQUEDA EN ARCHIVOS (v14.5)
+# ============================================================
+USE_RIPGREP = True                # Usar ripgrep como motor primario (10-100x mas rapido)
+FILE_SEARCH_MAX_DEPTH = 10        # Profundidad maxima de busqueda recursiva
+FILE_SEARCH_MAX_RESULTS = 50      # Max resultados de busqueda en archivos
+
+# ============================================================
 # TIMEOUTS
 # ============================================================
 DEFAULT_TIMEOUT = 90             # Segundos para comandos normales (reducido)

@@ -1,12 +1,14 @@
 """
 =============================================================
-AGENTE v14 - Triple Memoria
+AGENTE v14 - Triple Memoria (Mejorada)
 =============================================================
 1. Corto Plazo: Conversacion actual (ventana deslizante)
 2. Largo Plazo: Conocimiento con busqueda semantica (VectorStore)
 3. Trabajo: Scratchpad para la tarea actual
 
-v14: Sin duplicacion de historial, usa solo TripleMemory.
+v14.5: Integracion con HybridVectorStore y MultiSignalReranker.
+       recall() ahora pasa por re-ranker multi-señal.
+       Decaimiento diferenciado por tipo de contenido.
 =============================================================
 """
 
@@ -26,23 +28,49 @@ from llm import embed_cache
 
 learning = LearningSystem()
 
+# Decaimiento diferenciado por tipo de contenido (en dias half-life)
+DECAY_HALF_LIFE_BY_TYPE = {
+    "knowledge": 365,     # Conocimiento factual: decae muy lentamente (1 año)
+    "correction": 180,    # Correcciones: decaimiento lento (6 meses)
+    "lesson": 90,         # Lecciones aprendidas: 3 meses
+    "experience": 60,     # Experiencia: 2 meses
+    "task": 14,           # Tareas: decaen rapido (2 semanas)
+    "conversation": 7,    # Conversacion: decae muy rapido (1 semana)
+    "note": 30,           # Notas: 1 mes
+}
+
 
 class TripleMemory:
     """
-    Sistema de Triple Memoria v14.
+    Sistema de Triple Memoria v14.5.
     Fuente unica de verdad para el historial de conversacion.
+    Integra busqueda hibrida BM25+Vectorial y re-ranking multi-señal.
     """
 
-    def __init__(self):
+    def __init__(self, use_hybrid=True, use_reranker=True):
         self.short_term = []  # Memoria a corto plazo (conversacion)
-        # Usar factory: ChromaDB si esta disponible, sino VectorStore casero
-        # Ambos incluyen decaimiento temporal y deduplicacion
+        self._use_reranker = use_reranker
+        self._reranker = None
+
+        # Usar factory: HybridVectorStore(ChromaDB/SimpleVectorStore + BM25)
         try:
-            self.long_term = create_vector_store()
-            logger.info("TripleMemory: vector store inicializado via factory")
+            self.long_term = create_vector_store(use_hybrid=use_hybrid, use_reranker=use_reranker)
+            logger.info("TripleMemory: vector store inicializado via factory (hibrido)")
         except Exception as e:
             logger.warning(f"Factory fallo, usando VectorStore basico: {e}")
             self.long_term = VectorStore()
+
+        # Inicializar re-ranker si se solicita
+        if use_reranker:
+            try:
+                from memory.reranker import MultiSignalReranker
+                self._reranker = MultiSignalReranker(use_adaptive_weights=True)
+                logger.info("TripleMemory: re-ranker multi-señal activado")
+            except ImportError as e:
+                logger.warning(f"Re-ranker no disponible ({e}), usando recall directo")
+            except Exception as e:
+                logger.warning(f"Error inicializando re-ranker: {e}")
+
         self.working = {  # Memoria de trabajo (scratchpad)
             "current_task": "",
             "task_steps": [],
@@ -88,24 +116,58 @@ class TripleMemory:
 
     def remember(self, text, metadata=None, fast=False):
         """Guarda algo en la memoria a largo plazo.
-        
+
         Args:
             fast: Si True, salta el calculo de embedding (mas rapido).
                   La entrada solo aparecera en busquedas por texto.
-        v3: Catch de errores para que NUNCA crashee el agente.
+            metadata: Metadatos opcionales. Si incluye 'type', se usa para
+                     decaimiento diferenciado.
+        v14.5: Anade tipo de contenido para decaimiento diferenciado.
         """
         try:
-            return self.long_term.add(text, metadata=metadata, skip_embedding=fast)
+            # Enriquecer metadata con tipo para decaimiento diferenciado
+            meta = metadata or {}
+            if "type" not in meta:
+                # Inferir tipo del contenido
+                meta["type"] = self._infer_content_type(text)
+            return self.long_term.add(text, metadata=meta, skip_embedding=fast)
         except Exception as e:
             logger.warning(f"Error guardando en memoria a largo plazo (no critico): {e}")
             return None
 
+    def _infer_content_type(self, text):
+        """Infiere el tipo de contenido a partir del texto.
+
+        Se usa para decaimiento diferenciado.
+        """
+        text_lower = text.lower()
+
+        # Patrones heuristicos
+        if any(w in text_lower for w in ["correccion", "no hagas", "error corregido"]):
+            return "correction"
+        if any(w in text_lower for w in ["leccion", "aprendi", "importante recordar"]):
+            return "lesson"
+        if any(w in text_lower for w in ["tarea", "pendiente", "por hacer", "todo"]):
+            return "task"
+        if any(w in text_lower for w in ["nota", "recordar", "tener en cuenta"]):
+            return "note"
+        # Default: experiencia general
+        return "experience"
+
     def recall(self, query, limit=5):
         """Recupera recuerdos relevantes de la memoria a largo plazo.
-        v3: Catch de errores para que NUNCA crashee el agente.
+
+        v14.5: Si el re-ranker esta activo, pasa los resultados por
+        MultiSignalReranker antes de retornarlos.
         """
         try:
-            return self.long_term.search(query, limit=limit)
+            results = self.long_term.search(query, limit=limit * 2)  # Over-retrieve for reranking
+
+            if self._reranker and results:
+                reranked = self._reranker.rerank(query, results, limit=limit)
+                return reranked
+
+            return results[:limit]
         except Exception as e:
             logger.warning(f"Error buscando en memoria a largo plazo (no critico): {e}")
             return []
@@ -133,7 +195,7 @@ class TripleMemory:
 
     def get_context_for(self, query):
         """Construye contexto enriquecido combinando las 3 memorias.
-        v3: Catch de errores en cada paso para que NUNCA crashee el agente.
+        v14.5: Usa recall() con re-ranker para mejor calidad de contexto.
         """
         context_parts = []
         budget_remaining = MAX_CONTEXT_CHARS
@@ -173,13 +235,13 @@ class TripleMemory:
         except Exception as e:
             logger.debug(f"Error obteniendo correcciones: {e}")
 
-        # 3. Memoria a Largo Plazo - budget restante
+        # 3. Memoria a Largo Plazo - budget restante (con re-ranker)
         try:
             if budget_remaining > 200:
                 recall_results = self.recall(query, limit=3)
                 if recall_results:
                     knowledge_text = "\n".join([
-                        f"  - [{r.get('score', 0):.2f}] {r['text'][:150]}"
+                        f"  - [{r.get('rerank_score', r.get('score', 0)):.2f}] {r['text'][:150]}"
                         for r in recall_results
                     ])
                     knowledge_full = f"CONOCIMIENTO RELEVANTE:\n{knowledge_text}"
@@ -310,6 +372,12 @@ class TripleMemory:
         stats["vector_backend"] = backend_type
         if hasattr(self.long_term, "count_with_vectors"):
             stats["long_term_with_vectors"] = self.long_term.count_with_vectors()
+        # Info de re-ranker
+        if self._reranker:
+            stats["reranker_stats"] = self._reranker.stats()
+        # Info de vector store hibrido
+        if hasattr(self.long_term, "get_info"):
+            stats["hybrid_info"] = self.long_term.get_info()
         # Info de ultima sesion
         try:
             if os.path.exists(self._session_file):
