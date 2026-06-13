@@ -40,7 +40,17 @@ class ChromaVectorStore:
         Catch-all de errores de dimension para que NUNCA crashee el agente.
     """
 
-    DECAY_HALF_LIFE_DAYS = 30  # Los recuerdos pierden la mitad de relevancia en 30 dias
+    # Decay diferenciado por tipo de contenido (en dias half-life)
+    DECAY_HALF_LIFE_BY_TYPE = {
+        "knowledge": 365,     # Conocimiento factual: decae muy lentamente
+        "correction": 180,    # Correcciones: decaimiento lento
+        "lesson": 90,         # Lecciones aprendidas
+        "experience": 60,     # Experiencia
+        "task": 14,           # Tareas: decaen rapido
+        "conversation": 7,    # Conversacion: decae muy rapido
+        "note": 30,           # Notas
+    }
+    DEFAULT_DECAY_HALF_LIFE = 30  # Default: 30 dias
     MAX_RECREATE_RETRIES = 2   # Max reintentos al recrear coleccion por dimension mismatch
 
     def __init__(self, store_dir=None):
@@ -178,10 +188,13 @@ class ChromaVectorStore:
         except Exception as e:
             logger.debug(f"Error guardando metadatos: {e}")
 
-    def _compute_decay(self, created_at, now=None):
-        """
-        Computa el factor de decaimiento temporal.
+    def _compute_decay(self, created_at, now=None, metadata=None):
+        """"
+        Computa el factor de decaimiento temporal diferenciado por tipo.
         Los recuerdos recientes pesan mas que los viejos.
+        El half-life varia segun tipo de contenido:
+        - knowledge: 365 dias, correction: 180, lesson: 90
+        - experience: 60, task: 14, conversation: 7
         Retorna un valor entre 0 y 1.
         """
         if not created_at:
@@ -191,9 +204,17 @@ class ChromaVectorStore:
             if now is None:
                 now = datetime.now()
             days_old = (now - created).total_seconds() / 86400
-            # Decaimiento exponencial
+
+            # Determinar half-life segun tipo de contenido
+            half_life = self.DEFAULT_DECAY_HALF_LIFE
+            if metadata:
+                content_type = metadata.get("type", "").lower()
+                if content_type in self.DECAY_HALF_LIFE_BY_TYPE:
+                    half_life = self.DECAY_HALF_LIFE_BY_TYPE[content_type]
+
+            # Decaimiento exponencial con half-life diferenciado
             import math
-            decay = math.exp(-0.693 * days_old / self.DECAY_HALF_LIFE_DAYS)
+            decay = math.exp(-0.693 * days_old / half_life)
             return max(decay, 0.1)  # Minimo 10% de relevancia
         except Exception as e:
             logger.debug(f"Error computando decaimiento: {e}")
@@ -435,7 +456,7 @@ class ChromaVectorStore:
                 # Aplicar decaimiento temporal
                 meta = results["metadatas"][0][i] if results["metadatas"] else {}
                 created_at = meta.get("created", "")
-                decay = self._compute_decay(created_at, now)
+                decay = self._compute_decay(created_at, now, metadata=meta)
 
                 # Score final = similitud * decaimiento
                 final_score = similarity * decay
@@ -544,17 +565,30 @@ class SimpleVectorStore(VectorStore):
     Elimina ~150 lineas de codigo duplicado vs la version anterior.
     """
 
-    DECAY_HALF_LIFE_DAYS = 30
+    # Decay diferenciado por tipo de contenido (en dias half-life)
+    DECAY_HALF_LIFE_BY_TYPE = {
+        "knowledge": 365, "correction": 180, "lesson": 90,
+        "experience": 60, "task": 14, "conversation": 7, "note": 30,
+    }
+    DEFAULT_DECAY_HALF_LIFE = 30
 
-    def _compute_decay(self, created_at):
-        """Computa el factor de decaimiento temporal (0.1 - 1.0)."""
+    def _compute_decay(self, created_at, metadata=None):
+        """Computa el factor de decaimiento temporal diferenciado por tipo (0.1 - 1.0)."""
         if not created_at:
             return 0.5
         try:
             created = datetime.fromisoformat(created_at)
             days_old = (datetime.now() - created).total_seconds() / 86400
+
+            # Determinar half-life segun tipo de contenido
+            half_life = self.DEFAULT_DECAY_HALF_LIFE
+            if metadata:
+                content_type = metadata.get("type", "").lower()
+                if content_type in self.DECAY_HALF_LIFE_BY_TYPE:
+                    half_life = self.DECAY_HALF_LIFE_BY_TYPE[content_type]
+
             import math
-            decay = math.exp(-0.693 * days_old / self.DECAY_HALF_LIFE_DAYS)
+            decay = math.exp(-0.693 * days_old / half_life)
             return max(decay, 0.1)
         except Exception as e:
             logger.debug(f"Error computando decaimiento: {e}")
@@ -603,7 +637,7 @@ class SimpleVectorStore(VectorStore):
             if not entry.get("has_vector") or entry["id"] not in similarities:
                 continue
             raw_sim = similarities[entry["id"]]
-            decay = self._compute_decay(entry.get("created", ""))
+            decay = self._compute_decay(entry.get("created", ""), metadata=entry.get("metadata"))
             final_score = raw_sim * decay
 
             if final_score >= min_similarity * 0.5:
@@ -618,17 +652,14 @@ class SimpleVectorStore(VectorStore):
         return scored[:limit]
 
     def _text_search(self, query, limit=5):
-        """Busqueda por texto con decaimiento temporal."""
-        query_lower = query.lower()
-        query_words = [w for w in query_lower.split() if len(w) > 3]
+        """Busqueda por texto con stemming y decaimiento temporal diferenciado."""
+        # Usar stemming del VectorStore base (que ya lo soporta)
+        base_results = super()._text_search(query, limit=limit * 2)
         results = []
-        for entry in self.index:
-            text_lower = entry["text"].lower()
-            matches = sum(1 for w in query_words if w in text_lower)
-            if matches > 0:
-                decay = self._compute_decay(entry.get("created", ""))
-                score = (matches / max(len(query_words), 1)) * decay
-                results.append({**entry, "score": round(score, 3)})
+        for entry in base_results:
+            decay = self._compute_decay(entry.get("created", ""), metadata=entry.get("metadata"))
+            score = entry.get("score", 0) * decay
+            results.append({**entry, "score": round(score, 3), "decay": round(decay, 3)})
         results.sort(key=lambda x: x["score"], reverse=True)
         return results[:limit]
 

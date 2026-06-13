@@ -18,7 +18,7 @@ No requiere cambios en TripleMemory ni ReactAgent.
 import logging
 from datetime import datetime
 
-from config import logger
+from config import logger, BM25_K1, BM25_B, RRF_K
 from memory.bm25 import BM25, reciprocal_rank_fusion
 
 
@@ -36,8 +36,8 @@ class HybridVectorStore:
     - Compatible con cualquier backend (ChromaDB, casero, etc.)
     """
 
-    # Parametros RRF
-    RRF_K = 60  # Constante de suavizado estandar
+    # Parametros RRF (desde config.py)
+    RRF_K = RRF_K
 
     def __init__(self, vector_store):
         """Inicializa el store hibrido.
@@ -73,7 +73,7 @@ class HybridVectorStore:
                     logger.warning(f"Error obteniendo docs de ChromaDB para BM25: {e}")
 
             if documents:
-                self._bm25 = BM25(documents, k1=1.5, b=0.75, use_stemming=True)
+                self._bm25 = BM25(documents, k1=BM25_K1, b=BM25_B, use_stemming=True)
                 logger.info(f"BM25 index construido con {len(documents)} documentos")
             else:
                 self._bm25 = None
@@ -90,7 +90,7 @@ class HybridVectorStore:
         # Actualizar indice BM25 incrementalmente
         if self._bm25 is None:
             # Primer documento: construir indice con este
-            self._bm25 = BM25(k1=1.5, b=0.75, use_stemming=True)
+            self._bm25 = BM25(k1=BM25_K1, b=BM25_B, use_stemming=True)
 
         try:
             doc_id = entry_id or result

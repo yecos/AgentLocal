@@ -22,6 +22,19 @@ from datetime import datetime
 from config import logger
 from memory.bm25 import tokenize, tokenize_minimal
 
+# Half-life diferenciado por tipo de contenido (en dias)
+# Debe coincidir con DECAY_HALF_LIFE_BY_TYPE de triple_memory.py
+DECAY_HALF_LIFE_BY_TYPE = {
+    "knowledge": 365,
+    "correction": 180,
+    "lesson": 90,
+    "experience": 60,
+    "task": 14,
+    "conversation": 7,
+    "note": 30,
+}
+DEFAULT_HALF_LIFE = 30  # Half-life por defecto
+
 
 # ============================================================
 # CLASIFICADOR DE TIPO DE CONSULTA
@@ -61,16 +74,22 @@ class QueryClassifier:
         # Scoring por tipo
         scores = {"factual": 0, "exact": 0, "temporal": 0}
 
+        # Normalizar: remover ¿¡ y acentos para mejor matching en español
+        query_normalized = query_lower.replace("¿", "").replace("¡", "")
+        # Normalizar acentos comunes en patrones de búsqueda
+        accent_map = {"á": "a", "é": "e", "í": "i", "ó": "o", "ú": "u", "ü": "u", "ñ": "ñ"}
+        query_normalized = "".join(accent_map.get(c, c) for c in query_normalized)
+
         for pattern in QueryClassifier.FACTUAL_PATTERNS:
-            if pattern in query_lower:
+            if pattern in query_normalized:
                 scores["factual"] += 1
 
         for pattern in QueryClassifier.EXACT_PATTERNS:
-            if pattern in query_lower:
+            if pattern in query_normalized:
                 scores["exact"] += 1
 
         for pattern in QueryClassifier.TEMPORAL_PATTERNS:
-            if pattern in query_lower:
+            if pattern in query_normalized:
                 scores["temporal"] += 1
 
         # Tipo con mayor score
@@ -222,16 +241,17 @@ class MultiSignalReranker:
             except Exception:
                 signals["lexical"] = 0.0
 
-        # 3. Señal de frescura (1 - decaimiento temporal)
+        # 3. Señal de frescura (1 - decaimiento temporal diferenciado)
         decay = candidate.get("decay", None)
         if decay is not None:
             signals["freshness"] = 1.0 - decay  # Decay alto = frescura baja
         else:
-            # Calcular decaimiento si tenemos fecha
+            # Calcular decaimiento diferenciado si tenemos fecha
             created = candidate.get("created", "")
-            if not created and candidate.get("metadata"):
-                created = candidate["metadata"].get("created", "")
-            signals["freshness"] = self._compute_freshness(created)
+            metadata = candidate.get("metadata", {})
+            if not created and metadata:
+                created = metadata.get("created", "")
+            signals["freshness"] = self._compute_freshness(created, metadata=metadata)
 
         # 4. Cobertura de terminos
         try:
@@ -249,16 +269,28 @@ class MultiSignalReranker:
 
         return signals
 
-    def _compute_freshness(self, created_at):
-        """Computa frescura basada en fecha de creacion (0-1)."""
+    def _compute_freshness(self, created_at, metadata=None):
+        """Computa frescura basada en fecha de creacion y tipo de contenido (0-1).
+
+        Usa half-life diferenciado: conocimiento factual decae lento (365 dias),
+        tareas decaen rapido (14 dias), conversacion muy rapido (7 dias).
+        """
         if not created_at:
             return 0.5  # Neutral si no hay fecha
         try:
             created = datetime.fromisoformat(created_at)
             days_old = (datetime.now() - created).total_seconds() / 86400
-            # Decaimiento exponencial con half-life de 30 dias
+
+            # Determinar half-life segun tipo de contenido
+            half_life = DEFAULT_HALF_LIFE
+            if metadata:
+                content_type = metadata.get("type", "").lower()
+                if content_type in DECAY_HALF_LIFE_BY_TYPE:
+                    half_life = DECAY_HALF_LIFE_BY_TYPE[content_type]
+
+            # Decaimiento exponencial con half-life diferenciado
             import math
-            freshness = 1.0 - math.exp(-0.693 * days_old / 30)
+            freshness = 1.0 - math.exp(-0.693 * days_old / half_life)
             return max(0, min(1, freshness))
         except Exception:
             return 0.5

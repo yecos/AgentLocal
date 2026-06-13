@@ -86,9 +86,35 @@ class LearningSystem:
         return [k["content"] for k in knowledge if k["topic"].startswith("leccion:")]
 
     def get_corrections_for(self, user_msg):
+        """Busca correcciones relevantes usando stemming español.
+
+        v14.5: Usa tokenización con stemming para encontrar correcciones
+        aunque el usuario use variaciones morfológicas
+        (ej: 'configurar' coincide con 'configuración').
+        """
         corrections = self._load(CORRECTIONS_FILE, [])
-        msg_lower = user_msg.lower()
         relevant = []
+
+        # Intentar matching con stemming
+        try:
+            from memory.bm25 import tokenize
+            msg_stems = set(tokenize(user_msg))
+
+            if msg_stems:
+                for c in corrections:
+                    corr_stems = set(tokenize(c["user_message"]))
+                    overlap = len(msg_stems & corr_stems)
+                    if overlap > 0:
+                        # Score por overlap para ordenar por relevancia
+                        relevant.append((overlap / max(len(msg_stems), 1), c))
+                # Ordenar por relevancia y retornar top 5
+                relevant.sort(key=lambda x: x[0], reverse=True)
+                return [c for _, c in relevant[:5]]
+        except ImportError:
+            pass
+
+        # Fallback: matching original (sin stemming)
+        msg_lower = user_msg.lower()
         for c in corrections:
             if any(w in msg_lower for w in c["user_message"].lower().split() if len(w) > 3):
                 relevant.append(c)
