@@ -1,0 +1,651 @@
+     1→     1→"""
+     2→     2→=============================================================
+     3→     3→AGENTE v14 - Vector Store con ChromaDB
+     4→     4→=============================================================
+     5→     5→Vector store profesional con ChromaDB como backend.
+     6→     6→Fallback automatico al VectorStore casero si ChromaDB no esta.
+     7→     7→- Busqueda semantica rapida y escalable
+     8→     8→- Decaimiento temporal de recuerdos
+     9→     9→- Deduplicacion semantica
+    10→    10→- Auto-cleanup
+    11→    11→=============================================================
+    12→    12→"""
+    13→    13→
+    14→    14→import os
+    15→    15→import json
+    16→    16→import hashlib
+    17→    17→import logging
+    18→    18→from datetime import datetime
+    19→    19→
+    20→    20→from config import LEARN_DIR, MAX_VECTORS_IN_MEMORY, logger
+    21→    21→from memory.vectorstore import VectorStore
+    22→    22→
+    23→    23→# Intentar importar ChromaDB
+    24→    24→try:
+    25→    25→    import chromadb
+    26→    26→    CHROMADB_AVAILABLE = True
+    27→    27→except ImportError:
+    28→    28→    CHROMADB_AVAILABLE = False
+    29→    29→    logger.info("ChromaDB no instalado. Usando VectorStore casero (fallback).")
+    30→    30→
+    31→    31→if CHROMADB_AVAILABLE:
+    32→    32→    from llm import ollama
+    33→    33→
+    34→    34→
+    35→    35→class ChromaVectorStore:
+    36→    36→    """
+    37→    37→    Vector store basado en ChromaDB con decaimiento temporal y deduplicacion.
+    38→    38→    Escalable a miles de documentos con busqueda semantica rapida.
+    39→    39→    v3: Auto-deteccion robusta y recreacion ante mismatch de dimensiones de embeddings.
+    40→    40→        Catch-all de errores de dimension para que NUNCA crashee el agente.
+    41→    41→    """
+    42→    42→
+    43→    43→    DECAY_HALF_LIFE_DAYS = 30  # Los recuerdos pierden la mitad de relevancia en 30 dias
+    44→    44→    MAX_RECREATE_RETRIES = 2   # Max reintentos al recrear coleccion por dimension mismatch
+    45→    45→
+    46→    46→    def __init__(self, store_dir=None):
+    47→    47→        self.store_dir = store_dir or os.path.join(LEARN_DIR, "vectors")
+    48→    48→        os.makedirs(self.store_dir, exist_ok=True)
+    49→    49→
+    50→    50→        # Detectar dimension del modelo de embedding actual
+    51→    51→        self._embedding_dim = self._detect_embedding_dimension()
+    52→    52→
+    53→    53→        # Inicializar ChromaDB
+    54→    54→        self._client = chromadb.PersistentClient(path=self.store_dir)
+    55→    55→
+    56→    56→        # Obtener o crear coleccion con validacion de dimensiones
+    57→    57→        self._collection = self._get_or_create_collection()
+    58→    58→
+    59→    59→        # Validacion post-init: verificar que las dimensiones coinciden
+    60→    60→        self._validate_collection_dimension()
+    61→    61→
+    62→    62→        self._index_meta = self._load_meta()
+    63→    63→        logger.info(f"ChromaDB inicializado: {self._collection.count()} documentos (dim={self._embedding_dim})")
+    64→    64→
+    65→    65→    def _detect_embedding_dimension(self):
+    66→    66→        """Detecta la dimension de los embeddings del modelo actual."""
+    67→    67→        try:
+    68→    68→            test_embedding = ollama.get_embedding("test")
+    69→    69→            if test_embedding and isinstance(test_embedding, list):
+    70→    70→                return len(test_embedding)
+    71→    71→        except Exception as e:
+    72→    72→            logger.debug(f"No se pudo detectar dimension del embedding: {e}")
+    73→    73→        return None
+    74→    74→
+    75→    75→    def _get_collection_dimension(self, collection):
+    76→    76→        """Intenta obtener la dimension de embeddings de una coleccion existente."""
+    77→    77→        try:
+    78→    78→            metadata = collection.metadata
+    79→    79→            if metadata and "hnsw:dim" in metadata:
+    80→    80→                return int(metadata["hnsw:dim"])
+    81→    81→        except Exception:
+    82→    82→            pass
+    83→    83→        try:
+    84→    84→            peek_result = collection.peek(limit=1)
+    85→    85→            if peek_result and peek_result.get("embeddings") and len(peek_result["embeddings"]) > 0:
+    86→    86→                return len(peek_result["embeddings"][0])
+    87→    87→        except Exception:
+    88→    88→            pass
+    89→    89→        return None
+    90→    90→
+    91→    91→    def _validate_collection_dimension(self):
+    92→    92→        """Validacion post-inicializacion: prueba insertar y buscar un vector de prueba.
+    93→    93→        Si falla por dimension mismatch, recrea la coleccion automaticamente.
+    94→    94→        Esto atrapa casos donde _get_or_create_collection no detecto el mismatch.
+    95→    95→        """
+    96→    96→        if self._embedding_dim is None:
+    97→    97→            return
+    98→    98→        try:
+    99→    99→            # Intentar una operacion de query con un vector de la dimension actual
+   100→   100→            test_vec = [0.0] * self._embedding_dim
+   101→   101→            self._collection.query(
+   102→   102→                query_embeddings=[test_vec],
+   103→   103→                n_results=1,
+   104→   104→                include=["distances"]
+   105→   105→            )
+   106→   106→            logger.debug("Validacion de dimensiones ChromaDB: OK")
+   107→   107→        except Exception as e:
+   108→   108→            err_msg = str(e).lower()
+   109→   109→            if "dimension" in err_msg or "dim" in err_msg:
+   110→   110→                logger.warning(
+   111→   111→                    f"⚠️ MISMATCH DETECTADO EN VALIDACION POST-INIT: {e}. "
+   112→   112→                    f"Recreando coleccion con dim={self._embedding_dim}..."
+   113→   113→                )
+   114→   114→                self._force_recreate_collection()
+   115→   115→            else:
+   116→   116→                logger.debug(f"Validacion ChromaDB fallo (no es dimension): {e}")
+   117→   117→
+   118→   118→    def _force_recreate_collection(self):
+   119→   119→        """Fuerza la recreacion de la coleccion, eliminando datos previos."""
+   120→   120→        try:
+   121→   121→            self._client.delete_collection(name="agent_memory")
+   122→   122→            logger.info("Coleccion 'agent_memory' eliminada para recreacion")
+   123→   123→        except Exception:
+   124→   124→            pass
+   125→   125→        metadata = {"hnsw:space": "cosine"}
+   126→   126→        if self._embedding_dim is not None:
+   127→   127→            metadata["hnsw:dim"] = self._embedding_dim
+   128→   128→        self._collection = self._client.create_collection(name="agent_memory", metadata=metadata)
+   129→   129→        logger.info(f"Coleccion recreada con dim={self._embedding_dim}")
+   130→   130→
+   131→   131→    def _get_or_create_collection(self):
+   132→   132→        """Obtiene o crea la coleccion, manejando mismatch de dimensiones."""
+   133→   133→        try:
+   134→   134→            existing = self._client.get_collection(name="agent_memory")
+   135→   135→
+   136→   136→            # Verificar dimensiones si las conocemos
+   137→   137→            if self._embedding_dim is not None:
+   138→   138→                existing_dim = self._get_collection_dimension(existing)
+   139→   139→
+   140→   140→                if existing_dim is not None and existing_dim != self._embedding_dim:
+   141→   141→                    logger.warning(
+   142→   142→                        f"⚠️ MISMATCH DE DIMENSIONES: coleccion espera {existing_dim} dim, "
+   143→   143→                        f"modelo actual produce {self._embedding_dim} dim. Recreando coleccion..."
+   144→   144→                    )
+   145→   145→                    self._client.delete_collection(name="agent_memory")
+   146→   146→                    logger.info(f"Coleccion eliminada. Creando nueva con dim={self._embedding_dim}")
+   147→   147→                    return self._client.create_collection(
+   148→   148→                        name="agent_memory",
+   149→   149→                        metadata={"hnsw:space": "cosine", "hnsw:dim": self._embedding_dim}
+   150→   150→                    )
+   151→   151→
+   152→   152→            return existing
+   153→   153→
+   154→   154→        except Exception:
+   155→   155→            # La coleccion no existe — crear nueva
+   156→   156→            metadata = {"hnsw:space": "cosine"}
+   157→   157→            if self._embedding_dim is not None:
+   158→   158→                metadata["hnsw:dim"] = self._embedding_dim
+   159→   159→            return self._client.create_collection(name="agent_memory", metadata=metadata)
+   160→   160→
+   161→   161→    def _load_meta(self):
+   162→   162→        """Carga metadatos adicionales (timestamp para decaimiento)."""
+   163→   163→        meta_file = os.path.join(self.store_dir, "meta.json")
+   164→   164→        try:
+   165→   165→            if os.path.exists(meta_file):
+   166→   166→                with open(meta_file, "r", encoding="utf-8") as f:
+   167→   167→                    return json.load(f)
+   168→   168→        except Exception as e:
+   169→   169→            logger.debug(f"Error cargando metadatos: {e}")
+   170→   170→        return {}
+   171→   171→
+   172→   172→    def _save_meta(self):
+   173→   173→        """Guarda metadatos adicionales."""
+   174→   174→        meta_file = os.path.join(self.store_dir, "meta.json")
+   175→   175→        try:
+   176→   176→            with open(meta_file, "w", encoding="utf-8") as f:
+   177→   177→                json.dump(self._index_meta, f, ensure_ascii=False, indent=2)
+   178→   178→        except Exception as e:
+   179→   179→            logger.debug(f"Error guardando metadatos: {e}")
+   180→   180→
+   181→   181→    def _compute_decay(self, created_at, now=None):
+   182→   182→        """
+   183→   183→        Computa el factor de decaimiento temporal.
+   184→   184→        Los recuerdos recientes pesan mas que los viejos.
+   185→   185→        Retorna un valor entre 0 y 1.
+   186→   186→        """
+   187→   187→        if not created_at:
+   188→   188→            return 0.5
+   189→   189→        try:
+   190→   190→            created = datetime.fromisoformat(created_at)
+   191→   191→            if now is None:
+   192→   192→                now = datetime.now()
+   193→   193→            days_old = (now - created).total_seconds() / 86400
+   194→   194→            # Decaimiento exponencial
+   195→   195→            import math
+   196→   196→            decay = math.exp(-0.693 * days_old / self.DECAY_HALF_LIFE_DAYS)
+   197→   197→            return max(decay, 0.1)  # Minimo 10% de relevancia
+   198→   198→        except Exception as e:
+   199→   199→            logger.debug(f"Error computando decaimiento: {e}")
+   200→   200→            return 0.5
+   201→   201→
+   202→   202→    def _is_duplicate(self, text, threshold=0.95):
+   203→   203→        """
+   204→   204→        Verifica si un texto es duplicado semantico de uno existente.
+   205→   205→        Usa embeddings para comparar.
+   206→   206→        v3: Catch de errores de dimension para no crashear.
+   207→   207→        """
+   208→   208→        embedding = ollama.get_embedding(text)
+   209→   209→        if not embedding:
+   210→   210→            return False
+   211→   211→
+   212→   212→        # Verificar dimension antes de consultar
+   213→   213→        if self._embedding_dim is not None and len(embedding) != self._embedding_dim:
+   214→   214→            logger.debug(f"Dimension mismatch en _is_duplicate, saltando verificacion")
+   215→   215→            return False
+   216→   216→
+   217→   217→        try:
+   218→   218→            results = self._collection.query(
+   219→   219→                query_embeddings=[embedding],
+   220→   220→                n_results=1,
+   221→   221→                include=["distances"]
+   222→   222→            )
+   223→   223→            if results and results["distances"] and results["distances"][0]:
+   224→   224→                # ChromaDB con cosine space: distance < (1 - threshold) = duplicado
+   225→   225→                distance = results["distances"][0][0]
+   226→   226→                similarity = 1 - distance
+   227→   227→                return similarity >= threshold
+   228→   228→        except Exception as e:
+   229→   229→            err_msg = str(e).lower()
+   230→   230→            if "dimension" in err_msg or "dim" in err_msg:
+   231→   231→                logger.warning(f"Dimension mismatch en _is_duplicate, recreando coleccion...")
+   232→   232→                try:
+   233→   233→                    self._handle_dimension_error(embedding)
+   234→   234→                except Exception:
+   235→   235→                    pass
+   236→   236→            else:
+   237→   237→                logger.debug(f"Error verificando duplicado semantico: {e}")
+   238→   238→        return False
+   239→   239→
+   240→   240→    def add(self, text, metadata=None, entry_id=None, skip_embedding=False):
+   241→   241→        """Agrega un texto al vector store con su embedding.
+   242→   242→        
+   243→   243→        Args:
+   244→   244→            skip_embedding: Si True, NO calcula embedding (mas rapido).
+   245→   245→                           La entrada solo aparecera en busquedas por texto.
+   246→   246→        v3: Catch-all de errores de dimension con reintento automatico.
+   247→   247→        """
+   248→   248→        if not entry_id:
+   249→   249→            entry_id = hashlib.md5(text.encode()).hexdigest()[:12]
+   250→   250→
+   251→   251→        # Verificar duplicado existente en ChromaDB
+   252→   252→        try:
+   253→   253→            existing = self._collection.get(ids=[entry_id])
+   254→   254→            if existing and existing["ids"]:
+   255→   255→                return entry_id
+   256→   256→        except Exception as e:
+   257→   257→            logger.debug(f"Error verificando entrada existente en ChromaDB: {e}")
+   258→   258→
+   259→   259→        # Verificar duplicado semantico (solo si tenemos embedding y no skip)
+   260→   260→        if not skip_embedding:
+   261→   261→            try:
+   262→   262→                if self._is_duplicate(text):
+   263→   263→                    logger.debug(f"Texto duplicado semantico, saltando: {text[:50]}...")
+   264→   264→                    return entry_id
+   265→   265→            except Exception as e:
+   266→   266→                logger.debug(f"Error verificando duplicado semantico: {e}")
+   267→   267→
+   268→   268→        now = datetime.now().isoformat()
+   269→   269→
+   270→   270→        # Metadatos con timestamp para decaimiento
+   271→   271→        meta = metadata or {}
+   272→   272→        meta["created"] = now
+   273→   273→        meta["text_preview"] = text[:100]
+   274→   274→
+   275→   275→        # Si skip_embedding, guardar solo con metadatos (sin calculo de embedding)
+   276→   276→        if skip_embedding:
+   277→   277→            meta["no_embedding"] = True
+   278→   278→            try:
+   279→   279→                self._collection.add(
+   280→   280→                    ids=[entry_id],
+   281→   281→                    documents=[text[:500]],
+   282→   282→                    metadatas=[meta]
+   283→   283→                )
+   284→   284→            except Exception as e:
+   285→   285→                logger.debug(f"Error agregando sin embedding a ChromaDB: {e}")
+   286→   286→            return entry_id
+   287→   287→
+   288→   288→        # Obtener embedding
+   289→   289→        embedding = ollama.get_embedding(text)
+   290→   290→
+   291→   291→        if embedding:
+   292→   292→            # Actualizar dimension si es la primera vez que obtenemos un embedding valido
+   293→   293→            if self._embedding_dim is None:
+   294→   294→                self._embedding_dim = len(embedding)
+   295→   295→                logger.info(f"Dimension de embedding detectada dinamicamente: {self._embedding_dim}")
+   296→   296→
+   297→   297→            # Validar dimension del embedding antes de insertar
+   298→   298→            if len(embedding) != self._embedding_dim:
+   299→   299→                logger.warning(
+   300→   300→                    f"Embedding con dimension incorrecta ({len(embedding)} vs {self._embedding_dim}). "
+   301→   301→                    f"Actualizando dimension y recreando coleccion..."
+   302→   302→                )
+   303→   303→                self._handle_dimension_error(embedding)
+   304→   304→
+   305→   305→            # Intentar insertar con catch-all de errores de dimension
+   306→   306→            for attempt in range(self.MAX_RECREATE_RETRIES + 1):
+   307→   307→                try:
+   308→   308→                    self._collection.add(
+   309→   309→                        ids=[entry_id],
+   310→   310→                        embeddings=[embedding],
+   311→   311→                        documents=[text[:500]],
+   312→   312→                        metadatas=[meta]
+   313→   313→                    )
+   314→   314→                    return entry_id
+   315→   315→                except Exception as e:
+   316→   316→                    err_msg = str(e).lower()
+   317→   317→                    if "dimension" in err_msg or "dim" in err_msg:
+   318→   318→                        if attempt < self.MAX_RECREATE_RETRIES:
+   319→   319→                            logger.warning(
+   320→   320→                                f"Error de dimension al insertar (intento {attempt + 1}). "
+   321→   321→                                f"Recreando coleccion..."
+   322→   322→                            )
+   323→   323→                            self._handle_dimension_error(embedding)
+   324→   324→                        else:
+   325→   325→                            logger.error(
+   326→   326→                                f"No se pudo resolver error de dimension tras {attempt + 1} intentos. "
+   327→   327→                                f"Guardando sin embedding."
+   328→   328→                            )
+   329→   329→                            # Fallback: guardar sin embedding para no perder el dato
+   330→   330→                            meta["no_embedding"] = True
+   331→   331→                            try:
+   332→   332→                                self._collection.add(
+   333→   333→                                    ids=[entry_id],
+   334→   334→                                    documents=[text[:500]],
+   335→   335→                                    metadatas=[meta]
+   336→   336→                                )
+   337→   337→                            except Exception:
+   338→   338→                                pass
+   339→   339→                            return entry_id
+   340→   340→                    else:
+   341→   341→                        logger.debug(f"Error al insertar en ChromaDB (no dimension): {e}")
+   342→   342→                        return entry_id
+   343→   343→        else:
+   344→   344→            # Sin embedding, guardar solo con metadatos
+   345→   345→            meta["no_embedding"] = True
+   346→   346→            try:
+   347→   347→                self._collection.add(
+   348→   348→                    ids=[entry_id],
+   349→   349→                    documents=[text[:500]],
+   350→   350→                    metadatas=[meta]
+   351→   351→                )
+   352→   352→            except Exception as e:
+   353→   353→                logger.debug(f"Error agregando sin embedding a ChromaDB: {e}")
+   354→   354→
+   355→   355→        return entry_id
+   356→   356→
+   357→   357→    def _handle_dimension_error(self, sample_embedding=None):
+   358→   358→        """Maneja error de dimension recreando la coleccion.
+   359→   359→        v3: Actualiza _embedding_dim con la dimension real del embedding recibido.
+   360→   360→        """
+   361→   361→        new_dim = len(sample_embedding) if sample_embedding else self._embedding_dim
+   362→   362→        if new_dim:
+   363→   363→            self._embedding_dim = new_dim
+   364→   364→        logger.warning(
+   365→   365→            f"Recreando coleccion 'agent_memory' con dim={new_dim} "
+   366→   366→            f"(datos previos se pierden para evitar errores de dimension)"
+   367→   367→        )
+   368→   368→        try:
+   369→   369→            self._client.delete_collection(name="agent_memory")
+   370→   370→        except Exception:
+   371→   371→            pass
+   372→   372→        metadata = {"hnsw:space": "cosine"}
+   373→   373→        if new_dim:
+   374→   374→            metadata["hnsw:dim"] = new_dim
+   375→   375→        try:
+   376→   376→            self._collection = self._client.create_collection(name="agent_memory", metadata=metadata)
+   377→   377→            logger.info(f"Coleccion recreada exitosamente con dim={new_dim}")
+   378→   378→        except Exception as e:
+   379→   379→            logger.error(f"Error recreando coleccion: {e}")
+   380→   380→
+   381→   381→    def get_info(self):
+   382→   382→        """Retorna info de diagnostico de la coleccion."""
+   383→   383→        existing_dim = self._get_collection_dimension(self._collection)
+   384→   384→        return {
+   385→   385→            "document_count": self.count(),
+   386→   386→            "collection_dimension": existing_dim,
+   387→   387→            "model_dimension": self._embedding_dim,
+   388→   388→            "dimensions_match": existing_dim == self._embedding_dim if existing_dim and self._embedding_dim else "unknown",
+   389→   389→            "persist_dir": self.store_dir,
+   390→   390→        }
+   391→   391→
+   392→   392→    def search(self, query, limit=5, min_similarity=0.3):
+   393→   393→        """Busca entradas semanticamente similares con decaimiento temporal.
+   394→   394→        v3: Catch-all de errores de dimension con fallback a busqueda por texto.
+   395→   395→        """
+   396→   396→        query_embedding = ollama.get_embedding(query)
+   397→   397→        if not query_embedding:
+   398→   398→            return self._text_search(query, limit)
+   399→   399→
+   400→   400→        # Actualizar dimension si es la primera vez que obtenemos un embedding valido
+   401→   401→        if self._embedding_dim is None:
+   402→   402→            self._embedding_dim = len(query_embedding)
+   403→   403→            logger.info(f"Dimension de embedding detectada dinamicamente: {self._embedding_dim}")
+   404→   404→
+   405→   405→        # Validar dimension del embedding antes de buscar
+   406→   406→        if len(query_embedding) != self._embedding_dim:
+   407→   407→            logger.warning(
+   408→   408→                f"Dimension mismatch en search: {len(query_embedding)} vs {self._embedding_dim}. "
+   409→   409→                f"Actualizando dimension y recreando coleccion..."
+   410→   410→            )
+   411→   411→            try:
+   412→   412→                self._handle_dimension_error(query_embedding)
+   413→   413→            except Exception as e:
+   414→   414→                logger.warning(f"Error recreando coleccion: {e}")
+   415→   415→            return self._text_search(query, limit)
+   416→   416→
+   417→   417→        try:
+   418→   418→            # Buscar mas candidatos de los necesarios para re-rankear con decaimiento
+   419→   419→            n_candidates = min(limit * 3, 20)
+   420→   420→            results = self._collection.query(
+   421→   421→                query_embeddings=[query_embedding],
+   422→   422→                n_results=n_candidates,
+   423→   423→                include=["documents", "metadatas", "distances"]
+   424→   424→            )
+   425→   425→
+   426→   426→            if not results or not results["ids"] or not results["ids"][0]:
+   427→   427→                return self._text_search(query, limit)
+   428→   428→
+   429→   429→            scored = []
+   430→   430→            now = datetime.now()
+   431→   431→            for i, doc_id in enumerate(results["ids"][0]):
+   432→   432→                distance = results["distances"][0][i]
+   433→   433→                similarity = 1 - distance
+   434→   434→
+   435→   435→                # Aplicar decaimiento temporal
+   436→   436→                meta = results["metadatas"][0][i] if results["metadatas"] else {}
+   437→   437→                created_at = meta.get("created", "")
+   438→   438→                decay = self._compute_decay(created_at, now)
+   439→   439→
+   440→   440→                # Score final = similitud * decaimiento
+   441→   441→                final_score = similarity * decay
+   442→   442→
+   443→   443→                if final_score >= min_similarity * 0.5:  # Umbral mas bajo tras decaimiento
+   444→   444→                    scored.append({
+   445→   445→                        "id": doc_id,
+   446→   446→                        "text": results["documents"][0][i] if results["documents"] else "",
+   447→   447→                        "metadata": meta,
+   448→   448→                        "has_vector": True,
+   449→   449→                        "score": round(final_score, 3),
+   450→   450→                        "raw_similarity": round(similarity, 3),
+   451→   451→                        "decay": round(decay, 3),
+   452→   452→                    })
+   453→   453→
+   454→   454→            scored.sort(key=lambda x: x["score"], reverse=True)
+   455→   455→            return scored[:limit]
+   456→   456→
+   457→   457→        except Exception as e:
+   458→   458→            err_msg = str(e).lower()
+   459→   459→            if "dimension" in err_msg or "dim" in err_msg:
+   460→   460→                logger.warning(f"Dimension mismatch en query, recreando coleccion...")
+   461→   461→                try:
+   462→   462→                    self._handle_dimension_error(query_embedding)
+   463→   463→                except Exception:
+   464→   464→                    pass
+   465→   465→            else:
+   466→   466→                logger.warning(f"Error en busqueda ChromaDB: {e}")
+   467→   467→            return self._text_search(query, limit)
+   468→   468→
+   469→   469→    def _text_search(self, query, limit=5):
+   470→   470→        """Busqueda por texto cuando no hay embeddings."""
+   471→   471→        query_lower = query.lower()
+   472→   472→        query_words = [w for w in query_lower.split() if len(w) > 3]
+   473→   473→
+   474→   474→        if not query_words:
+   475→   475→            return []
+   476→   476→
+   477→   477→        try:
+   478→   478→            # ChromaDB no tiene text search nativo, obtener todos y filtrar
+   479→   479→            all_docs = self._collection.get(include=["documents", "metadatas"])
+   480→   480→            results = []
+   481→   481→
+   482→   482→            for i, doc in enumerate(all_docs["documents"]):
+   483→   483→                doc_lower = doc.lower()
+   484→   484→                matches = sum(1 for w in query_words if w in doc_lower)
+   485→   485→                if matches > 0:
+   486→   486→                    score = matches / max(len(query_words), 1)
+   487→   487→                    meta = all_docs["metadatas"][i] if all_docs["metadatas"] else {}
+   488→   488→                    results.append({
+   489→   489→                        "id": all_docs["ids"][i],
+   490→   490→                        "text": doc,
+   491→   491→                        "metadata": meta,
+   492→   492→                        "has_vector": not meta.get("no_embedding", False),
+   493→   493→                        "score": round(score, 3),
+   494→   494→                    })
+   495→   495→
+   496→   496→            results.sort(key=lambda x: x["score"], reverse=True)
+   497→   497→            return results[:limit]
+   498→   498→        except Exception as e:
+   499→   499→            logger.debug(f"Error en busqueda por texto ChromaDB: {e}")
+   500→   500→            return []
+   501→   501→
+   502→   502→    def count(self):
+   503→   503→        """Retorna el numero de documentos en el store."""
+   504→   504→        try:
+   505→   505→            return self._collection.count()
+   506→   506→        except Exception as e:
+   507→   507→            logger.warning(f"Error contando documentos ChromaDB: {e}")
+   508→   508→            return 0
+   509→   509→
+   510→   510→    def cleanup(self, max_entries=1000):
+   511→   511→        """Limpia entradas viejas si hay demasiadas."""
+   512→   512→        current = self.count()
+   513→   513→        if current <= max_entries:
+   514→   514→            return
+   515→   515→
+   516→   516→        try:
+   517→   517→            # Obtener todos los documentos con metadatos
+   518→   518→            all_docs = self._collection.get(include=["metadatas"])
+   519→   519→
+   520→   520→            # Ordenar por fecha de creacion
+   521→   521→            entries_with_dates = []
+   522→   522→            for i, entry_id in enumerate(all_docs["ids"]):
+   523→   523→                meta = all_docs["metadatas"][i] if all_docs["metadatas"] else {}
+   524→   524→                created = meta.get("created", "2000-01-01")
+   525→   525→                entries_with_dates.append((entry_id, created))
+   526→   526→
+   527→   527→            entries_with_dates.sort(key=lambda x: x[1])
+   528→   528→
+   529→   529→            # Eliminar los mas viejos
+   530→   530→            to_remove = entries_with_dates[:current - max_entries]
+   531→   531→            if to_remove:
+   532→   532→                ids_to_remove = [e[0] for e in to_remove]
+   533→   533→                self._collection.delete(ids=ids_to_remove)
+   534→   534→                logger.info(f"Cleanup: eliminados {len(ids_to_remove)} documentos viejos")
+   535→   535→        except Exception as e:
+   536→   536→            logger.warning(f"Error en cleanup: {e}")
+   537→   537→
+   538→   538→
+   539→   539→class SimpleVectorStore(VectorStore):
+   540→   540→    """
+   541→   541→    Vector store casero (fallback cuando ChromaDB no esta instalado).
+   542→   542→    Hereda de VectorStore y agrega decaimiento temporal + deduplicacion por texto.
+   543→   543→    Solo sobreescribe los metodos que difieren del base.
+   544→   544→    Elimina ~150 lineas de codigo duplicado vs la version anterior.
+   545→   545→    """
+   546→   546→
+   547→   547→    DECAY_HALF_LIFE_DAYS = 30
+   548→   548→
+   549→   549→    def _compute_decay(self, created_at):
+   550→   550→        """Computa el factor de decaimiento temporal (0.1 - 1.0)."""
+   551→   551→        if not created_at:
+   552→   552→            return 0.5
+   553→   553→        try:
+   554→   554→            created = datetime.fromisoformat(created_at)
+   555→   555→            days_old = (datetime.now() - created).total_seconds() / 86400
+   556→   556→            import math
+   557→   557→            decay = math.exp(-0.693 * days_old / self.DECAY_HALF_LIFE_DAYS)
+   558→   558→            return max(decay, 0.1)
+   559→   559→        except Exception as e:
+   560→   560→            logger.debug(f"Error computando decaimiento: {e}")
+   561→   561→            return 0.5
+   562→   562→
+   563→   563→    def add(self, text, metadata=None, entry_id=None, skip_embedding=False):
+   564→   564→        """Agrega un texto con deduplicacion basica por texto similar."""
+   565→   565→        if not entry_id:
+   566→   566→            entry_id = hashlib.md5(text.encode()).hexdigest()[:12]
+   567→   567→
+   568→   568→        # Verificar si ya existe
+   569→   569→        for entry in self.index:
+   570→   570→            if entry["id"] == entry_id:
+   571→   571→                return entry_id
+   572→   572→
+   573→   573→        # Deduplicacion basica por texto similar (100 chars lowercase)
+   574→   574→        text_lower = text[:100].lower()
+   575→   575→        for entry in self.index:
+   576→   576→            if entry["text"][:100].lower() == text_lower:
+   577→   577→                return entry["id"]
+   578→   578→
+   579→   579→        # Delegar al padre para el resto (guardar con/sin embedding)
+   580→   580→        return super().add(text, metadata=metadata, entry_id=entry_id, skip_embedding=skip_embedding)
+   581→   581→
+   582→   582→    def search(self, query, limit=5, min_similarity=0.3):
+   583→   583→        """Busca con decaimiento temporal. Sobreescribe para agregar decay al scoring."""
+   584→   584→        if not self.index:
+   585→   585→            return []
+   586→   586→
+   587→   587→        query_embedding = ollama.get_embedding(query)
+   588→   588→        if not query_embedding:
+   589→   589→            return self._text_search(query, limit)
+   590→   590→
+   591→   591→        candidates = self._pre_filter(query, max_candidates=50)
+   592→   592→        if not candidates:
+   593→   593→            candidates = self.index[:50]
+   594→   594→
+   595→   595→        candidate_ids = [c["id"] for c in candidates if c.get("has_vector")]
+   596→   596→        vectors = self._load_vectors_for(candidate_ids)
+   597→   597→
+   598→   598→        # Scoring vectorizado con decaimiento temporal
+   599→   599→        similarities = ollama.cosine_similarity_batch(query_embedding, vectors)
+   600→   600→
+   601→   601→        scored = []
+   602→   602→        for entry in candidates:
+   603→   603→            if not entry.get("has_vector") or entry["id"] not in similarities:
+   604→   604→                continue
+   605→   605→            raw_sim = similarities[entry["id"]]
+   606→   606→            decay = self._compute_decay(entry.get("created", ""))
+   607→   607→            final_score = raw_sim * decay
+   608→   608→
+   609→   609→            if final_score >= min_similarity * 0.5:
+   610→   610→                scored.append({
+   611→   611→                    **entry,
+   612→   612→                    "score": round(final_score, 3),
+   613→   613→                    "raw_similarity": round(raw_sim, 3),
+   614→   614→                    "decay": round(decay, 3),
+   615→   615→                })
+   616→   616→
+   617→   617→        scored.sort(key=lambda x: x["score"], reverse=True)
+   618→   618→        return scored[:limit]
+   619→   619→
+   620→   620→    def _text_search(self, query, limit=5):
+   621→   621→        """Busqueda por texto con decaimiento temporal."""
+   622→   622→        query_lower = query.lower()
+   623→   623→        query_words = [w for w in query_lower.split() if len(w) > 3]
+   624→   624→        results = []
+   625→   625→        for entry in self.index:
+   626→   626→            text_lower = entry["text"].lower()
+   627→   627→            matches = sum(1 for w in query_words if w in text_lower)
+   628→   628→            if matches > 0:
+   629→   629→                decay = self._compute_decay(entry.get("created", ""))
+   630→   630→                score = (matches / max(len(query_words), 1)) * decay
+   631→   631→                results.append({**entry, "score": round(score, 3)})
+   632→   632→        results.sort(key=lambda x: x["score"], reverse=True)
+   633→   633→        return results[:limit]
+   634→   634→
+   635→   635→
+   636→   636→# ============================================================
+   637→   637→# FACTORY: Retorna ChromaVectorStore o SimpleVectorStore
+   638→   638→# ============================================================
+   639→   639→def create_vector_store(store_dir=None):
+   640→   640→    """Factory que retorna el mejor vector store disponible."""
+   641→   641→    if CHROMADB_AVAILABLE:
+   642→   642→        try:
+   643→   643→            store = ChromaVectorStore(store_dir=store_dir)
+   644→   644→            logger.info("Usando ChromaDB como vector store")
+   645→   645→            return store
+   646→   646→        except Exception as e:
+   647→   647→            logger.warning(f"Error inicializando ChromaDB, fallback a casero: {e}")
+   648→   648→
+   649→   649→    logger.info("Usando SimpleVectorStore (VectorStore + decay + dedup) como fallback")
+   650→   650→    return SimpleVectorStore(store_dir=store_dir)
+   651→   651→
