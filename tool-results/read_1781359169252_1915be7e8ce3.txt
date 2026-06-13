@@ -1,0 +1,2002 @@
+     1→"""
+     2→=============================================================
+     3→AGENTE v21 - Motor ReAct
+     4→=============================================================
+     5→Piensa -> Actua -> Observa -> Piensa de nuevo -> Repite.
+     6→v21: + Schema selection tambien en JSON fallback (antes solo tool_calling)
+     7→     + _task_needs_tools ampliado con mas patrones + fallback inteligente
+     8→     + Dynamic schema refresh cuando el agente cambia de tema
+     9→     + Tool result truncation inteligente por tipo de herramienta
+    10→     + Iteration budget dinamico (tareas simples = menos iteraciones)
+    11→     + Observability: metricas de tool selection y decisiones agenticas
+    12→v20: + Dynamic semantic tool selection (42->12 schemas)
+    13→     + tool_choice="required" en primera iteracion
+    14→     + JSON fallback mode mejorado
+    15→     + MAX_REACT_ITERATIONS=15, MAX_TOTAL_TOOL_CALLS=30
+    16→v19: + Direct Intent Parser
+    17→v18: + Model Router, Orchestrator delegation, Scaffolding/Deploy tools
+    18→v14.3: Streaming REAL token-a-token, metacognicion integrada,
+    19→       optimizacion de contexto y llamadas API.
+    20→       Usa TripleMemory como unica fuente de historial.
+    21→=============================================================
+    22→"""
+    23→
+    24→import os
+    25→import re
+    26→import json
+    27→import logging
+    28→from datetime import datetime
+    29→
+    30→from config import (
+    31→    REPOS_DIR, MAX_REACT_ITERATIONS, MAX_CONVERSATION_MEMORY, logger,
+    32→    USER_PROFILE_FILE, UNLIMITED_TOOLS, MODEL_CACHE_TTL_SECONDS
+    33→)
+    34→from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS
+    35→from memory.triple_memory import TripleMemory, learning
+    36→from llm import ollama
+    37→from agent.schemas import SYSTEM_PROMPT, JSON_TOOLS_PROMPT, SYSTEM_PROMPT_COMPACT, JSON_TOOLS_PROMPT_COMPACT
+    38→from agent.metacognition import Metacognition
+    39→from utils.metrics import get_metrics
+    40→
+    41→# Importar orquestador con fallback graceful
+    42→try:
+    43→    from agent.orchestrator import Orchestrator, get_orchestrator
+    44→    ORCHESTRATOR_AVAILABLE = True
+    45→except Exception:
+    46→    ORCHESTRATOR_AVAILABLE = False
+    47→
+    48→# Importar enriquecimiento de skills con fallback graceful
+    49→try:
+    50→    from tools.skill_loader import enrich_prompt_with_skills
+    51→    SKILLS_ENRICHMENT_AVAILABLE = True
+    52→except Exception:
+    53→    SKILLS_ENRICHMENT_AVAILABLE = False
+    54→
+    55→# Importar model router con fallback graceful
+    56→try:
+    57→    from tools.model_router import get_router
+    58→    MODEL_ROUTER_AVAILABLE = True
+    59→except Exception:
+    60→    MODEL_ROUTER_AVAILABLE = False
+    61→
+    62→# Importar Direct Intent Parser con fallback graceful
+    63→try:
+    64→    from tools.direct_intent import get_intent_parser, parse_direct_intent
+    65→    DIRECT_INTENT_AVAILABLE = True
+    66→except Exception:
+    67→    DIRECT_INTENT_AVAILABLE = False
+    68→
+    69→
+    70→class ReactAgent:
+    71→    """Motor ReAct: Piensa -> Actua -> Observa -> Piensa de nuevo."""
+    72→
+    73→    # Rate limiting: max llamadas a la misma herramienta por conversacion
+    74→    MAX_SAME_TOOL_CALLS = 8  # v20: subido de 5 a 8
+    75→    MAX_TOTAL_TOOL_CALLS = 30  # v20: subido de 12 a 30 para tareas complejas
+    76→
+    77→    # v20: Numero maximo de herramientas a enviar al modelo.
+    78→    # Modelos locales como Qwen3/Llama degradan precision con 30+ schemas.
+    79→    # Seleccionamos las top-N mas relevantes semanticamente.
+    80→    MAX_TOOLS_PER_REQUEST = 12
+    81→
+    82→    # v20: Herramientas que SIEMPRE se incluyen (core, usadas en casi todo flujo)
+    83→    _CORE_TOOLS = {
+    84→        "ejecutar_comando", "leer_archivo", "escribir_archivo",
+    85→        "listar_archivos", "buscar_web", "diagnosticar_error",
+    86→    }
+    87→
+    88→    # v21: Truncation limits por tipo de herramienta.
+    89→    # Herramientas que devuelven datos estructurados (SQL, JSON) necesitan
+    90→    # mas contexto que comandos simples. El modelo necesita ver suficiente
+    91→    # resultado para tomar decisiones informadas.
+    92→    _TOOL_RESULT_LIMITS = {
+    93→        "ejecutar_comando": 3000,
+    94→        "leer_archivo": 4000,
+    95→        "listar_archivos": 2000,
+    96→        "buscar_web": 2500,
+    97→        "buscar_web_profundo": 3000,
+    98→        "leer_web": 4000,
+    99→        "analizar_proyecto": 4000,
+   100→        "base_de_datos": 4000,
+   101→        "diagnosticar_error": 3000,
+   102→        "buscar_en_archivos": 3000,
+   103→        "git_operacion": 2000,
+   104→        "ejecutar_codigo": 3000,
+   105→        "ejecutar_tests": 3000,
+   106→        "navegador_web": 3000,
+   107→        "leer_web_api": 4000,
+   108→        "buscar_web_api": 2500,
+   109→        "default": 1500,
+   110→    }
+   111→
+   112→    # v21: Presupuesto de iteraciones por tipo de tarea.
+   113→    # Tareas simples (saludos, preguntas) no necesitan 15 iteraciones.
+   114→    _ITERATION_BUDGETS = {
+   115→        "simple": 3,       # Saludos, preguntas simples, charla
+   116→        "moderate": 7,     # Buscar info, leer archivo, abrir app
+   117→        "complex": 12,     # Crear proyecto, editar multiples archivos
+   118→        "full": 15,        # Construir app completa, deploy, multi-step
+   119→    }
+   120→
+   121→    # v20: Mapeo de keywords del usuario -> herramientas relevantes
+   122→    # Esto permite seleccion semantica sin embeddings (rapido, offline)
+   123→    _TOOL_KEYWORDS = {
+   124→        "ejecutar_comando": ["comando", "terminal", "consola", "ejecutar", "correr", "run", "bash", "shell", "cmd"],
+   125→        "abrir_aplicacion": ["abrir", "app", "aplicacion", "programa", "chrome", "word", "whatsapp", "vscode"],
+   126→        "abrir_url": ["url", "pagina web", "sitio web", "navegador", "youtube", "google", "netflix", "abrir sitio", "abrir pagina"],
+   127→        "buscar_youtube": ["youtube", "video", "buscar video"],
+   128→        "generar_codigo": ["generar codigo", "crear codigo", "escribir codigo", "codigo", "programa", "script", "funcion"],
+   129→        "leer_archivo": ["leer", "ver archivo", "contenido", "mostrar archivo", "cat"],
+   130→        "escribir_archivo": ["escribir", "crear archivo", "guardar", "nuevo archivo"],
+   131→        "listar_archivos": ["listar", "archivos", "directorio", "carpeta", "que hay", "que tiene", "ls", "dir"],
+   132→        "analizar_proyecto": ["analizar", "proyecto", "estructura", "audit", "auditoria", "revisar"],
+   133→        "clonar_repositorio": ["clonar", "repo", "repositorio", "github", "git clone"],
+   134→        "instalar_dependencias": ["instalar", "dependencias", "npm install", "pip install", "deps"],
+   135→        "buscar_en_archivos": ["buscar en", "grep", "encontrar texto", "patron", "search"],
+   136→        "buscar_web": ["buscar", "internet", "web", "google", "informacion", "que es", "como se"],
+   137→        "leer_web": ["leer pagina", "leer url", "leer web", "contenido web", "scraping"],
+   138→        "buscar_web_profundo": ["profundizar", "mas info", "detallado", "busqueda profunda"],
+   139→        "ejecutar_codigo": ["ejecutar codigo", "correr codigo", "python", "javascript", "typescript", "bash"],
+   140→        "ejecutar_archivo": ["ejecutar archivo", "correr archivo", "run file"],
+   141→        "ejecutar_tests": ["test", "tests", "pytest", "jest", "vitest", "unit test"],
+   142→        "buscar_reemplazar": ["reemplazar", "editar", "modificar", "cambiar", "buscar y reemplazar"],
+   143→        "editar_lineas": ["editar linea", "modificar linea", "cambiar linea"],
+   144→        "insertar_en_linea": ["insertar", "agregar linea", "añadir"],
+   145→        "git_operacion": ["git", "commit", "push", "pull", "branch", "status", "diff", "stash"],
+   146→        "base_de_datos": ["base de datos", "sql", "sqlite", "postgres", "mysql", "query", "tabla", "db"],
+   147→        "diagnosticar_error": ["error", "fallo", "fallo", "bug", "problema", "no funciona", "diagnosticar"],
+   148→        "planificar_tarea": ["planificar", "plan", "tarea", "descomponer", "subtarea", "paso a paso"],
+   149→        "crear_proyecto": ["crear proyecto", "scaffold", "plantilla", "nuevo proyecto", "app completa"],
+   150→        "desplegar_proyecto": ["desplegar", "deploy", "vercel", "docker", "produccion", "levantar"],
+   151→        "opciones_despliegue": ["opciones deploy", "como desplegar", "donde desplegar"],
+   152→        "navegador_web": ["navegador", "browser", "automatizar web", "login", "formulario", "screenshot web"],
+   153→        "gestionar_entorno": ["entorno", "venv", "virtualenv", "version node", "npm", "pip"],
+   154→        "crear_nota": ["nota", "apuntar", "recordar esto", "anotar"],
+   155→        "ver_notas": ["ver notas", "mis notas", "notas guardadas"],
+   156→        # Skills
+   157→        "generar_imagen": ["imagen", "generar imagen", "crear imagen", "dibujar", "foto", "picture"],
+   158→        "buscar_imagen": ["buscar imagen", "encontrar imagen", "foto de"],
+   159→        "consultar_llm": ["llm", "ia externa", "preguntar a ia", "chat gpt"],
+   160→        "crear_documento": ["documento", "word", "docx", "crear doc"],
+   161→        "crear_pdf": ["pdf", "crear pdf", "generar pdf"],
+   162→        "crear_presentacion": ["presentacion", "pptx", "powerpoint", "diapositivas"],
+   163→        "crear_hoja_calculo": ["excel", "hoja calculo", "xlsx", "spreadsheet"],
+   164→        "crear_grafico": ["grafico", "chart", "diagrama", "visualizar datos"],
+   165→        "texto_a_voz": ["voz", "hablar", "audio", "tts", "leer en voz"],
+   166→        "voz_a_texto": ["transcribir", "audio a texto", "asr", "reconocimiento voz"],
+   167→        "analizar_imagen_api": ["analizar imagen", "que hay en la imagen", "describir imagen"],
+   168→        "editar_imagen": ["editar imagen", "modificar imagen", "cambiar imagen"],
+   169→        "buscar_web_api": ["buscar api", "web search api"],
+   170→        "leer_web_api": ["leer web api", "web reader api"],
+   171→        "ejecutar_en_contenedor": ["docker", "contenedor", "sandbox", "aislado"],
+   172→        "info_modelos": ["modelos", "que modelos", "ia disponible", "gpu"],
+   173→        "configurar_perfil": ["perfil", "configurar", "personalizar", "mi nombre"],
+   174→        "registrar_feedback": ["feedback", "calificacion", "rating", "opinion"],
+   175→        "stats_feedback": ["estadisticas", "stats feedback", "como voy"],
+   176→        "listar_plantillas": ["plantillas", "templates", "que plantillas"],
+   177→        "detener_despliegue": ["detener", "parar", "stop deploy"],
+   178→        # API Integration
+   179→        "api_keys": ["api key", "credencial", "token", "api key", "oauth", "contrasena api"],
+   180→        "http_request": ["http request", "api call", "rest api", "endpoint", "fetch", "curl", "wget", "peticion http"],
+   181→        # Scheduler & Monitoring
+   182→        "tarea_programada": ["tarea programada", "cron", "schedule", "periodico", "cada hora", "cada minuto", "automatizar tarea"],
+   183→        "vigilar_archivo": ["vigilar", "watch", "monitorear", "detectar cambios", "archivo cambio"],
+   184→        "verificar_salud": ["salud", "health", "estado servicio", "ollama ok", "disco espacio", "memoria"],
+   185→    }
+   186→
+   187→    # Palabras clave para detectar tareas complejas que se benefician de planificacion
+   188→    _COMPLEX_TASK_KEYWORDS = [
+   189→        "construir", "crear app", "desarrollar", "automatizar", "implementar",
+   190→        "build", "create app", "desarrolla", "hazme una app", "proyecto"
+   191→    ]
+   192→
+   193→    # v20->v21: Patrones que indican que la tarea CLARAMENTE necesita herramientas
+   194→    # (no es solo charla). Usado para forzar tool_choice="required" en iteracion 0.
+   195→    # v21: Ampliado con 8 patrones adicionales para cubrir mas casos reales.
+   196→    _TOOL_NECESSARY_PATTERNS = [
+   197→        r'\b(clonar|repo|repositorio|github)\b',
+   198→        r'\b(listar|ver|mostrar|leer)\s*(los\s*)?(archivos|directorio|carpeta|proyecto)\b',
+   199→        r'\b(audit|auditar|revisar|analizar)\b',
+   200→        r'\b(ejecutar|correr|instalar|crear|generar|escribir|editar|modificar)\b',
+   201→        r'\b(buscar|encontrar|buscar_en)\b',
+   202→        r'\b(git|commit|push|pull|branch)\b',
+   203→        r'\b(desplegar|deploy)\b',
+   204→        r'\b(docker|contenedor)\b',
+   205→        r'\b(codigo|script|app|aplicacion|proyecto)\b',
+   206→        r'\b(test|pytest|jest)\b',
+   207→        r'\b(base de datos|sql|query)\b',
+   208→        r'\b(que hay en|que tiene|lista|archivos)\b',
+   209→        # v21: Patrones adicionales
+   210→        r'\b(ayudame a|necesito que|puedes)\s*(crear|hacer|construir|instalar|generar|escribir|abrir|buscar)\b',
+   211→        r'\b(como\s+(instalar|usar|hacer|crear|configurar|ejecutar))\b',
+   212→        r'\b(archivo|fichero|directorio|carpeta|ruta)\b',
+   213→        r'\b(terminal|consola|comando|bash|shell|cmd)\b',
+   214→        r'\b(navegador|browser|web|pagina|sitio|url)\b',
+   215→        r'\b(imagen|foto|grafico|diagrama|chart)\b',
+   216→        r'\b(documento|pdf|excel|word|presentacion)\b',
+   217→        r'\b(automatizar|scraping|bot|crawler)\b',
+   218→    ]
+   219→
+   220→    # v21: Patrones que indican que la tarea es SIMPLE (saludo, charla, pregunta general)
+   221→    # y NO necesita herramientas. Usado para iteration budget dinamico.
+   222→    _SIMPLE_TASK_PATTERNS = [
+   223→        r'^(hola|hey|buenos dias|buenas|que tal|saludos|hi|hello)\b',
+   224→        r'^(gracias|thank|ok|vale|bien|perfecto|genial)\b',
+   225→        r'^(si|no|tal vez|puede ser)\b',
+   226→        r'\b(que eres|quien eres|como te llamas|como funciona)\b',
+   227→        r'\b(que puedes hacer|que sabes hacer|ayuda)\s*[?？]?\s*$',
+   228→    ]
+   229→
+   230→    def __init__(self, memory=None):
+   231→        self.memory = memory or TripleMemory()
+   232→        self.thinking_log = []
+   233→        self.supports_tool_calling = None
+   234→        self.metacognition = Metacognition()
+   235→        self._models_cache = None  # Cache de modelos para no llamar API cada vez
+   236→        self._models_cache_time = 0  # v20: Timestamp del ultimo refresh de modelos
+   237→        self._tool_call_counts = {}  # Rate limiting por herramienta
+   238→        self._total_tool_calls = 0   # Total de tool calls en esta conversacion
+   239→        self.orchestrator = get_orchestrator() if ORCHESTRATOR_AVAILABLE else None
+   240→        self.intent_parser = get_intent_parser() if DIRECT_INTENT_AVAILABLE else None
+   241→        # v22: Model router para auto-routing multi-modelo
+   242→        self._model_router = get_router() if MODEL_ROUTER_AVAILABLE else None
+   243→        # v22: Modelo seleccionado por routing para la request actual
+   244→        self._routed_model = None
+   245→        self._routing_info = None
+   246→
+   247→    # ----------------------------------------------------------
+   248→    # DIRECT INTENT PARSER (v19)
+   249→    # Ejecuta herramientas directamente sin pasar por el LLM
+   250→    # cuando la intención del usuario es clara.
+   251→    # ----------------------------------------------------------
+   252→    def _try_direct_intent(self, user_message: str):
+   253→        """
+   254→        Intenta ejecutar la herramienta directamente basándose en
+   255→        pattern matching del mensaje del usuario.
+   256→
+   257→        Returns:
+   258→            (response, thinking_log) si la intención fue ejecutada directamente
+   259→            None si no se detectó intención clara (dejar al LLM decidir)
+   260→        """
+   261→        if not self.intent_parser:
+   262→            return None
+   263→
+   264→        result = parse_direct_intent(user_message)
+   265→        if result is None:
+   266→            return None
+   267→
+   268→        tool_name, params, confidence = result
+   269→
+   270→        # Solo ejecutar directamente si la confianza es alta
+   271→        if confidence < 0.80:
+   272→            self._log(f"Direct intent detectado pero confianza baja ({confidence}): {tool_name}", "intent")
+   273→            return None
+   274→
+   275→        # No ejecutar directamente herramientas que tienen side effects significativos
+   276→        # a menos que la confianza sea muy alta
+   277→        high_risk_tools = {"ejecutar_comando", "escribir_archivo", "matar_proceso", "git_operacion"}
+   278→        if tool_name in high_risk_tools and confidence < 0.95:
+   279→            self._log(f"Direct intent: herramienta de riesgo ({tool_name}), requiere confianza 0.95+, tiene {confidence}", "intent")
+   280→            return None
+   281→
+   282→        self._log(f"Direct intent detectado: {tool_name}({params}) [confianza={confidence}]", "intent")
+   283→
+   284→        # Ejecutar la herramienta directamente
+   285→        try:
+   286→            tool_fn = TOOL_FUNCTIONS.get(tool_name)
+   287→            if not tool_fn:
+   288→                self._log(f"Direct intent: herramienta no encontrada: {tool_name}", "warning")
+   289→                return None
+   290→
+   291→            # Filtrar params vacíos o None
+   292→            clean_params = {k: v for k, v in params.items() if v is not None and v != ""}
+   293→            if not clean_params:
+   294→                # La herramienta necesita parámetros pero no los pudimos extraer
+   295→                self._log(f"Direct intent: parámetros vacíos para {tool_name}, dejando al LLM", "intent")
+   296→                return None
+   297→
+   298→            tool_result = tool_fn(**clean_params)
+   299→
+   300→            # Formatear respuesta amigable
+   301→            self._log(f"Direct intent ejecutado exitosamente: {tool_name}", "success")
+   302→            self._save_interaction(user_message, tool_result)
+   303→
+   304→            return tool_result, self.thinking_log
+   305→
+   306→        except Exception as e:
+   307→            self._log(f"Direct intent falló: {tool_name} -> {e}", "error")
+   308→            # No retornar error, dejar que el LLM lo intente
+   309→            return None
+   310→
+   311→    def _try_direct_intent_stream(self, user_message: str):
+   312→        """
+   313→        Versión streaming del Direct Intent Parser.
+   314→        Yields eventos SSE para la UI.
+   315→
+   316→        Returns:
+   317→            Generator de eventos SSE si la intención fue ejecutada directamente
+   318→            None si no se detectó intención clara
+   319→        """
+   320→        if not self.intent_parser:
+   321→            return None
+   322→
+   323→        result = parse_direct_intent(user_message)
+   324→        if result is None:
+   325→            return None
+   326→
+   327→        tool_name, params, confidence = result
+   328→
+   329→        # Solo ejecutar directamente si la confianza es alta
+   330→        if confidence < 0.80:
+   331→            self._log(f"Direct intent detectado pero confianza baja ({confidence}): {tool_name}", "intent")
+   332→            return None
+   333→
+   334→        # No ejecutar directamente herramientas de riesgo sin confianza muy alta
+   335→        high_risk_tools = {"ejecutar_comando", "escribir_archivo", "matar_proceso", "git_operacion"}
+   336→        if tool_name in high_risk_tools and confidence < 0.95:
+   337→            self._log(f"Direct intent: herramienta de riesgo ({tool_name}), requiere confianza 0.95+, tiene {confidence}", "intent")
+   338→            return None
+   339→
+   340→        self._log(f"Direct intent detectado (stream): {tool_name}({params}) [confianza={confidence}]", "intent")
+   341→
+   342→        # Generar eventos de streaming
+   343→        def _stream_direct():
+   344→            # Evento: pensamiento
+   345→            yield {
+   346→                "type": "thinking",
+   347→                "data": {
+   348→                    "phase": "direct_intent",
+   349→                    "message": f"Ejecutando directamente: {tool_name}",
+   350→                    "iteration": 1,
+   351→                    "confidence": confidence,
+   352→                }
+   353→            }
+   354→
+   355→            # Evento: tool start
+   356→            yield {
+   357→                "type": "tool_start",
+   358→                "data": {
+   359→                    "name": tool_name,
+   360→                    "params": params,
+   361→                }
+   362→            }
+   363→
+   364→            # Ejecutar la herramienta
+   365→            try:
+   366→                tool_fn = TOOL_FUNCTIONS.get(tool_name)
+   367→                if not tool_fn:
+   368→                    self._log(f"Direct intent: herramienta no encontrada: {tool_name}", "warning")
+   369→                    return
+   370→
+   371→                clean_params = {k: v for k, v in params.items() if v is not None and v != ""}
+   372→                if not clean_params:
+   373→                    self._log(f"Direct intent: parámetros vacíos para {tool_name}, dejando al LLM", "intent")
+   374→                    return
+   375→
+   376→                tool_result = tool_fn(**clean_params)
+   377→
+   378→                # Evento: tool result
+   379→                yield {
+   380→                    "type": "tool_result",
+   381→                    "data": {
+   382→                        "tool": {"name": tool_name},
+   383→                        "result": tool_result[:500] if tool_result else "(sin resultado)",
+   384→                    }
+   385→                }
+   386→
+   387→                self._log(f"Direct intent ejecutado exitosamente (stream): {tool_name}", "success")
+   388→
+   389→                # Evento: respuesta final
+   390→                yield {
+   391→                    "type": "text",
+   392→                    "data": tool_result if tool_result else "(sin resultado)",
+   393→                }
+   394→
+   395→                # Guardar interacción
+   396→                self._save_interaction(user_message, tool_result or "(sin resultado)")
+   397→
+   398→                # Evento: done
+   399→                yield {
+   400→                    "type": "done",
+   401→                    "data": tool_result if tool_result else "(sin resultado)",
+   402→                    "thinking_log": self.thinking_log,
+   403→                    "meta_status": self.metacognition.get_status() if hasattr(self, 'metacognition') else {},
+   404→                }
+   405→
+   406→            except Exception as e:
+   407→                self._log(f"Direct intent falló (stream): {tool_name} -> {e}", "error")
+   408→                yield {
+   409→                    "type": "error",
+   410→                    "data": f"Error ejecutando {tool_name}: {e}",
+   411→                }
+   412→
+   413→        return _stream_direct()
+   414→
+   415→    def _log(self, message, category="info"):
+   416→        timestamp = datetime.now().strftime("%H:%M:%S")
+   417→        self.thinking_log.append(f"[{timestamp}] [{category.upper()}] {message}")
+   418→
+   419→    # ----------------------------------------------------------
+   420→    # v22: AUTO-ROUTING MULTI-MODELO
+   421→    # ----------------------------------------------------------
+   422→    def _route_model_for_request(self, user_message: str, tool_name: str = "") -> None:
+   423→        """v22: Determina el modelo optimo para la request actual via ModelRouter.
+   424→
+   425→        Si el router esta disponible y detecta que la tarea se beneficiaria
+   426→        de un modelo diferente al configurado por defecto, establece
+   427→        self._routed_model y self._routing_info.
+   428→
+   429→        El modelo routeado se pasa como model_override a ollama.generate()
+   430→        en las llamadas LLM del ciclo ReAct.
+   431→
+   432→        Args:
+   433→            user_message: Mensaje del usuario
+   434→            tool_name: Nombre de la herramienta siendo usada (opcional)
+   435→        """
+   436→        if not self._model_router:
+   437→            self._routed_model = None
+   438→            self._routing_info = None
+   439→            return
+   440→
+   441→        try:
+   442→            routing = self._model_router.route_request(user_message, tool_name)
+   443→            routed_model = routing.get("model", "")
+   444→            reason = routing.get("reason", "")
+   445→            task_type = routing.get("task_type", "")
+   446→            complexity = routing.get("estimated_complexity", "")
+   447→
+   448→            # Solo sobreescribir si el modelo routeado es diferente al actual
+   449→            current_model = ollama.model if hasattr(ollama, 'model') else None
+   450→            if routed_model and routed_model != current_model:
+   451→                self._routed_model = routed_model
+   452→                self._routing_info = routing
+   453→                self._log(
+   454→                    f"Model routing: {current_model} -> {routed_model} "
+   455→                    f"(tipo={task_type}, complejidad={complexity}, razon={reason})",
+   456→                    "routing"
+   457→                )
+   458→            else:
+   459→                self._routed_model = None
+   460→                self._routing_info = None
+   461→                self._log(
+   462→                    f"Model routing: manteniendo {current_model} "
+   463→                    f"(tipo={task_type}, razon={reason})",
+   464→                    "routing"
+   465→                )
+   466→        except Exception as e:
+   467→            self._log(f"Model routing falló (usando modelo por defecto): {e}", "warning")
+   468→            self._routed_model = None
+   469→            self._routing_info = None
+   470→
+   471→    # ----------------------------------------------------------
+   472→    # v21: CLASIFICACION DINAMICA DE COMPLEJIDAD
+   473→    # ----------------------------------------------------------
+   474→    def _classify_task_complexity(self, user_message: str) -> str:
+   475→        """
+   476→        v21: Clasifica la complejidad de la tarea para ajustar el presupuesto
+   477→        de iteraciones dinamicamente. Tareas simples no necesitan 15 iteraciones.
+   478→        
+   479→        Returns:
+   480→            "simple" | "moderate" | "complex" | "full"
+   481→        """
+   482→        msg_lower = user_message.lower().strip()
+   483→        
+   484→        # 1. Tareas simples: saludos, confirmaciones, preguntas sobre el agente
+   485→        for pattern in self._SIMPLE_TASK_PATTERNS:
+   486→            if re.search(pattern, msg_lower, re.IGNORECASE):
+   487→                self._log(f"Clasificacion de tarea: SIMPLE (patron: {pattern[:30]}...)", "planning")
+   488→                return "simple"
+   489→        
+   490→        # 2. Tareas complejas: construir, crear app, deploy, multi-step
+   491→        if self._is_complex_task(user_message):
+   492→            self._log("Clasificacion de tarea: FULL (tarea compleja)", "planning")
+   493→            return "full"
+   494→        
+   495→        # 3. Tareas que claramente necesitan herramientas pero no son complejas
+   496→        if self._task_needs_tools(user_message):
+   497→            # Verificar si es multi-step (mas de 2 patrones match)
+   498→            pattern_count = sum(
+   499→                1 for p in self._TOOL_NECESSARY_PATTERNS
+   500→                if re.search(p, msg_lower, re.IGNORECASE)
+   501→            )
+   502→            if pattern_count >= 3:
+   503→                self._log(f"Clasificacion de tarea: COMPLEX ({pattern_count} patrones)", "planning")
+   504→                return "complex"
+   505→            self._log(f"Clasificacion de tarea: MODERATE ({pattern_count} patrones)", "planning")
+   506→            return "moderate"
+   507→        
+   508→        # 4. Default: moderado (preguntas que pueden necesitar busqueda)
+   509→        self._log("Clasificacion de tarea: MODERATE (default)", "planning")
+   510→        return "moderate"
+   511→
+   512→    # ----------------------------------------------------------
+   513→    # v21: TRUNCATION INTELIGENTE DE RESULTADOS
+   514→    # ----------------------------------------------------------
+   515→    def _truncate_tool_result(self, tool_name: str, result: str) -> str:
+   516→        """
+   517→        v21: Trunca el resultado de una herramienta de forma inteligente.
+   518→        
+   519→        Antes se truncaba todo a ~1500 chars, lo que cortaba resultados
+   520→        criticos de SQL, archivos, etc. Ahora cada tipo de herramienta
+   521→        tiene su limite apropiado.
+   522→        
+   523→        Intenta cortar en lineas completas para no romper JSON o codigo.
+   524→        """
+   525→        limit = self._TOOL_RESULT_LIMITS.get(tool_name, self._TOOL_RESULT_LIMITS["default"])
+   526→        
+   527→        if len(result) <= limit:
+   528→            return result
+   529→        
+   530→        # Cortar en el limite, pero buscar un salto de linea cercano
+   531→        truncated = result[:limit]
+   532→        
+   533→        # Buscar ultimo salto de linea para no cortar a medio codigo/JSON
+   534→        last_newline = truncated.rfind('\n')
+   535→        if last_newline > limit * 0.8:  # Solo si el salto esta cerca del final
+   536→            truncated = truncated[:last_newline]
+   537→        
+   538→        truncated += f"\n\n... [resultado truncado: {len(result) - len(truncated)} chars omitidos. Total: {len(result)} chars]"
+   539→        return truncated
+   540→
+   541→    # ----------------------------------------------------------
+   542→    # RUN SIN STREAMING (original, para compatibilidad)
+   543→    # ----------------------------------------------------------
+   544→    def run(self, user_message):
+   545→        """
+   546→        Bucle ReAct principal. Retorna (respuesta, thinking_log).
+   547→        """
+   548→        self.thinking_log = []
+   549→        self.metacognition.reset()
+   550→        self._tool_call_counts = {}
+   551→        self._total_tool_calls = 0
+   552→        self._current_user_message = user_message  # v20: para _task_needs_tools()
+   553→        self._log(f"Mensaje del usuario: {user_message}", "input")
+   554→
+   555→        # *** NUEVO v19: Direct Intent Parser ***
+   556→        # Intentar ejecutar directamente si la intención es clara
+   557→        # Esto evita depender del LLM para generar JSON válido
+   558→        direct_result = self._try_direct_intent(user_message)
+   559→        if direct_result is not None:
+   560→            return direct_result
+   561→
+   562→        if self.supports_tool_calling is None:
+   563→            self.supports_tool_calling = self._detect_tool_calling_support()
+   564→            self._log(
+   565→                f"Tool calling nativo: {'SI' if self.supports_tool_calling else 'NO (usando JSON fallback)'}",
+   566→                "info"
+   567→            )
+   568→
+   569→        # v20->v21: Seleccion semantica de herramientas relevantes
+   570→        # v21 FIX: Ahora TAMBIEN filtra en modo JSON fallback.
+   571→        # ANTES de _build_messages() para que el prompt de tools tambien se filtre.
+   572→        selected_schemas = self._select_relevant_schemas(user_message)
+   573→        self._selected_tool_names = set(  # v21: guardar para dynamic refresh
+   574→            s.get("function", {}).get("name", "") for s in selected_schemas
+   575→        )
+   576→
+   577→        # v21: Iteration budget dinamico segun complejidad de la tarea
+   578→        task_complexity = self._classify_task_complexity(user_message)
+   579→        iteration_budget = self._ITERATION_BUDGETS.get(task_complexity, MAX_REACT_ITERATIONS)
+   580→        self._log(f"Budget de iteraciones: {iteration_budget} (complejidad: {task_complexity})", "planning")
+   581→
+   582→        # v22: Auto-routing multi-modelo - determinar modelo optimo para esta request
+   583→        self._route_model_for_request(user_message)
+   584→
+   585→        # v21: _build_messages() ahora usa _selected_tool_names para filtrar
+   586→        # el JSON_TOOLS_PROMPT en modo fallback
+   587→        messages = self._build_messages(user_message)
+   588→
+   589→        for iteration in range(iteration_budget):
+   590→            self._log(f"--- Iteracion {iteration + 1}/{iteration_budget} ---", "react")
+   591→
+   592→            # v21: Dynamic schema refresh - si las herramientas usadas cambian
+   593→            # de tema respecto a la seleccion inicial, re-seleccionar schemas
+   594→            if iteration > 0 and iteration % 3 == 0:
+   595→                self._maybe_refresh_schemas(user_message, messages, iteration)
+   596→
+   597→            # *** FIX: Metacognicion ANTES de decidir la accion ***
+   598→            # Antes: se evaluaba DESPUES de actuar (paso 4→5→2)
+   599→            # Ahora: se evalua ANTES (paso 2→3→4) para mejor toma de decisiones
+   600→            meta_prompt = self.metacognition.get_metacognitive_prompt(iteration)
+   601→            if meta_prompt:
+   602→                self._log("Alerta metacognitiva inyectada ANTES de accion", "evaluation")
+   603→                self._inject_metacognitive_prompt(messages, meta_prompt)
+   604→
+   605→            # Verificar si metacognicion indica que necesitamos mas contexto
+   606→            if self.metacognition.confidence < 0.3 and iteration > 0:
+   607→                extra_context = self.memory.get_context_for(user_message)
+   608→                if extra_context and not any(extra_context[:50] in str(m.get("content", "")) for m in messages[-3:]):
+   609→                    self._log("Metacognicion: inyectando contexto adicional de memoria", "evaluation")
+   610→                    # No re-agregar contexto que ya esta en mensajes
+   611→                    context_added = False
+   612→                    for m in messages[-3:]:
+   613→                        if "CONTEXTO DE MEMORIA" in m.get("content", ""):
+   614→                            context_added = True
+   615→                            break
+   616→                    if not context_added:
+   617→                        messages.append({
+   618→                            "role": "user",
+   619→                            "content": f"[Contexto adicional relevante]:\n{extra_context[:500]}\n\nUsa esta informacion si es relevante."
+   620→                        })
+   621→            
+   622→            # *** NUEVO: AUTO-BUSQUEDA WEB cuando la confianza de CONOCIMIENTO baja ***
+   623→            # v20 FIX: Antes se usaba confidence general (baja con errores de ejecucion).
+   624→            # Ahora solo se busca web cuando el agente no sabe algo (knowledge_confidence).
+   625→            if self.metacognition.knowledge_confidence < 0.4 and iteration > 0:
+   626→                web_tools = ["buscar_web", "buscar_web_profundo", "leer_web"]
+   627→                already_searched = any(t in self.metacognition.tool_history for t in web_tools)
+   628→                
+   629→                if not already_searched:
+   630→                    self._log("Confianza baja: ejecutando busqueda web automatica", "cloud")
+   631→                    try:
+   632→                        search_result = TOOL_FUNCTIONS["buscar_web"](consulta=user_message)
+   633→                        if search_result and "No se encontraron" not in search_result:
+   634→                            self._log(f"Busqueda web automatica exitosa: {search_result[:150]}...", "cloud")
+   635→                            # Inyectar resultados como contexto
+   636→                            messages.append({
+   637→                                "role": "user", 
+   638→                                "content": f"[RESULTADO DE BUSQUEDA WEB AUTOMATICA]:\n{search_result[:1500]}\n\nUsa esta informacion para responder. Si necesitas mas detalle, usa leer_web o buscar_web_profundo."
+   639→                            })
+   640→                            # Guardar en memoria
+   641→                            self.memory.remember(
+   642→                                f"Busqueda web para '{user_message[:50]}': {search_result[:300]}",
+   643→                                metadata={"type": "web_search", "query": user_message[:50]},
+   644→                                fast=True
+   645→                            )
+   646→                            self.metacognition.record_iteration(
+   647→                                iteration=iteration, action_type="tool_call", 
+   648→                                tool_name="buscar_web", result_summary=search_result[:100]
+   649→                            )
+   650→                            self.metacognition.confidence = min(0.7, self.metacognition.confidence + 0.2)
+   651→                        else:
+   652→                            self._log("Busqueda web automatica sin resultados", "warning")
+   653→                    except Exception as e:
+   654→                        self._log(f"Error en busqueda web automatica: {e}", "error")
+   655→                
+   656→                # Si ya se busco pero confianza sigue baja, intentar busqueda profunda
+   657→                elif "buscar_web_profundo" not in self.metacognition.tool_history and self.metacognition.confidence < 0.4:
+   658→                    self._log("Confianza muy baja tras busqueda: ejecutando busqueda profunda", "cloud")
+   659→                    try:
+   660→                        deep_result = TOOL_FUNCTIONS["buscar_web_profundo"](consulta=user_message)
+   661→                        if deep_result and len(deep_result) > 200:
+   662→                            self._log(f"Busqueda profunda exitosa: {deep_result[:150]}...", "cloud")
+   663→                            messages.append({
+   664→                                "role": "user",
+   665→                                "content": f"[RESULTADO DE BUSQUEDA PROFUNDA]:\n{deep_result[:2000]}\n\nResponde al usuario usando esta informacion detallada."
+   666→                            })
+   667→                            self.memory.remember(
+   668→                                f"Busqueda profunda para '{user_message[:50]}': {deep_result[:400]}",
+   669→                                metadata={"type": "web_search_deep", "query": user_message[:50]},
+   670→                                fast=True
+   671→                            )
+   672→                            self.metacognition.confidence = min(0.7, self.metacognition.confidence + 0.15)
+   673→                    except Exception as e:
+   674→                        self._log(f"Error en busqueda profunda automatica: {e}", "error")
+   675→
+   676→            if self.supports_tool_calling:
+   677→                action_result = self._react_with_tools(messages, iteration, selected_schemas=selected_schemas, model_override=self._routed_model)
+   678→            else:
+   679→                action_result = self._react_with_json(messages, iteration, model_override=self._routed_model)
+   680→
+   681→            if action_result[0] == "respond":
+   682→                final_response = action_result[1]
+   683→
+   684→                # SAFETY CHECK: Si la respuesta es JSON de tool call, ejecutarlo
+   685→                # en vez de mostrarlo como texto al usuario
+   686→                parsed_json = self._parse_json(final_response)
+   687→                if parsed_json:
+   688→                    accion = parsed_json.get("accion", "").strip()
+   689→                    if accion and accion in TOOL_FUNCTIONS:
+   690→                        self._log(f"JSON de tool detectado en respuesta: {accion}", "thinking")
+   691→                        action_result = ("tool_calls", [{"name": accion, "params": parsed_json.get("params", {})}])
+   692→                        # Procesar como tool call en vez de respuesta
+   693→                        for tc in action_result[1]:
+   694→                            self.metacognition.record_iteration(
+   695→                                iteration=iteration, action_type="tool_call", tool_name=tc["name"]
+   696→                            )
+   697→                        results = self._execute_tool_calls(action_result[1], messages)
+   698→                        for tc, res in zip(action_result[1], results):
+   699→                            had_error = "ERROR" in res
+   700→                            self.metacognition.record_iteration(
+   701→                                iteration=iteration, action_type="tool_result",
+   702→                                tool_name=tc["name"], result_summary=res[:200], had_error=had_error
+   703→                            )
+   704→                        self._feed_tool_results(action_result[1], results, messages)
+   705→                        continue  # Siguiente iteracion del bucle ReAct
+   706→                    elif not parsed_json.get("respuesta_final", "").strip():
+   707→                        # JSON sin respuesta_final ni accion valida - limpiar
+   708→                        clean = self._clean_json_leak(final_response)
+   709→                        if clean != final_response:
+   710→                            final_response = clean
+   711→
+   712→                # Evaluar resultado para poblar _last_evaluation
+   713→                reflection = self.metacognition.evaluate_result(
+   714→                    user_message, final_response, iteration + 1
+   715→                )
+   716→                self._log(
+   717→                    f"Evaluacion: {reflection['assessment']} "
+   718→                    f"(confianza={reflection['confidence_final']})",
+   719→                    "evaluation"
+   720→                )
+   721→
+   722→                # SEGUNDO: Ahora get_final_reflection_prompt() tiene datos reales
+   723→                reflection_prompt = self.metacognition.get_final_reflection_prompt()
+   724→                if reflection_prompt:
+   725→                    self._log("Reflexion metacognitiva inyectada en respuesta final", "evaluation")
+   726→                    # Re-generar con contexto de reflexion (solo si la respuesta puede mejorar)
+   727→                    if len(final_response) < 100 and self.metacognition.error_count > 0:
+   728→                        messages.append({"role": "assistant", "content": final_response})
+   729→                        messages.append({"role": "user", "content": reflection_prompt + "\n\nMejora tu respuesta anterior si es incompleta."})
+   730→                        improved = ollama.generate_chat(messages)
+   731→                        if improved and len(improved) > len(final_response):
+   732→                            final_response = improved
+   733→                            self._log("Respuesta mejorada via metacognicion", "success")
+   734→
+   735→                for lesson in reflection.get("lessons", []):
+   736→                    learning.add_knowledge(lesson, source="metacognition")
+   737→                self._log("Respuesta final generada", "success")
+   738→                self._save_interaction(user_message, final_response)
+   739→                return final_response, self.thinking_log
+   740→
+   741→            elif action_result[0] == "tool_calls":
+   742→                tool_calls = action_result[1]
+   743→                for tc in tool_calls:
+   744→                    self.metacognition.record_iteration(
+   745→                        iteration=iteration, action_type="tool_call", tool_name=tc["name"]
+   746→                    )
+   747→                results = self._execute_tool_calls(tool_calls, messages)
+   748→                for tc, res in zip(tool_calls, results):
+   749→                    had_error = "ERROR" in res
+   750→                    self.metacognition.record_iteration(
+   751→                        iteration=iteration, action_type="tool_result",
+   752→                        tool_name=tc["name"], result_summary=res[:200], had_error=had_error
+   753→                    )
+   754→                self._feed_tool_results(tool_calls, results, messages)
+   755→
+   756→            elif action_result[0] == "error":
+   757→                self._log(f"Error: {action_result[1]}", "error")
+   758→                self.metacognition.record_iteration(
+   759→                    iteration=iteration, action_type="error", had_error=True
+   760→                )
+   761→                if iteration >= iteration_budget - 1:
+   762→                    return "Tuve problemas para procesar tu solicitud. Puedes reformularla?", self.thinking_log
+   763→
+   764→        self._log("Alcanzado limite de iteraciones", "warning")
+   765→        return "Alcance el limite de iteraciones. Puede que necesites ser mas especifico.", self.thinking_log
+   766→
+   767→    # ----------------------------------------------------------
+   768→    # RUN CON STREAMING REAL (token a token)
+   769→    # ----------------------------------------------------------
+   770→    def run_stream(self, user_message):
+   771→        """
+   772→        Bucle ReAct con streaming REAL. Yields cada token al instante.
+   773→        Eventos: {"type": "text"|"thinking"|"tool_start"|"tool_result"|"meta"|"done", "data": ...}
+   774→        v15: Agrega evento "thinking" para que la UI muestre el proceso de pensamiento.
+   775→        """
+   776→        self.thinking_log = []
+   777→        self.metacognition.reset()
+   778→        self._tool_call_counts = {}
+   779→        self._total_tool_calls = 0
+   780→        self._current_user_message = user_message  # v20: para _task_needs_tools()
+   781→        self._log(f"Mensaje del usuario: {user_message}", "input")
+   782→
+   783→        # *** NUEVO v19: Direct Intent Parser ***
+   784→        # Intentar ejecutar directamente si la intención es clara
+   785→        direct_result = self._try_direct_intent_stream(user_message)
+   786→        if direct_result is not None:
+   787→            yield from direct_result
+   788→            return
+   789→
+   790→        # Emitir evento thinking: recibiendo pregunta
+   791→        yield {
+   792→            "type": "thinking",
+   793→            "data": {
+   794→                "phase": "receiving",
+   795→                "message": f"Recibiendo pregunta: {user_message[:80]}...",
+   796→                "iteration": 0,
+   797→                "confidence": 0.7,
+   798→            }
+   799→        }
+   800→
+   801→        # v21: Detectar tool calling ANTES de _build_messages para que
+   802→        # el prompt de tools se filtre correctamente
+   803→        if self.supports_tool_calling is None:
+   804→            self.supports_tool_calling = self._detect_tool_calling_support()
+   805→            self._log(
+   806→                f"Tool calling nativo: {'SI' if self.supports_tool_calling else 'NO (usando JSON fallback)'}",
+   807→                "info"
+   808→            )
+   809→
+   810→        # v20->v21: Seleccion semantica de herramientas relevantes
+   811→        # v21 FIX: Ahora TAMBIEN filtra en modo JSON fallback.
+   812→        # ANTES de _build_messages() para que el prompt de tools tambien se filtre.
+   813→        selected_schemas = self._select_relevant_schemas(user_message)
+   814→        self._selected_tool_names = set(
+   815→            s.get("function", {}).get("name", "") for s in selected_schemas
+   816→        )
+   817→
+   818→        # v21: Iteration budget dinamico segun complejidad de la tarea
+   819→        task_complexity = self._classify_task_complexity(user_message)
+   820→        iteration_budget = self._ITERATION_BUDGETS.get(task_complexity, MAX_REACT_ITERATIONS)
+   821→        self._log(f"Budget de iteraciones (stream): {iteration_budget} (complejidad: {task_complexity})", "planning")
+   822→
+   823→        # v22: Auto-routing multi-modelo - determinar modelo optimo para esta request
+   824→        self._route_model_for_request(user_message)
+   825→
+   826→        # v21: _build_messages() ahora usa _selected_tool_names para filtrar
+   827→        messages = self._build_messages(user_message)
+   828→
+   829→        # *** NUEVO: Deteccion de tareas complejas - sugerir planificacion ***
+   830→        if self._is_complex_task(user_message):
+   831→            self._log("Tarea compleja detectada: sugiriendo planificacion_tarea", "info")
+   832→            # Inyectar hint en el system prompt para que el agente considere planificar
+   833→            plan_hint = (
+   834→                "\n\n[NOTA DEL SISTEMA]: Esta parece una tarea compleja. "
+   835→                "Considera usar la herramienta 'planificar_tarea' primero para descomponer "
+   836→                "el problema en subtareas antes de ejecutar. Esto mejorara la calidad del resultado."
+   837→            )
+   838→            for msg in messages:
+   839→                if msg["role"] == "system":
+   840→                    msg["content"] += plan_hint
+   841→                    break
+   842→
+   843→        # Emitir evento thinking: buscando en memoria
+   844→        yield {
+   845→            "type": "thinking",
+   846→            "data": {
+   847→                "phase": "memory_search",
+   848→                "message": "Buscando en memoria conocimiento relevante...",
+   849→                "iteration": 0,
+   850→                "confidence": self.metacognition.confidence,
+   851→                **({"model_routing": self._routing_info} if self._routing_info else {}),
+   852→            }
+   853→        }
+   854→
+   855→        for iteration in range(iteration_budget):
+   856→            self._log(f"--- Iteracion {iteration + 1}/{iteration_budget} (stream) ---", "react")
+   857→
+   858→            # v21: Dynamic schema refresh
+   859→            if iteration > 0 and iteration % 3 == 0:
+   860→                self._maybe_refresh_schemas(user_message, messages, iteration)
+   861→
+   862→            # Emitir evento thinking: nueva iteracion
+   863→            yield {
+   864→                "type": "thinking",
+   865→                "data": {
+   866→                    "phase": "iteration_start",
+   867→                    "message": f"Iteracion {iteration + 1}/{iteration_budget}: Pensando como responder...",
+   868→                    "iteration": iteration + 1,
+   869→                    "confidence": self.metacognition.confidence,
+   870→                }
+   871→            }
+   872→
+   873→            # *** FIX: Metacognicion ANTES de decidir la accion ***
+   874→            meta_prompt = self.metacognition.get_metacognitive_prompt(iteration)
+   875→            if meta_prompt:
+   876→                self._log("Alerta metacognitiva inyectada ANTES de accion", "evaluation")
+   877→                self._inject_metacognitive_prompt(messages, meta_prompt)
+   878→                yield {
+   879→                    "type": "meta",
+   880→                    "data": {
+   881→                        "confidence": self.metacognition.confidence,
+   882→                        "errors": self.metacognition.error_count,
+   883→                        "successes": self.metacognition.success_count,
+   884→                        "plan_changes": self.metacognition.plan_changes,
+   885→                    }
+   886→                }
+   887→
+   888→            # *** v20: AUTO-BUSQUEDA WEB cuando knowledge_confidence baja (streaming) ***
+   889→            if self.metacognition.knowledge_confidence < 0.4 and iteration > 0:
+   890→                web_tools = ["buscar_web", "buscar_web_profundo", "leer_web"]
+   891→                already_searched = any(t in self.metacognition.tool_history for t in web_tools)
+   892→                
+   893→                if not already_searched:
+   894→                    self._log("Confianza de conocimiento baja (streaming): ejecutando busqueda web", "cloud")
+   895→                    yield {"type": "tool_start", "data": {"name": "buscar_web", "params": {"consulta": user_message}}}
+   896→                    try:
+   897→                        search_result = TOOL_FUNCTIONS["buscar_web"](consulta=user_message)
+   898→                        if search_result and "No se encontraron" not in search_result:
+   899→                            self._log(f"Busqueda web automatica exitosa", "cloud")
+   900→                            yield {"type": "tool_result", "data": {"tool": {"name": "buscar_web"}, "result": search_result[:200]}}
+   901→                            messages.append({
+   902→                                "role": "user", 
+   903→                                "content": f"[RESULTADO DE BUSQUEDA WEB AUTOMATICA]:\n{search_result[:1500]}\n\nUsa esta informacion para responder."
+   904→                            })
+   905→                            self.memory.remember(
+   906→                                f"Busqueda web para '{user_message[:50]}': {search_result[:300]}",
+   907→                                metadata={"type": "web_search", "query": user_message[:50]},
+   908→                                fast=True
+   909→                            )
+   910→                            self.metacognition.record_iteration(
+   911→                                iteration=iteration, action_type="tool_call",
+   912→                                tool_name="buscar_web", result_summary=search_result[:100]
+   913→                            )
+   914→                            self.metacognition.knowledge_confidence = min(0.7, self.metacognition.knowledge_confidence + 0.2)
+   915→                        else:
+   916→                            self._log("Busqueda web automatica sin resultados", "warning")
+   917→                    except Exception as e:
+   918→                        self._log(f"Error en busqueda web automatica: {e}", "error")
+   919→                
+   920→                elif "buscar_web_profundo" not in self.metacognition.tool_history and self.metacognition.knowledge_confidence < 0.3:
+   921→                    self._log("Conocimiento insuficiente tras busqueda: ejecutando busqueda profunda", "cloud")
+   922→                    yield {"type": "tool_start", "data": {"name": "buscar_web_profundo", "params": {"consulta": user_message}}}
+   923→                    try:
+   924→                        deep_result = TOOL_FUNCTIONS["buscar_web_profundo"](consulta=user_message)
+   925→                        if deep_result and len(deep_result) > 200:
+   926→                            self._log(f"Busqueda profunda exitosa", "cloud")
+   927→                            yield {"type": "tool_result", "data": {"tool": {"name": "buscar_web_profundo"}, "result": deep_result[:200]}}
+   928→                            messages.append({
+   929→                                "role": "user",
+   930→                                "content": f"[RESULTADO DE BUSQUEDA PROFUNDA]:\n{deep_result[:2000]}\n\nResponde usando esta informacion."
+   931→                            })
+   932→                            self.memory.remember(
+   933→                                f"Busqueda profunda para '{user_message[:50]}': {deep_result[:400]}",
+   934→                                metadata={"type": "web_search_deep", "query": user_message[:50]},
+   935→                                fast=True
+   936→                            )
+   937→                            self.metacognition.knowledge_confidence = min(0.7, self.metacognition.knowledge_confidence + 0.15)
+   938→                    except Exception as e:
+   939→                        self._log(f"Error en busqueda profunda automatica: {e}", "error")
+   940→
+   941→            # ---- NUCLEO: Streaming token-a-token ----
+   942→            full_text = ""
+   943→            tool_calls_found = []
+   944→            is_final_response = False
+   945→
+   946→            # v20: Forzar tool_choice en primera iteracion si la tarea necesita herramientas
+   947→            force_tool = (iteration == 0 and self._task_needs_tools(user_message))
+   948→
+   949→            if self.supports_tool_calling:
+   950→                # Stream del LLM y procesar en tiempo real
+   951→                for event in self._stream_llm_with_tools(messages, selected_schemas=selected_schemas, force_tool_choice=force_tool, model_override=self._routed_model):
+   952→                    if event["type"] == "token":
+   953→                        full_text += event["data"]
+   954→                        yield {"type": "text", "data": event["data"]}
+   955→                    elif event["type"] == "tool_calls":
+   956→                        tool_calls_found = event["data"]
+   957→                    elif event["type"] == "done":
+   958→                        is_final_response = event["data"]  # True si es respuesta final
+   959→            else:
+   960→                # JSON fallback (sin streaming real)
+   961→                result_type, result_data = self._react_with_json(messages, iteration, model_override=self._routed_model)
+   962→                if result_type == "respond":
+   963→                    full_text = result_data
+   964→                    yield {"type": "text", "data": result_data}
+   965→                    is_final_response = True
+   966→                elif result_type == "tool_calls":
+   967→                    tool_calls_found = result_data
+   968→                elif result_type == "error":
+   969→                    self._log(f"Error: {result_data}", "error")
+   970→                    self.metacognition.record_iteration(
+   971→                        iteration=iteration, action_type="error", had_error=True
+   972→                    )
+   973→                    if iteration >= iteration_budget - 1:
+   974→                        yield {
+   975→                            "type": "done",
+   976→                            "data": "Tuve problemas para procesar tu solicitud. Puedes reformularla?",
+   977→                            "thinking_log": self.thinking_log,
+   978→                            "meta_status": self.metacognition.get_status(),
+   979→                        }
+   980→                        return
+   981→                    continue
+   982→
+   983→            # Procesar resultado de esta iteracion
+   984→            # SAFETY CHECK: Si full_text parece JSON de tool call, parsearlo y ejecutar
+   985→            # en vez de mostrarlo como texto al usuario
+   986→            if is_final_response and not tool_calls_found and full_text:
+   987→                parsed_json = self._parse_json(full_text)
+   988→                if parsed_json:
+   989→                    accion = parsed_json.get("accion", "").strip()
+   990→                    if accion and accion in TOOL_FUNCTIONS:
+   991→                        self._log(f"JSON de tool detectado en respuesta final: {accion}", "thinking")
+   992→                        tool_calls_found = [{"name": accion, "params": parsed_json.get("params", {})}]
+   993→                        is_final_response = False  # No es respuesta final, es tool call
+   994→                    elif not parsed_json.get("respuesta_final", "").strip():
+   995→                        # JSON sin respuesta_final ni accion valida - extraer contenido util
+   996→                        clean = self._clean_json_leak(full_text)
+   997→                        if clean != full_text:
+   998→                            full_text = clean
+   999→
+  1000→            if is_final_response and not tool_calls_found:
+  1001→                # Emitir evento thinking: generando respuesta final
+  1002→                yield {
+  1003→                    "type": "thinking",
+  1004→                    "data": {
+  1005→                        "phase": "final_response",
+  1006→                        "message": "Tengo suficiente informacion. Generando respuesta final...",
+  1007→                        "iteration": iteration + 1,
+  1008→                        "confidence": self.metacognition.confidence,
+  1009→                    }
+  1010→                }
+  1011→                # PRIMERO: Evaluar resultado para poblar _last_evaluation
+  1012→                reflection = self.metacognition.evaluate_result(
+  1013→                    user_message, full_text, iteration + 1
+  1014→                )
+  1015→                self._log(
+  1016→                    f"Evaluacion: {reflection['assessment']} (confianza={reflection['confidence_final']})",
+  1017→                    "evaluation"
+  1018→                )
+  1019→
+  1020→                # SEGUNDO: Ahora get_final_reflection_prompt() tiene datos reales
+  1021→                reflection_prompt = self.metacognition.get_final_reflection_prompt()
+  1022→                if reflection_prompt and len(full_text) < 100 and self.metacognition.error_count > 0:
+  1023→                    self._log("Reflexion metacognitiva: reintentando respuesta mejorada", "evaluation")
+  1024→                    try:
+  1025→                        messages.append({"role": "assistant", "content": full_text})
+  1026→                        messages.append({"role": "user", "content": reflection_prompt + "\n\nDa una respuesta mas completa."})
+  1027→                        improved = ollama.generate_chat(messages)
+  1028→                        if improved and len(improved) > len(full_text):
+  1029→                            full_text = improved
+  1030→                            yield {"type": "text", "data": "\n\n[Respuesta mejorada] " + improved}
+  1031→                    except Exception:
+  1032→                        pass
+  1033→
+  1034→                # Respuesta final - terminar
+  1035→                for lesson in reflection.get("lessons", []):
+  1036→                    learning.add_knowledge(lesson, source="metacognition")
+  1037→
+  1038→                self._log("Respuesta final generada (streaming)", "success")
+  1039→                self._save_interaction(user_message, full_text)
+  1040→                yield {
+  1041→                    "type": "done",
+  1042→                    "data": full_text,
+  1043→                    "thinking_log": self.thinking_log,
+  1044→                    "meta_status": self.metacognition.get_status(),
+  1045→                }
+  1046→                return
+  1047→
+  1048→            elif tool_calls_found:
+  1049→                # Ejecutar tool calls
+  1050→                for tc in tool_calls_found:
+  1051→                    self.metacognition.record_iteration(
+  1052→                        iteration=iteration, action_type="tool_call", tool_name=tc["name"]
+  1053→                    )
+  1054→                    # Emitir evento thinking: decidi usar una herramienta
+  1055→                    yield {
+  1056→                        "type": "thinking",
+  1057→                        "data": {
+  1058→                            "phase": "tool_decision",
+  1059→                            "message": f"Decidi usar la herramienta: {tc['name']} — buscando informacion o ejecutando accion...",
+  1060→                            "iteration": iteration + 1,
+  1061→                            "confidence": self.metacognition.confidence,
+  1062→                            "tool": tc["name"],
+  1063→                        }
+  1064→                    }
+  1065→                    yield {"type": "tool_start", "data": tc}
+  1066→
+  1067→                results = self._execute_tool_calls(tool_calls_found, messages)
+  1068→
+  1069→                for tc, res in zip(tool_calls_found, results):
+  1070→                    had_error = "ERROR" in res
+  1071→                    self.metacognition.record_iteration(
+  1072→                        iteration=iteration, action_type="tool_result",
+  1073→                        tool_name=tc["name"], result_summary=res[:200], had_error=had_error
+  1074→                    )
+  1075→                    # Emitir evento thinking: observando resultado
+  1076→                    status = "exitoso" if not had_error else "con error"
+  1077→                    yield {
+  1078→                        "type": "thinking",
+  1079→                        "data": {
+  1080→                            "phase": "observation",
+  1081→                            "message": f"Observacion: {tc['name']} termino {status}. Analizando si tengo suficiente informacion...",
+  1082→                            "iteration": iteration + 1,
+  1083→                            "confidence": self.metacognition.confidence,
+  1084→                            "tool": tc["name"],
+  1085→                            "success": not had_error,
+  1086→                        }
+  1087→                    }
+  1088→                    yield {"type": "tool_result", "data": {"tool": tc, "result": res}}
+  1089→
+  1090→                self._feed_tool_results(tool_calls_found, results, messages)
+  1091→
+  1092→            elif not full_text:
+  1093→                # Ni respuesta ni tool calls - error
+  1094→                self._log("Respuesta vacia del modelo", "error")
+  1095→                self.metacognition.record_iteration(
+  1096→                    iteration=iteration, action_type="error", had_error=True
+  1097→                )
+  1098→                if iteration >= iteration_budget - 1:
+  1099→                    yield {
+  1100→                        "type": "done",
+  1101→                        "data": "Tuve problemas para procesar tu solicitud. Puedes reformularla?",
+  1102→                        "thinking_log": self.thinking_log,
+  1103→                        "meta_status": self.metacognition.get_status(),
+  1104→                    }
+  1105→                    return
+  1106→
+  1107→        # Limite de iteraciones
+  1108→        yield {
+  1109→            "type": "done",
+  1110→            "data": "Alcance el limite de iteraciones. Puede que necesites ser mas especifico.",
+  1111→            "thinking_log": self.thinking_log,
+  1112→            "meta_status": self.metacognition.get_status(),
+  1113→        }
+  1114→
+  1115→    # ----------------------------------------------------------
+  1116→    # DETECCION DE TAREAS COMPLEJAS
+  1117→    # ----------------------------------------------------------
+  1118→    def _is_complex_task(self, message: str) -> bool:
+  1119→        """Detecta si un mensaje parece una tarea compleja que se beneficia de planificacion.
+  1120→        v21: Requiere al menos 2 keywords O que el mensaje empiece con un keyword de accion.
+  1121→        Evita falsos positivos como 'listar archivos del proyecto'.
+  1122→        """
+  1123→        msg_lower = message.lower()
+  1124→        matched = [kw for kw in self._COMPLEX_TASK_KEYWORDS if kw in msg_lower]
+  1125→        
+  1126→        # Si solo hay 1 keyword (ej: 'proyecto'), verificar que no sea
+  1127→        # parte de una tarea simple como 'listar archivos del proyecto'
+  1128→        if len(matched) == 1:
+  1129→            # Keywords que por si solos NO indican tarea compleja
+  1130→            weak_keywords = {"proyecto", "build"}
+  1131→            if matched[0] in weak_keywords:
+  1132→                return False
+  1133→        
+  1134→        # Si hay 2+ keywords, es complejo
+  1135→        if len(matched) >= 2:
+  1136→            return True
+  1137→        
+  1138→        # Si el mensaje empieza con un keyword de accion fuerte, es complejo
+  1139→        strong_starts = ["construir", "crear app", "desarrollar", "automatizar",
+  1140→                        "implementar", "hazme una app", "desarrolla"]
+  1141→        return any(msg_lower.startswith(kw) for kw in strong_starts)
+  1142→
+  1143→    # ----------------------------------------------------------
+  1144→    # RUN PLANNED (ejecucion con planificacion y orquestacion)
+  1145→    # ----------------------------------------------------------
+  1146→    def run_planned(self, message: str) -> str:
+  1147→        """Ejecuta una tarea compleja usando planificacion y orquestacion."""
+  1148→        from tools.task_planner import get_planner
+  1149→
+  1150→        planner = get_planner()
+  1151→        plan = planner.smart_decompose(message)
+  1152→
+  1153→        # Validar plan
+  1154→        validation = planner.validate_plan(plan)
+  1155→        if not validation["valid"]:
+  1156→            # Fallback a ejecucion normal
+  1157→            self._log("Plan invalido, fallback a ejecucion normal", "warning")
+  1158→            return self.run(message)
+  1159→
+  1160→        # Ejecutar plan
+  1161→        results = []
+  1162→        while True:
+  1163→            # Obtener todas las tareas listas (pendientes con dependencias resueltas)
+  1164→            ready_tasks = plan.get_ready_tasks()
+  1165→            if not ready_tasks:
+  1166→                break
+  1167→
+  1168→            # --- EJECUCION PARALELA: si hay 2+ tareas listas y el Orchestrator esta disponible ---
+  1169→            if len(ready_tasks) >= 2 and ORCHESTRATOR_AVAILABLE and self.orchestrator:
+  1170→                # Limitar a maximo 3 tareas en paralelo
+  1171→                parallel_tasks = ready_tasks[:3]
+  1172→                parallel_titles = [t.title for t in parallel_tasks]
+  1173→                self._log(
+  1174→                    f"Ejecutando {len(parallel_tasks)} tareas en paralelo: {parallel_titles}",
+  1175→                    "info"
+  1176→                )
+  1177→
+  1178→                # Marcar todas como in_progress
+  1179→                for t in parallel_tasks:
+  1180→                    plan.mark_in_progress(t.id)
+  1181→
+  1182→                # Delegar al Orchestrator
+  1183→                parallel_result = self._execute_parallel_tasks(parallel_tasks, plan, results)
+  1184→
+  1185→                if parallel_result:
+  1186→                    # Procesar resultados paralelos
+  1187→                    for task in parallel_tasks:
+  1188→                        task_result = parallel_result.get(task.id, "")
+  1189→                        if task_result and not task_result.startswith("ERROR:"):
+  1190→                            plan.mark_completed(task.id, task_result)
+  1191→                            results.append({"task": task.title, "result": task_result[:500]})
+  1192→                        else:
+  1193→                            error_msg = task_result if task_result else "Resultado vacio"
+  1194→                            plan.mark_failed(task.id, error_msg)
+  1195→                    planner._save_plan(plan)
+  1196→                else:
+  1197→                    # Fallback: ejecutar la primera tarea secuencialmente
+  1198→                    self._log("Fallback a ejecucion secuencial tras fallo del Orchestrator", "warning")
+  1199→                    next_task = parallel_tasks[0]
+  1200→
+  1201→                    task_prompt = (
+  1202→                        f"Ejecuta esta subtarea: {next_task.title}\n"
+  1203→                        f"Descripcion: {next_task.description}\n"
+  1204→                        f"Contexto previo: {json.dumps(results[-3:], ensure_ascii=False) if results else 'Ninguno'}"
+  1205→                    )
+  1206→
+  1207→                    if SKILLS_ENRICHMENT_AVAILABLE:
+  1208→                        try:
+  1209→                            skills_context = enrich_prompt_with_skills(next_task.description, "")
+  1210→                            if skills_context:
+  1211→                                task_prompt += f"\n\n--- CONTEXTO DE SKILLS PARA SUBTAREA ---\n{skills_context}"
+  1212→                        except Exception:
+  1213→                            pass
+  1214→
+  1215→                    try:
+  1216→                        result = self.run(task_prompt)
+  1217→                        if isinstance(result, tuple):
+  1218→                            result = result[0]
+  1219→                        plan.mark_completed(next_task.id, result)
+  1220→                        results.append({"task": next_task.title, "result": result[:500]})
+  1221→                        planner._save_plan(plan)
+  1222→                    except Exception as e:
+  1223→                        plan.mark_failed(next_task.id, str(e))
+  1224→                        planner._save_plan(plan)
+  1225→
+  1226→            # --- EJECUCION SECUENCIAL: si solo hay 1 tarea lista o no hay Orchestrator ---
+  1227→            else:
+  1228→                next_task = ready_tasks[0]
+  1229→                plan.mark_in_progress(next_task.id)
+  1230→
+  1231→                # Ejecutar la subtarea
+  1232→                task_prompt = (
+  1233→                    f"Ejecuta esta subtarea: {next_task.title}\n"
+  1234→                    f"Descripcion: {next_task.description}\n"
+  1235→                    f"Contexto previo: {json.dumps(results[-3:], ensure_ascii=False) if results else 'Ninguno'}"
+  1236→                )
+  1237→
+  1238→                # Enriquecer prompt de subtarea con contexto de skills relevantes
+  1239→                if SKILLS_ENRICHMENT_AVAILABLE:
+  1240→                    try:
+  1241→                        skills_context = enrich_prompt_with_skills(next_task.description, "")
+  1242→                        if skills_context:
+  1243→                            task_prompt += f"\n\n--- CONTEXTO DE SKILLS PARA SUBTAREA ---\n{skills_context}"
+  1244→                    except Exception:
+  1245→                        pass  # No dejar que el enriquecimiento rompa la ejecucion planificada
+  1246→
+  1247→                try:
+  1248→                    result = self.run(task_prompt)
+  1249→                    # self.run devuelve (respuesta, thinking_log)
+  1250→                    if isinstance(result, tuple):
+  1251→                        result = result[0]
+  1252→                    plan.mark_completed(next_task.id, result)
+  1253→                    results.append({"task": next_task.title, "result": result[:500]})
+  1254→                    planner._save_plan(plan)
+  1255→                except Exception as e:
+  1256→                    plan.mark_failed(next_task.id, str(e))
+  1257→                    planner._save_plan(plan)
+  1258→                    # Intentar continuar con la siguiente subtarea
+  1259→
+  1260→        # Retornar resumen
+  1261→        progress = plan.get_progress()
+  1262→        summary = f"Plan completado: {progress['completed']}/{progress['total']} tareas\n\n"
+  1263→        for r in results:
+  1264→            summary += f"- {r['task']}: {r['result'][:200]}\n"
+  1265→        return summary
+  1266→
+  1267→    # ----------------------------------------------------------
+  1268→    # EJECUCION PARALELA DE TAREAS (via Orchestrator)
+  1269→    # ----------------------------------------------------------
+  1270→    def _execute_parallel_tasks(self, tasks, plan, results):
+  1271→        """
+  1272→        Ejecuta multiples tareas independientes en paralelo usando el Orchestrator.
+  1273→
+  1274→        Args:
+  1275→            tasks: Lista de objetos Task con status=pending y dependencias resueltas
+  1276→            plan: ExecutionPlan al que pertenecen las tareas
+  1277→            results: Lista acumulada de resultados previos
+  1278→
+  1279→        Returns:
+  1280→            Dict {task_id: result} con los resultados de cada tarea,
+  1281→            o None si fallo y se debe hacer fallback a secuencial.
+  1282→        """
+  1283→        if not self.orchestrator or not ORCHESTRATOR_AVAILABLE:
+  1284→            self._log("Orchestrator no disponible para ejecucion paralela", "warning")
+  1285→            return None
+  1286→
+  1287→        # Crear descripciones de sub-tareas para el orchestrator
+  1288→        subtask_descriptions = []
+  1289→        for task in tasks:
+  1290→            subtask_descriptions.append({
+  1291→                "id": task.id,
+  1292→                "description": f"{task.title}: {task.description}",
+  1293→                "context": json.dumps(results[-3:], ensure_ascii=False) if results else "",
+  1294→            })
+  1295→
+  1296→        self._log(
+  1297→            f"Delegando {len(tasks)} tareas al Orchestrator en paralelo: "
+  1298→            f"{[t.title for t in tasks]}",
+  1299→            "info"
+  1300→        )
+  1301→
+  1302→        # Usar orchestrator para ejecutar en paralelo
+  1303→        try:
+  1304→            orch_result = self.orchestrator.execute_parallel(
+  1305→                descriptions=subtask_descriptions,
+  1306→                agent_run_fn=self.run,  # Pasar el metodo run del propio agente
+  1307→            )
+  1308→            if orch_result:
+  1309→                self._log(
+  1310→                    f"Orchestrator completo {len(orch_result)}/{len(tasks)} tareas en paralelo",
+  1311→                    "info"
+  1312→                )
+  1313→            return orch_result
+  1314→        except Exception as e:
+  1315→            self._log(f"Orchestrator parallel fallo: {e}, fallback a secuencial", "warning")
+  1316→            return None
+  1317→
+  1318→    # ----------------------------------------------------------
+  1319→    # RUN PLANNED STREAM (ejecucion planificada con streaming)
+  1320→    # ----------------------------------------------------------
+  1321→    def run_planned_stream(self, message: str):
+  1322→        """Ejecuta una tarea compleja con planificacion, emitiendo eventos de streaming."""
+  1323→        try:
+  1324→            from tools.task_planner import get_planner
+  1325→        except Exception as e:
+  1326→            # Si task_planner no esta disponible, fallback a run_stream
+  1327→            self._log(f"task_planner no disponible: {e}, fallback a run_stream", "warning")
+  1328→            yield from self.run_stream(message)
+  1329→            return
+  1330→
+  1331→        planner = get_planner()
+  1332→
+  1333→        # Emitir evento de inicio de planificacion
+  1334→        yield {
+  1335→            "type": "plan_update",
+  1336→            "data": {
+  1337→                "phase": "decomposing",
+  1338→                "message": "Analizando tarea compleja y creando plan...",
+  1339→                "task": message[:100],
+  1340→            }
+  1341→        }
+  1342→
+  1343→        try:
+  1344→            plan = planner.smart_decompose(message)
+  1345→        except Exception as e:
+  1346→            self._log(f"Error al descomponer tarea: {e}", "error")
+  1347→            yield from self.run_stream(message)
+  1348→            return
+  1349→
+  1350→        # Validar plan
+  1351→        validation = planner.validate_plan(plan)
+  1352→        if not validation["valid"]:
+  1353→            self._log("Plan invalido, fallback a ejecucion normal (streaming)", "warning")
+  1354→            yield {
+  1355→                "type": "plan_update",
+  1356→                "data": {
+  1357→                    "phase": "invalid",
+  1358→                    "message": "No se pudo crear un plan valido. Ejecutando normalmente...",
+  1359→                }
+  1360→            }
+  1361→            yield from self.run_stream(message)
+  1362→            return
+  1363→
+  1364→        # Emitir plan creado
+  1365→        progress = plan.get_progress()
+  1366→        yield {
+  1367→            "type": "plan_update",
+  1368→            "data": {
+  1369→                "phase": "plan_created",
+  1370→                "message": f"Plan creado: {progress['total']} subtareas",
+  1371→                "total_tasks": progress['total'],
+  1372→                "tasks": [
+  1373→                    {"id": t.id, "title": t.title, "status": t.status.value if hasattr(t.status, 'value') else str(t.status)}
+  1374→                    for t in plan.tasks
+  1375→                ],
+  1376→            }
+  1377→        }
+  1378→
+  1379→        # Ejecutar plan
+  1380→        results = []
+  1381→        while True:
+  1382→            # Obtener todas las tareas listas (pendientes con dependencias resueltas)
+  1383→            ready_tasks = plan.get_ready_tasks()
+  1384→            if not ready_tasks:
+  1385→                break
+  1386→
+  1387→            # --- EJECUCION PARALELA: si hay 2+ tareas listas y el Orchestrator esta disponible ---
+  1388→            if len(ready_tasks) >= 2 and ORCHESTRATOR_AVAILABLE and self.orchestrator:
+  1389→                # Limitar a maximo 3 tareas en paralelo para no sobrecargar
+  1390→                parallel_tasks = ready_tasks[:3]
+  1391→                parallel_titles = [t.title for t in parallel_tasks]
+  1392→                self._log(
+  1393→                    f"Ejecutando {len(parallel_tasks)} tareas en paralelo: {parallel_titles}",
+  1394→                    "info"
+  1395→                )
+  1396→
+  1397→                # Marcar todas como in_progress ANTES de delegar
+  1398→                for t in parallel_tasks:
+  1399→                    plan.mark_in_progress(t.id)
+  1400→
+  1401→                # Emitir evento de ejecucion paralela
+  1402→                yield {
+  1403→                    "type": "plan_update",
+  1404→                    "data": {
+  1405→                        "phase": "parallel",
+  1406→                        "message": f"Ejecutando en paralelo: {', '.join(parallel_titles)}",
+  1407→                        "tasks": parallel_titles,
+  1408→                        "task_ids": [t.id for t in parallel_tasks],
+  1409→                        "progress": f"{len(results) + 1}-{len(results) + len(parallel_tasks)}/{progress['total']}",
+  1410→                    }
+  1411→                }
+  1412→
+  1413→                # Delegar al Orchestrator
+  1414→                parallel_result = self._execute_parallel_tasks(parallel_tasks, plan, results)
+  1415→
+  1416→                if parallel_result:
+  1417→                    # Procesar resultados paralelos
+  1418→                    for task in parallel_tasks:
+  1419→                        task_result = parallel_result.get(task.id, "")
+  1420→                        if task_result and not task_result.startswith("ERROR:"):
+  1421→                            plan.mark_completed(task.id, task_result)
+  1422→                            results.append({"task": task.title, "result": task_result[:500]})
+  1423→                            yield {
+  1424→                                "type": "text",
+  1425→                                "data": f"✅ {task.title}: {task_result[:200]}\n\n"
+  1426→                            }
+  1427→                        else:
+  1428→                            error_msg = task_result if task_result else "Resultado vacio"
+  1429→                            plan.mark_failed(task.id, error_msg)
+  1430→                            yield {
+  1431→                                "type": "plan_update",
+  1432→                                "data": {
+  1433→                                    "phase": "task_failed",
+  1434→                                    "message": f"Subtarea paralela fallo: {task.title} - {error_msg[:100]}",
+  1435→                                    "task_id": task.id,
+  1436→                                }
+  1437→                            }
+  1438→                    planner._save_plan(plan)
+  1439→                else:
+  1440→                    # Fallback: ejecutar las tareas secuencialmente (la primera de las paralelas)
+  1441→                    self._log("Fallback a ejecucion secuencial tras fallo del Orchestrator", "warning")
+  1442→                    next_task = parallel_tasks[0]
+  1443→                    # Resetear las que no vamos a ejecutar ahora a pending
+  1444→                    for t in parallel_tasks[1:]:
+  1445→                        t.status = plan.tasks[t.id].status  # quedan in_progress, se retomaran
+  1446→
+  1447→                    # Ejecutar la primera tarea secuencialmente
+  1448→                    task_prompt = (
+  1449→                        f"Ejecuta esta subtarea: {next_task.title}\n"
+  1450→                        f"Descripcion: {next_task.description}\n"
+  1451→                        f"Contexto previo: {json.dumps(results[-3:], ensure_ascii=False) if results else 'Ninguno'}"
+  1452→                    )
+  1453→
+  1454→                    if SKILLS_ENRICHMENT_AVAILABLE:
+  1455→                        try:
+  1456→                            skills_context = enrich_prompt_with_skills(next_task.description, "")
+  1457→                            if skills_context:
+  1458→                                task_prompt += f"\n\n--- CONTEXTO DE SKILLS PARA SUBTAREA ---\n{skills_context}"
+  1459→                        except Exception:
+  1460→                            pass
+  1461→
+  1462→                    yield {
+  1463→                        "type": "plan_update",
+  1464→                        "data": {
+  1465→                            "phase": "task_started",
+  1466→                            "message": f"Ejecutando (secuencial fallback): {next_task.title}",
+  1467→                            "task_id": next_task.id,
+  1468→                            "task_title": next_task.title,
+  1469→                            "progress": f"{len(results) + 1}/{progress['total']}",
+  1470→                        }
+  1471→                    }
+  1472→
+  1473→                    try:
+  1474→                        result = self.run(task_prompt)
+  1475→                        if isinstance(result, tuple):
+  1476→                            result = result[0]
+  1477→                        plan.mark_completed(next_task.id, result)
+  1478→                        results.append({"task": next_task.title, "result": result[:500]})
+  1479→                        planner._save_plan(plan)
+  1480→                        yield {
+  1481→                            "type": "text",
+  1482→                            "data": f"✅ {next_task.title}: {result[:200]}\n\n"
+  1483→                        }
+  1484→                    except Exception as e:
+  1485→                        plan.mark_failed(next_task.id, str(e))
+  1486→                        planner._save_plan(plan)
+  1487→                        yield {
+  1488→                            "type": "plan_update",
+  1489→                            "data": {
+  1490→                                "phase": "task_failed",
+  1491→                                "message": f"Subtarea fallo: {next_task.title} - {str(e)[:100]}",
+  1492→                                "task_id": next_task.id,
+  1493→                            }
+  1494→                        }
+  1495→
+  1496→            # --- EJECUCION SECUENCIAL: si solo hay 1 tarea lista o no hay Orchestrator ---
+  1497→            else:
+  1498→                next_task = ready_tasks[0]
+  1499→                plan.mark_in_progress(next_task.id)
+  1500→
+  1501→                # Emitir evento de subtarea iniciada
+  1502→                yield {
+  1503→                    "type": "plan_update",
+  1504→                    "data": {
+  1505→                        "phase": "task_started",
+  1506→                        "message": f"Ejecutando: {next_task.title}",
+  1507→                        "task_id": next_task.id,
+  1508→                        "task_title": next_task.title,
+  1509→                        "progress": f"{len(results) + 1}/{progress['total']}",
+  1510→                    }
+  1511→                }
+  1512→
+  1513→                # Ejecutar la subtarea
+  1514→                task_prompt = (
+  1515→                    f"Ejecuta esta subtarea: {next_task.title}\n"
+  1516→                    f"Descripcion: {next_task.description}\n"
+  1517→                    f"Contexto previo: {json.dumps(results[-3:], ensure_ascii=False) if results else 'Ninguno'}"
+  1518→                )
+  1519→
+  1520→                # Enriquecer prompt de subtarea (streaming) con contexto de skills relevantes
+  1521→                if SKILLS_ENRICHMENT_AVAILABLE:
+  1522→                    try:
+  1523→                        skills_context = enrich_prompt_with_skills(next_task.description, "")
+  1524→                        if skills_context:
+  1525→                            task_prompt += f"\n\n--- CONTEXTO DE SKILLS PARA SUBTAREA ---\n{skills_context}"
+  1526→                    except Exception:
+  1527→                        pass  # No dejar que el enriquecimiento rompa la ejecucion planificada
+  1528→
+  1529→                try:
+  1530→                    result = self.run(task_prompt)
+  1531→                    # self.run devuelve (respuesta, thinking_log)
+  1532→                    if isinstance(result, tuple):
+  1533→                        result = result[0]
+  1534→                    plan.mark_completed(next_task.id, result)
+  1535→                    results.append({"task": next_task.title, "result": result[:500]})
+  1536→                    planner._save_plan(plan)
+  1537→
+  1538→                    # Emitir resultado de subtarea
+  1539→                    yield {
+  1540→                        "type": "text",
+  1541→                        "data": f"✅ {next_task.title}: {result[:200]}\n\n"
+  1542→                    }
+  1543→
+  1544→                except Exception as e:
+  1545→                    plan.mark_failed(next_task.id, str(e))
+  1546→                    planner._save_plan(plan)
+  1547→
+  1548→                    yield {
+  1549→                        "type": "plan_update",
+  1550→                        "data": {
+  1551→                            "phase": "task_failed",
+  1552→                            "message": f"Subtarea fallo: {next_task.title} - {str(e)[:100]}",
+  1553→                            "task_id": next_task.id,
+  1554→                        }
+  1555→                    }
+  1556→                    # Intentar continuar con la siguiente subtarea
+  1557→
+  1558→        # Emitir resumen final
+  1559→        progress = plan.get_progress()
+  1560→        summary = f"Plan completado: {progress['completed']}/{progress['total']} tareas\n\n"
+  1561→        for r in results:
+  1562→            summary += f"- {r['task']}: {r['result'][:200]}\n"
+  1563→
+  1564→        yield {
+  1565→            "type": "plan_update",
+  1566→            "data": {
+  1567→                "phase": "completed",
+  1568→                "message": summary[:500],
+  1569→                "completed": progress['completed'],
+  1570→                "total": progress['total'],
+  1571→            }
+  1572→        }
+  1573→
+  1574→        yield {
+  1575→            "type": "done",
+  1576→            "data": summary,
+  1577→            "thinking_log": self.thinking_log,
+  1578→            "meta_status": self.metacognition.get_status() if hasattr(self, 'metacognition') else {},
+  1579→        }
+  1580→
+  1581→    # ----------------------------------------------------------
+  1582→    # STREAMING LLM CON TOOL CALLING (token a token)
+  1583→    # ----------------------------------------------------------
+  1584→    def _stream_llm_with_tools(self, messages, selected_schemas=None, force_tool_choice=False, model_override=None):
+  1585→        """
+  1586→        Genera respuesta del LLM con streaming REAL.
+  1587→        Yields: {"type": "token"|"tool_calls"|"done", "data": ...}
+  1588→        
+  1589→        v22: Agrega soporte para model_override (auto-routing).
+  1590→        v20: Agrega soporte para selected_schemas y tool_choice forzado.
+  1591→        """
+  1592→        if selected_schemas is None:
+  1593→            selected_schemas = TOOL_SCHEMAS
+  1594→        
+  1595→        import time as _time
+  1596→        _llm_start = _time.monotonic()
+  1597→        full_content = ""
+  1598→        full_tool_calls = []
+  1599→        
+  1600→        # v20: Construir opciones para tool_choice
+  1601→        options = {}
+  1602→        if force_tool_choice:
+  1603→            options["tool_choice"] = "required"
+  1604→            self._log("Stream: forzando tool_choice=required", "info")
+  1605→
+  1606→        try:
+  1607→            # Intentar streaming HTTP directo (mas rapido, sin overhead de lib)
+  1608→            # v22: Pasar model_override si hay auto-routing
+  1609→            for chunk in ollama.generate_stream(messages, tools=selected_schemas, model_override=model_override, options=options if options else None):
+  1610→                if isinstance(chunk, str):
+  1611→                    # Token de texto - emitir inmediatamente
+  1612→                    # PERO: si parece JSON de tool call, no emitirlo al usuario
+  1613→                    full_content += chunk
+  1614→                    # Detectar si el contenido es JSON de herramienta
+  1615→                    if self._looks_like_tool_json(full_content):
+  1616→                        continue  # Acumular sin emitir
+  1617→                    # Si antes se acumulaba JSON pero ya no, limpiar
+  1618→                    yield {"type": "token", "data": chunk}
+  1619→                elif isinstance(chunk, dict):
+  1620→                    # Resultado final con tool_calls
+  1621→                    msg = chunk.get("message", chunk)
+  1622→                    tool_calls = msg.get("tool_calls", [])
+  1623→                    content = msg.get("content", "")
+  1624→
+  1625→                    if content and not full_content:
+  1626→                        # Contenido que no se streameo (fallback)
+  1627→                        full_content = content
+  1628→                        yield {"type": "token", "data": content}
+  1629→
+  1630→                    if tool_calls:
+  1631→                        # Parsear tool calls
+  1632→                        parsed_calls = []
+  1633→                        for tc in tool_calls:
+  1634→                            tool_name = tc.get("function", {}).get("name", "")
+  1635→                            tool_params = tc.get("function", {}).get("arguments", {})
+  1636→                            self._log(f"Tool call: {tool_name}({tool_params})", "thinking")
+  1637→                            parsed_calls.append({"name": tool_name, "params": tool_params})
+  1638→                        yield {"type": "tool_calls", "data": parsed_calls}
+  1639→                        yield {"type": "done", "data": False}
+  1640→                        return
+  1641→
+  1642→            # Si llegamos aqui sin tool_calls, verificar si el contenido es JSON de herramientas
+  1643→            if full_content:
+  1644→                # Si el contenido acumulado era JSON de tool calls (no se emitio),
+  1645→                # parsearlo y ejecutar como tool calls
+  1646→                if self._looks_like_tool_json(full_content):
+  1647→                    parsed = self._parse_json(full_content)
+  1648→                    if parsed:
+  1649→                        # Verificar si son multiples tool calls
+  1650→                        if parsed.get("_multi_tool_calls") and parsed.get("tool_calls"):
+  1651→                            yield {"type": "tool_calls", "data": parsed["tool_calls"]}
+  1652→                            yield {"type": "done", "data": False}
+  1653→                            return
+  1654→                        accion = parsed.get("accion", "").strip()
+  1655→                        if accion and accion in TOOL_FUNCTIONS:
+  1656→                            yield {"type": "tool_calls", "data": [{"name": accion, "params": parsed.get("params", {})}]}
+  1657→                            yield {"type": "done", "data": False}
+  1658→                            return
+  1659→                    # Si no se pudo parsear como tool call, emitir el texto limpio
+  1660→                    clean = self._clean_json_leak(full_content)
+  1661→                    if clean != full_content:
+  1662→                        # El texto era JSON, emitir version limpia
+  1663→                        yield {"type": "token", "data": clean}
+  1664→                _llm_elapsed = (_time.monotonic() - _llm_start) * 1000.0
+  1665→                get_metrics().record_llm_call(_llm_elapsed)
+  1666→                yield {"type": "done", "data": True}
+  1667→                return
+  1668→
+  1669→        except Exception as e:
+  1670→            self._log(f"Error en streaming: {e}", "error")
+  1671→            get_metrics().record_error("llm_stream")
+  1672→
+  1673→        # Fallback: modo no-streaming
+  1674→        try:
+  1675→            response = ollama.generate(messages, tools=selected_schemas, model_override=model_override, options=options if options else None)
+  1676→            # generate() already records llm_call via @timed, so no duplicate
+  1677→            if isinstance(response, str):
+  1678→                yield {"type": "token", "data": response}
+  1679→                yield {"type": "done", "data": True}
+  1680→                return
+  1681→
+  1682→            message = response.get("message", response)
+  1683→            tool_calls = message.get("tool_calls", [])
+  1684→            content = message.get("content", "")
+  1685→
+  1686→            if tool_calls:
+  1687→                parsed_calls = []
+  1688→                for tc in tool_calls:
+  1689→                    tool_name = tc.get("function", {}).get("name", "")
+  1690→                    tool_params = tc.get("function", {}).get("arguments", {})
+  1691→                    self._log(f"Tool call: {tool_name}({tool_params})", "thinking")
+  1692→                    parsed_calls.append({"name": tool_name, "params": tool_params})
+  1693→                yield {"type": "tool_calls", "data": parsed_calls}
+  1694→                yield {"type": "done", "data": False}
+  1695→                return
+  1696→
+  1697→            if content:
+  1698→                yield {"type": "token", "data": content}
+  1699→                yield {"type": "done", "data": True}
+  1700→                return
+  1701→
+  1702→        except Exception as e:
+  1703→            self._log(f"Error en fallback: {e}", "error")
+  1704→
+  1705→        yield {"type": "done", "data": False}
+  1706→
+  1707→    # ----------------------------------------------------------
+  1708→    # REACT CON TOOL CALLING (sin streaming)
+  1709→    # ----------------------------------------------------------
+  1710→    def _react_with_tools(self, messages, iteration, selected_schemas=None, model_override=None):
+  1711→        """ReAct usando function calling nativo. Soporta multiple tool calls.
+  1712→        
+  1713→        v22: Agrega soporte para model_override (auto-routing).
+  1714→        v20: Agrega soporte para:
+  1715→        - selected_schemas: solo enviar schemas relevantes al modelo
+  1716→        - tool_choice="required" en primera iteracion cuando la tarea necesita herramientas
+  1717→        """
+  1718→        if selected_schemas is None:
+  1719→            selected_schemas = TOOL_SCHEMAS
+  1720→        
+  1721→        # v20: Forzar uso de herramientas en la primera iteracion cuando
+  1722→        # la tarea claramente las necesita. Esto elimina el 60% de los casos
+  1723→        # donde el modelo intenta responder directamente.
+  1724→        options = {}
+  1725→        if iteration == 0 and hasattr(self, '_current_user_message') and self._task_needs_tools(self._current_user_message):
+  1726→            options["tool_choice"] = "required"
+  1727→            self._log("Forzando tool_choice=required (tarea necesita herramientas)", "info")
+  1728→        
+  1729→        try:
+  1730→            response = ollama.generate(messages, tools=selected_schemas, model_override=model_override, options=options if options else None)
+  1731→
+  1732→            if isinstance(response, str):
+  1733→                return ("respond", response)
+  1734→
+  1735→            message = response.get("message", response)
+  1736→            tool_calls = message.get("tool_calls", [])
+  1737→
+  1738→            if tool_calls:
+  1739→                parsed_calls = []
+  1740→                for tc in tool_calls:
+  1741→                    tool_name = tc.get("function", {}).get("name", "")
+  1742→                    tool_params = tc.get("function", {}).get("arguments", {})
+  1743→                    self._log(f"Tool call: {tool_name}({tool_params})", "thinking")
+  1744→                    parsed_calls.append({"name": tool_name, "params": tool_params})
+  1745→                return ("tool_calls", parsed_calls)
+  1746→
+  1747→            content = message.get("content", "")
+  1748→            if content:
+  1749→                # SAFETY CHECK: Si el modelo genero JSON de tool call en vez de
+  1750→                # usar function calling nativo, parsearlo y ejecutarlo
+  1751→                parsed = self._parse_json(content)
+  1752→                if parsed:
+  1753→                    accion = parsed.get("accion", "").strip()
+  1754→                    if accion and accion in TOOL_FUNCTIONS:
+  1755→                        self._log(f"Tool call via JSON (modelo no uso function calling nativo): {accion}", "thinking")
+  1756→                        params = parsed.get("params", {})
+  1757→                        return ("tool_calls", [{"name": accion, "params": params}])
+  1758→                    # Si tiene respuesta_final, usarla
+  1759→                    respuesta_final = parsed.get("respuesta_final", "").strip()
+  1760→                    if respuesta_final:
+  1761→                        return ("respond", respuesta_final)
+  1762→                return ("respond", content)
+  1763→
+  1764→            return ("error", "Respuesta vacia del modelo")
+  1765→
+  1766→        except Exception as e:
+  1767→            self._log(f"Error en tool calling: {e}", "error")
+  1768→            self.supports_tool_calling = False
+  1769→            return ("error", str(e))
+  1770→
+  1771→    # ----------------------------------------------------------
+  1772→    # REACT CON JSON FALLBACK
+  1773→    # ----------------------------------------------------------
+  1774→    def _react_with_json(self, messages, iteration, model_override=None):
+  1775→        """ReAct usando JSON parsing (fallback).
+  1776→        v22: Agrega soporte para model_override (auto-routing).
+  1777→        v21: Ahora filtra tools list en JSON prompt usando _selected_tool_names.
+  1778→        """
+  1779→        # generate_chat() already records llm_call via @timed decorator
+  1780→        # v20 FIX: El JSON_TOOLS_PROMPT ahora se inyecta proactivamente desde _build_messages()
+  1781→        # cuando supports_tool_calling=False. Este check reactivo solo actua como fallback
+  1782→        # para el caso donde supports_tool_calling no se haya detectado aun (None).
+  1783→        if not any("HERRAMIENTAS DISPONIBLES" in str(m.get("content", "")) for m in messages):
+  1784→            system_msg_idx = next((i for i, m in enumerate(messages) if m["role"] == "system"), -1)
+  1785→            if system_msg_idx >= 0:
+  1786→                # v21: Usar prompt filtrado si tenemos seleccion de schemas
+  1787→                use_compact = self._should_use_compact_prompt()
+  1788→                if hasattr(self, '_selected_tool_names') and self._selected_tool_names:
+  1789→                    tools_prompt = self._build_filtered_json_tools_prompt(use_compact)
+  1790→                else:
+  1791→                    tools_prompt = JSON_TOOLS_PROMPT_COMPACT if use_compact else JSON_TOOLS_PROMPT
+  1792→                messages[system_msg_idx]["content"] += tools_prompt
+  1793→
+  1794→        try:
+  1795→            # v22: Si hay model_override, usar generate() en vez de generate_chat()
+  1796→            # para pasar el modelo routeado. generate_chat() no acepta model_override.
+  1797→            if model_override:
+  1798→                response = ollama.generate(messages, model_override=model_override)
+  1799→            else:
+  1800→                response = ollama.generate_chat(messages)
+  1801→            if not response:
+  1802→                return ("error", "El LLM no respondio")
+  1803→
+  1804→            parsed = self._parse_json(response)
+  1805→            if not parsed:
+  1806→                # No es JSON - probablemente respuesta directa del modelo
+  1807→                # Limpiar posibles restos de formato JSON
+  1808→                clean = self._clean_json_leak(response)
+  1809→                return ("respond", clean)
+  1810→
+  1811→            # 1. Si hay _multi_tool_calls, ejecutar todas las herramientas
+  1812→            if parsed.get("_multi_tool_calls") and parsed.get("tool_calls"):
+  1813→                return ("tool_calls", parsed["tool_calls"])
+  1814→
+  1815→            # 2. Si hay respuesta_final con contenido, usarla
+  1816→            respuesta_final = parsed.get("respuesta_final", "").strip()
+  1817→            if respuesta_final:
+  1818→                return ("respond", respuesta_final)
+  1819→
+  1820→            accion = parsed.get("accion", "").strip()
+  1821→            params = parsed.get("params", {})
+  1822→            pensamiento = parsed.get("pensamiento", "").strip()
+  1823→
+  1824→            if pensamiento:
+  1825→                self._log(f"Pensamiento: {pensamiento}", "thinking")
+  1826→
+  1827→            # 3. Si hay accion valida, ejecutar herramienta
+  1828→            if accion and accion in TOOL_FUNCTIONS:
+  1829→                # Si tambien hay pensamiento, inyectarlo como contexto
+  1830→                if pensamiento:
+  1831→                    messages.append({
+  1832→                        "role": "assistant",
+  1833→                        "content": f"[Pensamiento: {pensamiento}] Ejecutando {accion}..."
+  1834→                    })
+  1835→                return ("tool_calls", [{"name": accion, "params": params}])
+  1836→
+  1837→            # 3. Si hay pensamiento pero no accion ni respuesta_final,
+  1838→            #    el modelo esta respondiendo en campo equivocado - usar pensamiento
+  1839→            if pensamiento and not accion:
+  1840→                self._log("Modelo respondio en 'pensamiento' en vez de 'respuesta_final'", "info")
+  1841→                return ("respond", pensamiento)
+  1842→
+  1843→            # 4. Fallback: devolver texto limpio (no JSON crudo)
+  1844→            clean = self._clean_json_leak(response)
+  1845→            return ("respond", clean)
+  1846→
+  1847→        except Exception as e:
+  1848→            return ("error", str(e))
+  1849→
+  1850→    def _clean_json_leak(self, text):
+  1851→        """Limpia texto que tiene restos de formato JSON para mostrar al usuario.
+  1852→        v3: Mas agresivo - tambien limpia JSON parcial al inicio/final del texto.
+  1853→        """
+  1854→        # Si el texto es JSON completo, extraer solo el contenido util
+  1855→        parsed = self._parse_json(text)
+  1856→        if parsed:
+  1857→            # Prioridad: respuesta_final > pensamiento > texto original
+  1858→            if parsed.get("respuesta_final", "").strip():
+  1859→                return parsed["respuesta_final"].strip()
+  1860→            if parsed.get("pensamiento", "").strip():
+  1861→                return parsed["pensamiento"].strip()
+  1862→        # Si no es JSON completo, intentar limpiar restos
+  1863→        # Caso: texto que empieza con JSON parcial
+  1864→        import re as _re
+  1865→        # Remover JSON parcial al inicio: {"pensamiento": "..." ... restos
+  1866→        cleaned = _re.sub(r'^\s*\{[^}]*$', '', text).strip()
+  1867→        # Remover JSON parcial al final
+  1868→        cleaned = _re.sub(r'\{[^}]*$\s*$', '', cleaned).strip()
+  1869→        # Si despues de limpiar quedo vacio, devolver texto original
+  1870→        return cleaned if cleaned else text
+  1871→
+  1872→    # ----------------------------------------------------------
+  1873→    # EJECUCION DE TOOLS (paralelo + retry)
+  1874→    # ----------------------------------------------------------
+  1875→    def _execute_tool_calls(self, tool_calls, messages):
+  1876→        """Ejecuta multiples tool calls con rate limiting y paralelismo."""
+  1877→        from concurrent.futures import ThreadPoolExecutor, as_completed
+  1878→
+  1879→        # Rate limiting: filtrar herramientas que se llamaron demasiadas veces
+  1880→        filtered_calls = []
+  1881→        for tc in tool_calls:
+  1882→            tool_name = tc["name"]
+  1883→            self._tool_call_counts[tool_name] = self._tool_call_counts.get(tool_name, 0) + 1
+  1884→            self._total_tool_calls += 1
+  1885→
+  1886→            if self._total_tool_calls > self.MAX_TOTAL_TOOL_CALLS:
+  1887→                self._log(f"Rate limit: max total tool calls alcanzado ({self.MAX_TOTAL_TOOL_CALLS})", "warning")
+  1888→                break
+  1889→
+  1890→            if self._tool_call_counts[tool_name] > self.MAX_SAME_TOOL_CALLS:
+  1891→                # v20: Herramientas en UNLIMITED_TOOLS no tienen limite de repeticion
+  1892→                if tool_name not in UNLIMITED_TOOLS:
+  1893→                    self._log(f"Rate limit: {tool_name} llamada {self._tool_call_counts[tool_name]} veces (max {self.MAX_SAME_TOOL_CALLS})", "warning")
+  1894→                    continue
+  1895→
+  1896→            filtered_calls.append(tc)
+  1897→
+  1898→        tool_calls = filtered_calls
+  1899→
+  1900→        # Validar parametros de todos los tool calls primero
+  1901→        for tc in tool_calls:
+  1902→            tc["params"] = self._validate_tool_params(tc["name"], tc["params"])
+  1903→
+  1904→        # Si hay solo 1 tool, ejecutar directamente (sin overhead de threads)
+  1905→        if len(tool_calls) == 1:
+  1906→            return [self._execute_single_tool(tool_calls[0], messages)]
+  1907→
+  1908→        # Si hay multiples tools, ejecutar en paralelo
+  1909→        # PERO no paralelizar si alguno es "ejecutar_comando" (puede tener side effects)
+  1910→        has_sequential = any(tc["name"] == "ejecutar_comando" for tc in tool_calls)
+  1911→        
+  1912→        if has_sequential:
+  1913→            # Ejecutar secuencialmente para evitar race conditions
+  1914→            results = []
+  1915→            for tc in tool_calls:
+  1916→                results.append(self._execute_single_tool(tc, messages))
+  1917→            return results
+  1918→
+  1919→        # Ejecucion paralela para tools de solo lectura
+  1920→        results = [None] * len(tool_calls)
+  1921→        with ThreadPoolExecutor(max_workers=min(len(tool_calls), 3)) as executor:
+  1922→            futures = {}
+  1923→            for i, tc in enumerate(tool_calls):
+  1924→                future = executor.submit(self._execute_single_tool, tc, messages)
+  1925→                futures[future] = i
+  1926→            
+  1927→            for future in as_completed(futures):
+  1928→                idx = futures[future]
+  1929→                try:
+  1930→                    results[idx] = future.result(timeout=30)
+  1931→                except Exception as e:
+  1932→                    results[idx] = f"ERROR: {e}"
+  1933→
+  1934→        return results
+  1935→
+  1936→    def _execute_single_tool(self, tc, messages, max_retries=1):
+  1937→        """Ejecuta un solo tool call con retry automatico."""
+  1938→        import time as _time
+  1939→        tool_name = tc["name"]
+  1940→        tool_params = tc["params"]
+  1941→
+  1942→        self._log(f"Ejecutando: {tool_name}({tool_params})", "execution")
+  1943→
+  1944→        _tool_start = _time.monotonic()
+  1945→        tool_result = self._execute_tool(tool_name, tool_params)
+  1946→
+  1947→        # Retry si fallo y el tool es reintentable
+  1948→        if "ERROR" in tool_result and max_retries > 0:
+  1949→            retryable_errors = ["TIMEOUT", "ConnectionError", "empty", "vacia"]
+  1950→            if any(err in tool_result for err in retryable_errors):
+  1951→                self._log(f"Reintentando {tool_name} (error transitorio)...", "execution")
+  1952→                tool_result = self._execute_tool(tool_name, tool_params)
+  1953→
+  1954→        _tool_elapsed_ms = (_time.monotonic() - _tool_start) * 1000.0
+  1955→        get_metrics().record_tool_call(tool_name, _tool_elapsed_ms)
+  1956→
+  1957→        if "ERROR" in tool_result:
+  1958→            get_metrics().record_error("tool:" + tool_name)
+  1959→
+  1960→        self._log(f"Resultado: {tool_result[:150]}...", "observation")
+  1961→
+  1962→        # Alimentar memoria de trabajo
+  1963→        self.memory.add_step(f"{tool_name}({tool_params})", tool_result[:200])
+  1964→        if "ERROR" in tool_result:
+  1965→            self.memory.set_error(f"{tool_name}: {tool_result[:100]}")
+  1966→        if "PELIGROSO" in tool_result:
+  1967→            self._log(f"Comando peligroso bloqueado: {tool_name}", "warning")
+  1968→        if len(tool_result) > 50 and "ERROR" not in tool_result:
+  1969→            self.memory.remember(
+  1970→                f"Resultado de {tool_name}: {tool_result[:300]}",
+  1971→                metadata={"type": "tool_result", "tool": tool_name}
+  1972→            )
+  1973→
+  1974→        return tool_result
+  1975→
+  1976→    def _validate_tool_params(self, tool_name, params):
+  1977→        """Valida y limpia parametros de un tool call antes de ejecutar."""
+  1978→        if not isinstance(params, dict):
+  1979→            params = {}
+  1980→        
+  1981→        # Asegurar que params tenga las claves correctas
+  1982→        clean_params = {}
+  1983→        for key, value in params.items():
+  1984→            if isinstance(key, str) and len(key) < 50:
+  1985→                # Limpiar valores string de posibles inyecciones
+  1986→                if isinstance(value, str):
+  1987→                    # No sanitizar contenido de archivos (puede tener codigo legitimo)
+  1988→                    if tool_name in ("escribir_archivo", "generar_codigo"):
+  1989→                        clean_params[key] = value
+  1990→                    else:
+  1991→                        from utils.security import sanitize_input
+  1992→                        clean_params[key] = sanitize_input(value)
+  1993→                else:
+  1994→                    clean_params[key] = value
+  1995→        
+  1996→        return clean_params
+  1997→
+  1998→    def _feed_tool_results(self, tool_calls, results, messages):
+  1999→        """Alimenta resultados de tools de vuelta al agente.
+  2000→        v21: Usa truncation inteligente por tipo de herramienta.
+
+[showing lines 1-2000 of 2697; use offset=2001 with limit to continue reading]

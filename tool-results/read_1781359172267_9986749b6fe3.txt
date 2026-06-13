@@ -1,0 +1,1197 @@
+     1→"""
+     2→=============================================================
+     3→AGENTE v17 - Multi-Agent Orchestrator
+     4→=============================================================
+     5→Orquesta multiples sub-agentes para ejecutar tareas en
+     6→paralelo o secuencia. Cada sub-agente es una instancia
+     7→del ReactAgent con su propio contexto.
+     8→
+     9→Estrategias:
+    10→- SEQUENTIAL: Ejecuta subtareas una por una
+    11→- PARALLEL: Ejecuta subtareas independientes en paralelo
+    12→- ADAPTIVE: Decide automaticamente segun dependencias
+    13→
+    14→v17: Multi-agent orchestration para tareas complejas.
+    15→=============================================================
+    16→"""
+    17→
+    18→import json
+    19→import uuid
+    20→import traceback
+    21→from datetime import datetime
+    22→from dataclasses import dataclass, field
+    23→from typing import Any, Optional
+    24→from concurrent.futures import ThreadPoolExecutor, Future
+    25→
+    26→from config import logger
+    27→
+    28→# Importar herramientas - intentar desde registry, fallback a tools
+    29→try:
+    30→    from tools.registry import TOOL_FUNCTIONS, TOOL_SCHEMAS
+    31→except ImportError:
+    32→    try:
+    33→        from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS
+    34→    except ImportError:
+    35→        TOOL_FUNCTIONS = {}
+    36→        TOOL_SCHEMAS = []
+    37→
+    38→# Importar LLM
+    39→try:
+    40→    from llm import ollama
+    41→except ImportError:
+    42→    ollama = None
+    43→
+    44→
+    45→# ============================================================
+    46→# DATA MODEL: SubAgente
+    47→# ============================================================
+    48→
+    49→@dataclass
+    50→class SubAgent:
+    51→    """Representa un sub-agente que ejecuta una subtarea especifica."""
+    52→
+    53→    id: str
+    54→    task: str                                   # Descripcion de la tarea
+    55→    status: str = "pending"                     # pending / running / completed / failed
+    56→    result: Optional[str] = None                # Resultado de la ejecucion
+    57→    error: Optional[str] = None                 # Mensaje de error si fallo
+    58→    dependencies: list[str] = field(default_factory=list)  # IDs de tareas dependientes
+    59→    started_at: Optional[str] = None            # Timestamp inicio
+    60→    completed_at: Optional[str] = None          # Timestamp fin
+    61→
+    62→    # Referencia al Future para poder cancelar ejecucion paralela
+    63→    _future: Optional[Future] = field(default=None, repr=False)
+    64→
+    65→    def to_dict(self) -> dict:
+    66→        """Serializa el sub-agente a diccionario."""
+    67→        return {
+    68→            "id": self.id,
+    69→            "task": self.task,
+    70→            "status": self.status,
+    71→            "result": self.result,
+    72→            "error": self.error,
+    73→            "dependencies": self.dependencies,
+    74→            "started_at": self.started_at,
+    75→            "completed_at": self.completed_at,
+    76→        }
+    77→
+    78→
+    79→# ============================================================
+    80→# ORQUESTADOR MULTI-AGENTE
+    81→# ============================================================
+    82→
+    83→class Orchestrator:
+    84→    """
+    85→    Orquesta multiples sub-agentes para ejecutar tareas complejas.
+    86→
+    87→    Recibe un ExecutionPlan del TaskPlanner y lo ejecuta usando
+    88→    sub-agentes ligeros que usan el LLM directamente (sin instanciar
+    89→    ReactAgent completo, que seria demasiado costoso).
+    90→
+    91→    Estrategias de ejecucion:
+    92→    - sequential: Una tarea a la vez, en orden de dependencias
+    93→    - parallel: Tareas sin dependencias mutuas en paralelo
+    94→    - adaptive: Decide automaticamente segun el grafo de dependencias
+    95→    """
+    96→
+    97→    # Limite de iteraciones del bucle LLM por sub-agente
+    98→    MAX_SUBAGENT_ITERATIONS = 5
+    99→
+   100→    def __init__(self):
+   101→        self._agents: dict[str, SubAgent] = {}       # Sub-agentes activos
+   102→        self._results: dict[str, Any] = {}            # Resultados de sub-agentes completados
+   103→        self._max_parallel: int = 3                   # Maximo agentes en paralelo
+   104→        self._strategy: str = "adaptive"              # Estrategia por defecto
+   105→        self._cancelled: set[str] = set()             # IDs de tareas canceladas
+   106→        self._plan_data: Optional[dict] = None        # Referencia al plan original
+   107→
+   108→    # ============================================================
+   109→    # METODO PRINCIPAL: ORQUESTAR
+   110→    # ============================================================
+   111→
+   112→    def orchestrate(self, plan: dict) -> dict:
+   113→        """
+   114→        Metodo principal de orquestacion.
+   115→
+   116→        Args:
+   117→            plan: ExecutionPlan serializado (de task_planner.to_dict())
+   118→                  Debe contener: id, goal, tasks (dict de tareas),
+   119→                  status, description
+   120→
+   121→        Returns:
+   122→            Dict con resultado de la orquestacion:
+   123→            {
+   124→                "plan_id": str,
+   125→                "goal": str,
+   126→                "strategy_used": str,
+   127→                "status": "completed" | "partial" | "failed",
+   128→                "total_tasks": int,
+   129→                "completed_tasks": int,
+   130→                "failed_tasks": int,
+   131→                "results": dict[str, dict],   # id -> subagent.to_dict()
+   132→                "duration_seconds": float,
+   133→            }
+   134→        """
+   135→        inicio = datetime.now()
+   136→        self._plan_data = plan
+   137→
+   138→        plan_id = plan.get("id", "unknown")
+   139→        goal = plan.get("goal", "")
+   140→        tasks_data = plan.get("tasks", {})
+   141→
+   142→        logger.info(f"[Orchestrator] Iniciando orquestacion plan {plan_id}: {goal}")
+   143→        logger.info(f"[Orchestrator] {len(tasks_data)} tareas a ejecutar")
+   144→
+   145→        # Resetear estado
+   146→        self._agents.clear()
+   147→        self._results.clear()
+   148→        self._cancelled.clear()
+   149→
+   150→        # Crear sub-agentes desde las tareas del plan
+   151→        for task_id, task_info in tasks_data.items():
+   152→            sub = SubAgent(
+   153→                id=task_id,
+   154→                task=task_info.get("title", task_info.get("description", "Tarea sin descripcion")),
+   155→                dependencies=task_info.get("dependencies", []),
+   156→                status="pending",
+   157→            )
+   158→            self._agents[task_id] = sub
+   159→
+   160→        if not self._agents:
+   161→            logger.warning("[Orchestrator] Plan sin tareas, nada que orquestar")
+   162→            return self._build_result(plan_id, goal, "completed", inicio)
+   163→
+   164→        # Determinar estrategia de ejecucion
+   165→        strategy = self._strategy
+   166→        if strategy == "adaptive":
+   167→            strategy = "parallel" if self._should_parallelize(self._agents) else "sequential"
+   168→            logger.info(f"[Orchestrator] Estrategia adaptativa: elegida '{strategy}'")
+   169→
+   170→        logger.info(f"[Orchestrator] Ejecutando con estrategia: {strategy}")
+   171→
+   172→        # Ejecutar segun estrategia
+   173→        try:
+   174→            if strategy == "parallel":
+   175→                self._execute_parallel()
+   176→            else:
+   177→                self._execute_sequential()
+   178→        except Exception as e:
+   179→            logger.error(f"[Orchestrator] Error durante orquestacion: {e}")
+   180→            logger.debug(traceback.format_exc())
+   181→
+   182→        # Determinar estado final
+   183→        completed = sum(1 for a in self._agents.values() if a.status == "completed")
+   184→        failed = sum(1 for a in self._agents.values() if a.status == "failed")
+   185→        total = len(self._agents)
+   186→
+   187→        if completed == total:
+   188→            final_status = "completed"
+   189→        elif completed > 0:
+   190→            final_status = "partial"
+   191→        else:
+   192→            final_status = "failed"
+   193→
+   194→        # Guardar resultados
+   195→        for aid, agent in self._agents.items():
+   196→            self._results[aid] = agent.to_dict()
+   197→
+   198→        resultado = self._build_result(plan_id, goal, final_status, inicio)
+   199→        resultado["strategy_used"] = strategy
+   200→
+   201→        logger.info(
+   202→            f"[Orchestrator] Orquestacion finalizada: {completed}/{total} completadas, "
+   203→            f"{failed} fallidas, estado={final_status}"
+   204→        )
+   205→
+   206→        return resultado
+   207→
+   208→    # ============================================================
+   209→    # EJECUCION SECUENCIAL
+   210→    # ============================================================
+   211→
+   212→    def _execute_sequential(self):
+   213→        """Ejecuta las tareas una por una respetando el orden de dependencias."""
+   214→        remaining = set(self._agents.keys())
+   215→
+   216→        while remaining:
+   217→            # Buscar la siguiente tarea ejecutable (pendiente con deps completadas)
+   218→            next_id = self._find_executable_task(remaining)
+   219→
+   220→            if next_id is None:
+   221→                # No hay tareas ejecutables: verificar si hay bloqueo
+   222→                pending = [aid for aid in remaining if self._agents[aid].status == "pending"]
+   223→                if pending:
+   224→                    logger.warning(
+   225→                        f"[Orchestrator] Deadlock detectado: {len(pending)} tareas "
+   226→                        f"pendientes sin poder ejecutarse. Marcando como failed."
+   227→                    )
+   228→                    for aid in pending:
+   229→                        self._agents[aid].status = "failed"
+   230→                        self._agents[aid].error = "Deadlock: dependencias no resueltas"
+   231→                    break
+   232→                else:
+   233→                    # Todas las restantes ya no estan pendientes
+   234→                    break
+   235→
+   236→            agent = self._agents[next_id]
+   237→            remaining.discard(next_id)
+   238→
+   239→            # Verificar si fue cancelada
+   240→            if next_id in self._cancelled:
+   241→                agent.status = "failed"
+   242→                agent.error = "Cancelada por el usuario"
+   243→                continue
+   244→
+   245→            # Ejecutar sub-agente
+   246→            context = self._get_execution_context(agent)
+   247→            self._execute_subagent(agent, context)
+   248→
+   249→            # Si fallo pero hay dependientes, los marcamos como bloqueados
+   250→            if agent.status == "failed":
+   251→                self._mark_dependents_failed(next_id, "Tarea dependiente fallo")
+   252→
+   253→    # ============================================================
+   254→    # EJECUCION PARALELA
+   255→    # ============================================================
+   256→
+   257→    def _execute_parallel(self):
+   258→        """
+   259→        Ejecuta tareas en paralelo usando ThreadPoolExecutor.
+   260→        Las tareas con dependencias esperan a que sus deps terminen.
+   261→        """
+   262→        remaining = set(self._agents.keys())
+   263→        completed_ids: set[str] = set()
+   264→
+   265→        with ThreadPoolExecutor(max_workers=self._max_parallel) as executor:
+   266→            futures: dict[str, Future] = {}
+   267→
+   268→            while remaining or futures:
+   269→                # Lanzar todas las tareas ejecutables que no esten en ejecucion
+   270→                for aid in list(remaining):
+   271→                    if aid in futures:
+   272→                        continue
+   273→                    agent = self._agents[aid]
+   274→
+   275→                    # Verificar si fue cancelada
+   276→                    if aid in self._cancelled:
+   277→                        agent.status = "failed"
+   278→                        agent.error = "Cancelada por el usuario"
+   279→                        remaining.discard(aid)
+   280→                        completed_ids.add(aid)
+   281→                        continue
+   282→
+   283→                    # Verificar que las dependencias esten completadas
+   284→                    deps_met = all(
+   285→                        dep_id in completed_ids and self._agents[dep_id].status == "completed"
+   286→                        for dep_id in agent.dependencies
+   287→                        if dep_id in self._agents
+   288→                    )
+   289→
+   290→                    # Verificar si alguna dependencia fallo
+   291→                    deps_failed = any(
+   292→                        dep_id in completed_ids and self._agents[dep_id].status == "failed"
+   293→                        for dep_id in agent.dependencies
+   294→                        if dep_id in self._agents
+   295→                    )
+   296→
+   297→                    if deps_failed:
+   298→                        agent.status = "failed"
+   299→                        agent.error = "Tarea dependiente fallo"
+   300→                        remaining.discard(aid)
+   301→                        completed_ids.add(aid)
+   302→                        continue
+   303→
+   304→                    if deps_met:
+   305→                        # Lanzar en paralelo
+   306→                        context = self._get_execution_context(agent)
+   307→                        future = executor.submit(self._execute_subagent, agent, context)
+   308→                        futures[aid] = future
+   309→                        agent._future = future
+   310→                        remaining.discard(aid)
+   311→
+   312→                # Verificar si hay futures completados
+   313→                done_futures = {
+   314→                    aid: fut for aid, fut in futures.items() if fut.done()
+   315→                }
+   316→
+   317→                if not done_futures and futures:
+   318→                    # Ninguno termino todavia, esperar un poco
+   319→                    import time
+   320→                    time.sleep(0.2)
+   321→                    continue
+   322→
+   323→                # Recolectar resultados de futures completados
+   324→                for aid, fut in done_futures.items():
+   325→                    try:
+   326→                        fut.result()  # Propaga excepciones si las hubo
+   327→                    except Exception as e:
+   328→                        logger.error(f"[Orchestrator] Error en future de tarea {aid}: {e}")
+   329→                        if self._agents[aid].status == "running":
+   330→                            self._agents[aid].status = "failed"
+   331→                            self._agents[aid].error = str(e)
+   332→
+   333→                    del futures[aid]
+   334→                    completed_ids.add(aid)
+   335→
+   336→                # Si no hay mas tareas pendientes ni futures, terminar
+   337→                if not remaining and not futures:
+   338→                    break
+   339→
+   340→                # Detectar deadlock
+   341→                if not done_futures and not remaining:
+   342→                    break
+   343→
+   344→    # ============================================================
+   345→    # EJECUCION DE SUB-AGENTE
+   346→    # ============================================================
+   347→
+   348→    def _execute_subagent(self, sub_agent: SubAgent, context: dict) -> SubAgent:
+   349→        """
+   350→        Ejecuta la tarea de un sub-agente usando el LLM directamente.
+   351→
+   352→        No instancia un ReactAgent completo (demasiado costoso). En su lugar:
+   353→        1. Crea un prompt enfocado con la tarea, herramientas disponibles, y contexto
+   354→        2. Llama al LLM para decidir que herramientas usar
+   355→        3. Ejecuta las herramientas y alimenta resultados de vuelta
+   356→        4. Repite hasta obtener respuesta final o alcanzar limite de iteraciones
+   357→
+   358→        Args:
+   359→            sub_agent: SubAgente a ejecutar (se modifica in-place)
+   360→            context: Contexto de tareas previas completadas
+   361→
+   362→        Returns:
+   363→            El SubAgent con resultado o error actualizado
+   364→        """
+   365→        sub_agent.status = "running"
+   366→        sub_agent.started_at = datetime.now().isoformat()
+   367→
+   368→        logger.info(f"[Orchestrator] Ejecutando sub-agente {sub_agent.id}: {sub_agent.task[:60]}...")
+   369→
+   370→        try:
+   371→            # Construir lista de herramientas disponibles
+   372→            tools_list = self._build_tools_description()
+   373→
+   374→            # Bucle de iteraciones del sub-agente
+   375→            conversation_history = []
+   376→            iteration = 0
+   377→            final_answer = None
+   378→
+   379→            # Prompt inicial del sub-agente
+   380→            system_prompt = self._build_subagent_prompt(sub_agent, context, tools_list)
+   381→            conversation_history.append({"role": "system", "content": system_prompt})
+   382→            conversation_history.append({"role": "user", "content": f"Ejecuta tu tarea: {sub_agent.task}"})
+   383→
+   384→            while iteration < self.MAX_SUBAGENT_ITERATIONS:
+   385→                iteration += 1
+   386→                logger.debug(
+   387→                    f"[Orchestrator] Sub-agente {sub_agent.id} iteracion {iteration}/{self.MAX_SUBAGENT_ITERATIONS}"
+   388→                )
+   389→
+   390→                # Verificar cancelacion
+   391→                if sub_agent.id in self._cancelled:
+   392→                    sub_agent.status = "failed"
+   393→                    sub_agent.error = "Cancelada durante ejecucion"
+   394→                    return sub_agent
+   395→
+   396→                # Llamar al LLM
+   397→                if ollama is None:
+   398→                    sub_agent.status = "failed"
+   399→                    sub_agent.error = "LLM no disponible (ollama=None)"
+   400→                    return sub_agent
+   401→
+   402→                llm_response = ollama.generate(conversation_history)
+   403→
+   404→                if not llm_response:
+   405→                    logger.warning(f"[Orchestrator] Sub-agente {sub_agent.id}: LLM sin respuesta")
+   406→                    sub_agent.status = "failed"
+   407→                    sub_agent.error = "LLM no retorno respuesta"
+   408→                    return sub_agent
+   409→
+   410→                # Parsear respuesta del LLM
+   411→                parsed = self._parse_llm_response(llm_response)
+   412→
+   413→                if parsed.get("final_answer"):
+   414→                    # El sub-agente tiene una respuesta final
+   415→                    final_answer = parsed["final_answer"]
+   416→                    break
+   417→
+   418→                if parsed.get("tool_name"):
+   419→                    # El sub-agente quiere usar una herramienta
+   420→                    tool_name = parsed["tool_name"]
+   421→                    tool_params = parsed.get("tool_params", {})
+   422→
+   423→                    tool_result = self._execute_tool(tool_name, tool_params)
+   424→
+   425→                    # Alimentar resultado de vuelta al LLM
+   426→                    conversation_history.append({"role": "assistant", "content": llm_response if isinstance(llm_response, str) else str(llm_response)})
+   427→                    conversation_history.append({
+   428→                        "role": "user",
+   429→                        "content": f"Resultado de {tool_name}: {tool_result}"
+   430→                    })
+   431→                else:
+   432→                    # No hay tool ni final_answer, intentar extraer respuesta del texto
+   433→                    if isinstance(llm_response, str) and len(llm_response.strip()) > 10:
+   434→                        final_answer = llm_response.strip()
+   435→                        break
+   436→                    else:
+   437→                        # Pedir al LLM que produzca una respuesta concreta
+   438→                        conversation_history.append({"role": "assistant", "content": str(llm_response)})
+   439→                        conversation_history.append({
+   440→                            "role": "user",
+   441→                            "content": "Por favor, proporciona tu respuesta final en formato JSON con el campo 'final_answer'."
+   442→                        })
+   443→
+   444→            # Determinar resultado final
+   445→            if final_answer:
+   446→                sub_agent.status = "completed"
+   447→                sub_agent.result = final_answer
+   448→                logger.info(f"[Orchestrator] Sub-agente {sub_agent.id} completado exitosamente")
+   449→            else:
+   450→                # No llego a respuesta final pero termino iteraciones
+   451→                sub_agent.status = "completed"
+   452→                sub_agent.result = (
+   453→                    f"Tarea ejecutada ({iteration} iteraciones). "
+   454→                    f"Resultado parcial obtenido."
+   455→                )
+   456→                logger.warning(
+   457→                    f"[Orchestrator] Sub-agente {sub_agent.id}: max iteraciones alcanzadas sin respuesta final"
+   458→                )
+   459→
+   460→        except Exception as e:
+   461→            logger.error(f"[Orchestrator] Sub-agente {sub_agent.id} fallo: {e}")
+   462→            logger.debug(traceback.format_exc())
+   463→            sub_agent.status = "failed"
+   464→            sub_agent.error = str(e)
+   465→
+   466→        finally:
+   467→            sub_agent.completed_at = datetime.now().isoformat()
+   468→
+   469→        return sub_agent
+   470→
+   471→    # ============================================================
+   472→    # CONSTRUCCION DE PROMPT DE SUB-AGENTE
+   473→    # ============================================================
+   474→
+   475→    def _build_subagent_prompt(self, sub_agent: SubAgent, context: dict, tools_list: str) -> str:
+   476→        """
+   477→        Construye el prompt del sistema para un sub-agente.
+   478→
+   479→        Args:
+   480→            sub_agent: Sub-agente que ejecutara
+   481→            context: Contexto de tareas previas
+   482→            tools_list: Descripcion de herramientas disponibles
+   483→
+   484→        Returns:
+   485→            Prompt del sistema para el sub-agente
+   486→        """
+   487→        # Construir seccion de contexto previo
+   488→        context_section = ""
+   489→        if context.get("completed_results"):
+   490→            context_section = "\n## CONTEXTO DE TAREAS PREVIAS\n"
+   491→            for dep_id, dep_result in context["completed_results"].items():
+   492→                task_name = dep_result.get("task", "Tarea")
+   493→                result_text = dep_result.get("result", "Sin resultado")
+   494→                # Truncar resultados largos para no saturar el prompt
+   495→                if len(result_text) > 500:
+   496→                    result_text = result_text[:500] + "...[truncado]"
+   497→                context_section += f"- [{dep_id}] {task_name}: {result_text}\n"
+   498→
+   499→        prompt = (
+   500→            "Eres un sub-agente especializado. Tu mision es ejecutar UNA tarea especifica "
+   501→            "de forma eficiente y precisa.\n\n"
+   502→            f"## TU TAREA\n{sub_agent.task}\n\n"
+   503→            f"## HERRAMIENTAS DISPONIBLES\n{tools_list}\n\n"
+   504→            f"{context_section}\n"
+   505→            "## FORMATO DE RESPUESTA\n"
+   506→            "Debes responder SIEMPRE en JSON con este formato exacto:\n"
+   507→            '{"thought": "tu razonamiento interno", '
+   508→            '"tool_name": "nombre_herramienta_o_vacio", '
+   509→            '"tool_params": {}, '
+   510→            '"final_answer": "tu respuesta final aqui si ya terminaste"}\n\n'
+   511→            "REGLAS:\n"
+   512→            "- Si puedes responder directamente sin herramientas, pon tu respuesta en final_answer "
+   513→            "y deja tool_name vacio.\n"
+   514→            "- Si necesitas una herramienta, pon su nombre en tool_name y los parametros en tool_params, "
+   515→            "deja final_answer vacio.\n"
+   516→            "- Despues de usar una herramienta, analiza el resultado y decide si necesitas otra "
+   517→            "o si ya puedes dar tu respuesta final.\n"
+   518→            "- Se conciso y directo. No repitas informacion innecesaria.\n"
+   519→            "- Responde en espanol.\n"
+   520→        )
+   521→
+   522→        return prompt
+   523→
+   524→    # ============================================================
+   525→    # CONTEXTO DE EJECUCION
+   526→    # ============================================================
+   527→
+   528→    def _get_execution_context(self, sub_agent: SubAgent) -> dict:
+   529→        """
+   530→        Construye el contexto de ejecucion a partir de las dependencias completadas.
+   531→
+   532→        Cada sub-agente recibe informacion de lo que ya se hizo antes,
+   533→        para que no repita trabajo y pueda construir sobre resultados previos.
+   534→
+   535→        Args:
+   536→            sub_agent: Sub-agente que necesita contexto
+   537→
+   538→        Returns:
+   539→            Dict con:
+   540→            - completed_results: {task_id: {task, result}} de deps completadas
+   541→            - failed_deps: lista de IDs de deps que fallaron
+   542→        """
+   543→        completed_results = {}
+   544→        failed_deps = []
+   545→
+   546→        for dep_id in sub_agent.dependencies:
+   547→            if dep_id not in self._agents:
+   548→                # Dependencia no existe en el plan, ignorar
+   549→                continue
+   550→
+   551→            dep_agent = self._agents[dep_id]
+   552→
+   553→            if dep_agent.status == "completed" and dep_agent.result:
+   554→                completed_results[dep_id] = {
+   555→                    "task": dep_agent.task,
+   556→                    "result": dep_agent.result,
+   557→                    "completed_at": dep_agent.completed_at,
+   558→                }
+   559→            elif dep_agent.status == "failed":
+   560→                failed_deps.append(dep_id)
+   561→
+   562→        return {
+   563→            "completed_results": completed_results,
+   564→            "failed_deps": failed_deps,
+   565→            "task_id": sub_agent.id,
+   566→            "task_description": sub_agent.task,
+   567→        }
+   568→
+   569→    # ============================================================
+   570→    # ANALISIS DE PARALELIZACION
+   571→    # ============================================================
+   572→
+   573→    def _should_parallelize(self, tasks: dict) -> bool:
+   574→        """
+   575→        Analiza las dependencias de las tareas para determinar si
+   576→        hay oportunidades de paralelizacion.
+   577→
+   578→        Retorna True si existen al menos 2 tareas que se pueden
+   579→        ejecutar simultaneamente (sin dependencias mutuas).
+   580→
+   581→        Args:
+   582→            tasks: Dict de {id: SubAgent} o similar
+   583→
+   584→        Returns:
+   585→            True si se puede paralelizar, False si todo es secuencial
+   586→        """
+   587→        # Contar tareas sin dependencias (se pueden ejecutar de inmediato)
+   588→        no_deps = [
+   589→            tid for tid, agent in tasks.items()
+   590→            if isinstance(agent, SubAgent) and len(agent.dependencies) == 0
+   591→        ]
+   592→
+   593→        # Si hay 2+ tareas sin dependencias, vale la pena paralelizar
+   594→        if len(no_deps) >= 2:
+   595→            return True
+   596→
+   597→        # Analizar si hay "niveles" de dependencias con multiples tareas
+   598→        # que se pueden ejecutar en paralelo
+   599→        levels = self._build_dependency_levels(tasks)
+   600→        for level_tasks in levels.values():
+   601→            if len(level_tasks) >= 2:
+   602→                return True
+   603→
+   604→        return False
+   605→
+   606→    def _build_dependency_levels(self, tasks: dict) -> dict[int, list[str]]:
+   607→        """
+   608→        Construye niveles de dependencias (topological sort por niveles).
+   609→
+   610→        Nivel 0: tareas sin dependencias
+   611→        Nivel 1: tareas que dependen solo de nivel 0
+   612→        Nivel N: tareas que dependen de nivel N-1 como maximo
+   613→
+   614→        Args:
+   615→            tasks: Dict de {id: SubAgent}
+   616→
+   617→        Returns:
+   618→            Dict {nivel: [task_ids]}
+   619→        """
+   620→        levels: dict[int, list[str]] = {}
+   621→        assigned: set[str] = set()
+   622→
+   623→        # Iterar hasta asignar todas las tareas (o detectar ciclo)
+   624→        max_iterations = len(tasks) + 1
+   625→        iteration = 0
+   626→
+   627→        while len(assigned) < len(tasks) and iteration < max_iterations:
+   628→            iteration += 1
+   629→
+   630→            for tid, agent in tasks.items():
+   631→                if tid in assigned:
+   632→                    continue
+   633→
+   634→                if not isinstance(agent, SubAgent):
+   635→                    assigned.add(tid)
+   636→                    continue
+   637→
+   638→                # Todas las dependencias asignadas?
+   639→                deps_assigned = all(
+   640→                    dep_id in assigned
+   641→                    for dep_id in agent.dependencies
+   642→                    if dep_id in tasks
+   643→                )
+   644→
+   645→                if not deps_assigned:
+   646→                    continue
+   647→
+   648→                # Calcular nivel: max nivel de deps + 1
+   649→                if not agent.dependencies:
+   650→                    level = 0
+   651→                else:
+   652→                    dep_levels = [
+   653→                        self._find_level(levels, dep_id)
+   654→                        for dep_id in agent.dependencies
+   655→                        if dep_id in tasks
+   656→                    ]
+   657→                    level = max(dep_levels) + 1 if dep_levels else 0
+   658→
+   659→                levels.setdefault(level, []).append(tid)
+   660→                assigned.add(tid)
+   661→
+   662→        return levels
+   663→
+   664→    def _find_level(self, levels: dict[int, list[str]], task_id: str) -> int:
+   665→        """Encuentra en que nivel esta una tarea."""
+   666→        for lvl, tids in levels.items():
+   667→            if task_id in tids:
+   668→                return lvl
+   669→        return 0
+   670→
+   671→    # ============================================================
+   672→    # EJECUCION PARALELA VIA CALLBACK (para ReactAgent)
+   673→    # ============================================================
+   674→
+   675→    def execute_parallel(self, descriptions: list[dict], agent_run_fn=None) -> Optional[dict]:
+   676→        """
+   677→        Ejecuta multiples tareas independientes en paralelo usando ThreadPoolExecutor.
+   678→
+   679→        A diferencia de orchestrate(), este metodo no crea sub-agentes propios
+   680→        sino que delega la ejecucion a una funcion callback (tipicamente
+   681→        ReactAgent.run). Esto permite que las tareas se beneficien de todo
+   682→        el motor ReAct (memoria, metacognicion, herramientas, etc.).
+   683→
+   684→        Args:
+   685→            descriptions: Lista de dicts, cada uno con:
+   686→                - "id": Identificador de la tarea
+   687→                - "description": Descripcion completa de la tarea a ejecutar
+   688→                - "context": Contexto previo opcional (JSON string)
+   689→            agent_run_fn: Funcion callable que recibe un prompt (str) y retorna
+   690→                          un resultado (str o tuple). Si es None, usa el LLM directo.
+   691→
+   692→        Returns:
+   693→            Dict {task_id: result} con los resultados de cada tarea,
+   694→            o None si hubo un error y se debe hacer fallback a secuencial.
+   695→        """
+   696→        if not descriptions or len(descriptions) < 2:
+   697→            logger.debug("[Orchestrator] execute_parallel: menos de 2 tareas, no vale la pena")
+   698→            return None
+   699→
+   700→        results: dict[str, str] = {}
+   701→        max_workers = min(len(descriptions), self._max_parallel)
+   702→
+   703→        logger.info(
+   704→            f"[Orchestrator] execute_parallel: ejecutando {len(descriptions)} tareas "
+   705→            f"en paralelo (max_workers={max_workers})"
+   706→        )
+   707→
+   708→        def _run_single(desc: dict) -> tuple[str, str]:
+   709→            """Ejecuta una sola tarea y retorna (task_id, result)."""
+   710→            task_id = desc.get("id", "unknown")
+   711→            description = desc.get("description", "")
+   712→            context = desc.get("context", "")
+   713→
+   714→            prompt = description
+   715→            if context:
+   716→                prompt = f"Contexto previo:\n{context}\n\n{description}"
+   717→
+   718→            try:
+   719→                if agent_run_fn:
+   720→                    result = agent_run_fn(prompt)
+   721→                    # ReactAgent.run puede devolver tuple (respuesta, thinking_log)
+   722→                    if isinstance(result, tuple):
+   723→                        result = result[0]
+   724→                    return (task_id, str(result) if result else "")
+   725→                else:
+   726→                    # Fallback: usar LLM directo
+   727→                    if ollama is None:
+   728→                        return (task_id, "ERROR: LLM no disponible")
+   729→                    messages = [
+   730→                        {"role": "system", "content": "Eres un agente especializado. Ejecuta la tarea de forma concisa y completa."},
+   731→                        {"role": "user", "content": prompt},
+   732→                    ]
+   733→                    llm_result = ollama.generate(messages)
+   734→                    return (task_id, str(llm_result) if llm_result else "")
+   735→            except Exception as e:
+   736→                logger.error(f"[Orchestrator] execute_parallel: tarea {task_id} fallo: {e}")
+   737→                return (task_id, f"ERROR: {e}")
+   738→
+   739→        try:
+   740→            from concurrent.futures import ThreadPoolExecutor, as_completed
+   741→
+   742→            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+   743→                futures = {
+   744→                    executor.submit(_run_single, desc): desc
+   745→                    for desc in descriptions
+   746→                }
+   747→
+   748→                for future in as_completed(futures):
+   749→                    desc = futures[future]
+   750→                    task_id = desc.get("id", "unknown")
+   751→                    try:
+   752→                        tid, result = future.result()
+   753→                        results[tid] = result
+   754→                        logger.info(f"[Orchestrator] execute_parallel: tarea {tid} completada ({len(result)} chars)")
+   755→                    except Exception as e:
+   756→                        logger.error(f"[Orchestrator] execute_parallel: future de {task_id} fallo: {e}")
+   757→                        results[task_id] = f"ERROR: {e}"
+   758→
+   759→            logger.info(
+   760→                f"[Orchestrator] execute_parallel: completadas {len(results)}/{len(descriptions)} tareas"
+   761→            )
+   762→            return results
+   763→
+   764→        except Exception as e:
+   765→            logger.error(f"[Orchestrator] execute_parallel fallo: {e}")
+   766→            logger.debug(traceback.format_exc())
+   767→            return None
+   768→
+   769→    # ============================================================
+   770→    # EJECUCION DE HERRAMIENTAS
+   771→    # ============================================================
+   772→
+   773→    def _execute_tool(self, tool_name: str, tool_params: dict) -> str:
+   774→        """
+   775→        Ejecuta una herramienta registrada y retorna su resultado.
+   776→
+   777→        Args:
+   778→            tool_name: Nombre de la herramienta
+   779→            tool_params: Parametros para la herramienta
+   780→
+   781→        Returns:
+   782→            Resultado como string, o mensaje de error
+   783→        """
+   784→        if tool_name not in TOOL_FUNCTIONS:
+   785→            return f"Error: Herramienta '{tool_name}' no encontrada. Herramientas disponibles: {list(TOOL_FUNCTIONS.keys())}"
+   786→
+   787→        try:
+   788→            func = TOOL_FUNCTIONS[tool_name]
+   789→
+   790→            # Intentar llamar con parametros como kwargs
+   791→            if isinstance(tool_params, dict):
+   792→                result = func(**tool_params)
+   793→            elif tool_params:
+   794→                result = func(tool_params)
+   795→            else:
+   796→                result = func()
+   797→
+   798→            # Truncar resultado si es muy largo
+   799→            result_str = str(result) if result is not None else ""
+   800→            max_len = 2000
+   801→            if len(result_str) > max_len:
+   802→                result_str = result_str[:max_len] + f"...[truncado, {len(result_str)} chars total]"
+   803→
+   804→            logger.info(f"[Orchestrator] Herramienta {tool_name} ejecutada exitosamente")
+   805→            return result_str
+   806→
+   807→        except TypeError as e:
+   808→            # Parametros incorrectos, intentar sin parametros
+   809→            logger.warning(f"[Orchestrator] Error de parametros en {tool_name}: {e}")
+   810→            try:
+   811→                result = func()
+   812→                return str(result) if result is not None else ""
+   813→            except Exception:
+   814→                return f"Error: Parametros incorrectos para {tool_name}. Esperado: {e}"
+   815→        except Exception as e:
+   816→            logger.error(f"[Orchestrator] Error ejecutando {tool_name}: {e}")
+   817→            return f"Error ejecutando {tool_name}: {str(e)}"
+   818→
+   819→    # ============================================================
+   820→    # PARSER DE RESPUESTA LLM
+   821→    # ============================================================
+   822→
+   823→    def _parse_llm_response(self, response) -> dict:
+   824→        """
+   825→        Parsea la respuesta del LLM para extraer accion o respuesta final.
+   826→
+   827→        El LLM deberia responder en JSON con:
+   828→        {thought, tool_name, tool_params, final_answer}
+   829→
+   830→        Pero a veces devuelve texto plano o JSON malformado,
+   831→        asi que parseamos de forma robusta.
+   832→
+   833→        Args:
+   834→            response: Respuesta del LLM (str o dict)
+   835→
+   836→        Returns:
+   837→            Dict con: thought, tool_name, tool_params, final_answer
+   838→        """
+   839→        # Si ya es dict (respuesta con tool_calls de Ollama)
+   840→        if isinstance(response, dict):
+   841→            # Formato de tool calling nativo de Ollama
+   842→            if "tool_calls" in response:
+   843→                tc = response["tool_calls"][0] if response["tool_calls"] else {}
+   844→                func = tc.get("function", {})
+   845→                return {
+   846→                    "thought": response.get("content", ""),
+   847→                    "tool_name": func.get("name", ""),
+   848→                    "tool_params": func.get("arguments", {}),
+   849→                    "final_answer": "",
+   850→                }
+   851→            # Respuesta con contenido
+   852→            content = response.get("content", "")
+   853→            if content:
+   854→                return self._parse_json_response(content)
+   855→            return {"thought": "", "tool_name": "", "tool_params": {}, "final_answer": ""}
+   856→
+   857→        # Si es string, intentar parsear como JSON
+   858→        if isinstance(response, str):
+   859→            return self._parse_json_response(response)
+   860→
+   861→        # Fallback
+   862→        return {"thought": "", "tool_name": "", "tool_params": {}, "final_answer": str(response)}
+   863→
+   864→    def _parse_json_response(self, text: str) -> dict:
+   865→        """
+   866→        Parsea un string de texto intentando extraer JSON.
+   867→
+   868→        Intenta multiples estrategias:
+   869→        1. Parsear todo el texto como JSON
+   870→        2. Buscar JSON dentro de bloques de codigo
+   871→        3. Buscar JSON entre llaves
+   872→        4. Si nada funciona, usar el texto como final_answer
+   873→
+   874→        Args:
+   875→            text: Texto de respuesta del LLM
+   876→
+   877→        Returns:
+   878→            Dict con: thought, tool_name, tool_params, final_answer
+   879→        """
+   880→        default = {"thought": "", "tool_name": "", "tool_params": {}, "final_answer": ""}
+   881→
+   882→        # Estrategia 1: Parsear todo como JSON
+   883→        try:
+   884→            parsed = json.loads(text.strip())
+   885→            if isinstance(parsed, dict):
+   886→                return {
+   887→                    "thought": parsed.get("thought", parsed.get("pensamiento", "")),
+   888→                    "tool_name": parsed.get("tool_name", parsed.get("accion", "")),
+   889→                    "tool_params": parsed.get("tool_params", parsed.get("params", {})),
+   890→                    "final_answer": parsed.get("final_answer", parsed.get("respuesta_final", "")),
+   891→                }
+   892→        except (json.JSONDecodeError, ValueError):
+   893→            pass
+   894→
+   895→        # Estrategia 2: Buscar JSON en bloques de codigo
+   896→        import re
+   897→        json_block = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
+   898→        if json_block:
+   899→            try:
+   900→                parsed = json.loads(json_block.group(1).strip())
+   901→                if isinstance(parsed, dict):
+   902→                    return {
+   903→                        "thought": parsed.get("thought", parsed.get("pensamiento", "")),
+   904→                        "tool_name": parsed.get("tool_name", parsed.get("accion", "")),
+   905→                        "tool_params": parsed.get("tool_params", parsed.get("params", {})),
+   906→                        "final_answer": parsed.get("final_answer", parsed.get("respuesta_final", "")),
+   907→                    }
+   908→            except (json.JSONDecodeError, ValueError):
+   909→                pass
+   910→
+   911→        # Estrategia 3: Buscar JSON entre llaves mas externo
+   912→        brace_match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
+   913→        if brace_match:
+   914→            try:
+   915→                parsed = json.loads(brace_match.group(0))
+   916→                if isinstance(parsed, dict):
+   917→                    return {
+   918→                        "thought": parsed.get("thought", parsed.get("pensamiento", "")),
+   919→                        "tool_name": parsed.get("tool_name", parsed.get("accion", "")),
+   920→                        "tool_params": parsed.get("tool_params", parsed.get("params", {})),
+   921→                        "final_answer": parsed.get("final_answer", parsed.get("respuesta_final", "")),
+   922→                    }
+   923→            except (json.JSONDecodeError, ValueError):
+   924→                pass
+   925→
+   926→        # Estrategia 4: Usar todo el texto como final_answer
+   927→        default["final_answer"] = text.strip()
+   928→        default["thought"] = "Respuesta directa sin formato JSON"
+   929→        return default
+   930→
+   931→    # ============================================================
+   932→    # UTILIDADES DE HERRAMIENTAS
+   933→    # ============================================================
+   934→
+   935→    def _build_tools_description(self) -> str:
+   936→        """
+   937→        Construye una descripcion legible de las herramientas disponibles
+   938→        para incluir en el prompt del sub-agente.
+   939→
+   940→        Returns:
+   941→            String con la lista de herramientas y sus parametros
+   942→        """
+   943→        if not TOOL_SCHEMAS:
+   944→            # Fallback: usar nombres de funciones
+   945→            names = list(TOOL_FUNCTIONS.keys())
+   946→            return "Herramientas: " + ", ".join(names) if names else "Sin herramientas disponibles"
+   947→
+   948→        descriptions = []
+   949→        for schema in TOOL_SCHEMAS:
+   950→            func_info = schema.get("function", {})
+   951→            name = func_info.get("name", "unknown")
+   952→            desc = func_info.get("description", "")
+   953→            params = func_info.get("parameters", {})
+   954→            properties = params.get("properties", {})
+   955→            required = params.get("required", [])
+   956→
+   957→            # Construir firma simplificada
+   958→            param_strs = []
+   959→            for pname, pinfo in properties.items():
+   960→                ptype = pinfo.get("type", "any")
+   961→                is_req = pname in required
+   962→                param_strs.append(f"{pname}: {ptype}" + ("" if is_req else " (opcional)"))
+   963→
+   964→            signature = f"{name}({', '.join(param_strs)})"
+   965→            line = f"- {signature}"
+   966→            if desc:
+   967→                # Truncar descripcion larga
+   968→                short_desc = desc[:80] + "..." if len(desc) > 80 else desc
+   969→                line += f" - {short_desc}"
+   970→
+   971→            descriptions.append(line)
+   972→
+   973→        return "\n".join(descriptions)
+   974→
+   975→    # ============================================================
+   976→    # BUSQUEDA DE TAREAS EJECUTABLES
+   977→    # ============================================================
+   978→
+   979→    def _find_executable_task(self, remaining: set[str]) -> Optional[str]:
+   980→        """
+   981→        Encuentra la siguiente tarea que se puede ejecutar:
+   982→        pendiente y con todas sus dependencias completadas.
+   983→
+   984→        Args:
+   985→            remaining: Conjunto de IDs de tareas que faltan
+   986→
+   987→        Returns:
+   988→            ID de la siguiente tarea ejecutable, o None
+   989→        """
+   990→        for aid in remaining:
+   991→            agent = self._agents.get(aid)
+   992→            if not agent or agent.status != "pending":
+   993→                continue
+   994→
+   995→            # Verificar que todas las dependencias esten completadas
+   996→            all_deps_done = True
+   997→            for dep_id in agent.dependencies:
+   998→                if dep_id not in self._agents:
+   999→                    # Dependencia fuera del plan, ignorar
+  1000→                    continue
+  1001→                dep_status = self._agents[dep_id].status
+  1002→                if dep_status != "completed":
+  1003→                    all_deps_done = False
+  1004→                    break
+  1005→
+  1006→            if all_deps_done:
+  1007→                return aid
+  1008→
+  1009→        return None
+  1010→
+  1011→    # ============================================================
+  1012→    # MARCAR DEPENDIENTES COMO FALLIDOS
+  1013→    # ============================================================
+  1014→
+  1015→    def _mark_dependents_failed(self, failed_id: str, reason: str):
+  1016→        """
+  1017→        Marca como fallidas todas las tareas que dependen de la tarea fallida.
+  1018→
+  1019→        Args:
+  1020→            failed_id: ID de la tarea que fallo
+  1021→            reason: Razon del fallo para propagar
+  1022→        """
+  1023→        for aid, agent in self._agents.items():
+  1024→            if failed_id in agent.dependencies and agent.status == "pending":
+  1025→                agent.status = "failed"
+  1026→                agent.error = f"Bloqueada: {reason} (depende de {failed_id})"
+  1027→                logger.warning(
+  1028→                    f"[Orchestrator] Tarea {aid} marcada como fallida: depende de {failed_id}"
+  1029→                )
+  1030→
+  1031→    # ============================================================
+  1032→    # CONSTRUIR RESULTADO FINAL
+  1033→    # ============================================================
+  1034→
+  1035→    def _build_result(self, plan_id: str, goal: str, status: str, inicio: datetime) -> dict:
+  1036→        """
+  1037→        Construye el diccionario de resultado de la orquestacion.
+  1038→
+  1039→        Args:
+  1040→            plan_id: ID del plan
+  1041→            goal: Objetivo del plan
+  1042→            status: Estado final (completed/partial/failed)
+  1043→            inicio: Timestamp de inicio
+  1044→
+  1045→        Returns:
+  1046→            Dict con resultado completo
+  1047→        """
+  1048→        duracion = (datetime.now() - inicio).total_seconds()
+  1049→        total = len(self._agents)
+  1050→        completed = sum(1 for a in self._agents.values() if a.status == "completed")
+  1051→        failed = sum(1 for a in self._agents.values() if a.status == "failed")
+  1052→
+  1053→        return {
+  1054→            "plan_id": plan_id,
+  1055→            "goal": goal,
+  1056→            "strategy_used": self._strategy,
+  1057→            "status": status,
+  1058→            "total_tasks": total,
+  1059→            "completed_tasks": completed,
+  1060→            "failed_tasks": failed,
+  1061→            "results": {aid: agent.to_dict() for aid, agent in self._agents.items()},
+  1062→            "duration_seconds": round(duracion, 2),
+  1063→            "progress_pct": round(completed / total * 100, 1) if total > 0 else 0,
+  1064→        }
+  1065→
+  1066→    # ============================================================
+  1067→    # ESTADO Y CONTROL
+  1068→    # ============================================================
+  1069→
+  1070→    def get_status(self) -> dict:
+  1071→        """
+  1072→        Retorna el estado actual de la orquestacion.
+  1073→
+  1074→        Returns:
+  1075→            Dict con:
+  1076→            - active_agents: lista de sub-agentes corriendo
+  1077→            - pending_tasks: lista de tareas pendientes
+  1078→            - completed_tasks: lista de tareas completadas
+  1079→            - failed_tasks: lista de tareas fallidas
+  1080→            - progress_pct: porcentaje de progreso
+  1081→            - strategy: estrategia actual
+  1082→        """
+  1083→        active = [a.to_dict() for a in self._agents.values() if a.status == "running"]
+  1084→        pending = [a.to_dict() for a in self._agents.values() if a.status == "pending"]
+  1085→        completed = [a.to_dict() for a in self._agents.values() if a.status == "completed"]
+  1086→        failed = [a.to_dict() for a in self._agents.values() if a.status == "failed"]
+  1087→
+  1088→        total = len(self._agents)
+  1089→        done = len(completed)
+  1090→        progress = round(done / total * 100, 1) if total > 0 else 0
+  1091→
+  1092→        return {
+  1093→            "active_agents": active,
+  1094→            "pending_tasks": pending,
+  1095→            "completed_tasks": completed,
+  1096→            "failed_tasks": failed,
+  1097→            "progress_pct": progress,
+  1098→            "total_tasks": total,
+  1099→            "strategy": self._strategy,
+  1100→            "plan_id": self._plan_data.get("id") if self._plan_data else None,
+  1101→            "goal": self._plan_data.get("goal") if self._plan_data else None,
+  1102→        }
+  1103→
+  1104→    def cancel(self, task_id: str) -> bool:
+  1105→        """
+  1106→        Cancela una tarea de sub-agente en ejecucion o pendiente.
+  1107→
+  1108→        Si la tarea esta en un ThreadPoolExecutor, intenta cancelar el Future.
+  1109→        Si esta pendiente, la marca para no ejecutarse.
+  1110→
+  1111→        Args:
+  1112→            task_id: ID de la tarea a cancelar
+  1113→
+  1114→        Returns:
+  1115→            True si se cancelo exitosamente, False si no se encontro
+  1116→        """
+  1117→        if task_id not in self._agents:
+  1118→            logger.warning(f"[Orchestrator] cancel: tarea {task_id} no encontrada")
+  1119→            return False
+  1120→
+  1121→        agent = self._agents[task_id]
+  1122→
+  1123→        if agent.status == "completed":
+  1124→            logger.warning(f"[Orchestrator] cancel: tarea {task_id} ya completada")
+  1125→            return False
+  1126→
+  1127→        # Marcar como cancelada
+  1128→        self._cancelled.add(task_id)
+  1129→
+  1130→        # Si esta corriendo, intentar cancelar el Future
+  1131→        if agent.status == "running" and agent._future is not None:
+  1132→            cancelled = agent._future.cancel()
+  1133→            if cancelled:
+  1134→                agent.status = "failed"
+  1135→                agent.error = "Cancelada por el usuario"
+  1136→                agent.completed_at = datetime.now().isoformat()
+  1137→                logger.info(f"[Orchestrator] Tarea {task_id} cancelada (Future cancelado)")
+  1138→                return True
+  1139→
+  1140→        # Si esta pendiente, simplemente marcar
+  1141→        if agent.status == "pending":
+  1142→            agent.status = "failed"
+  1143→            agent.error = "Cancelada por el usuario"
+  1144→            logger.info(f"[Orchestrator] Tarea {task_id} cancelada (pendiente)")
+  1145→            return True
+  1146→
+  1147→        # Si esta corriendo pero no se pudo cancelar el Future,
+  1148→        # el flag _cancelled hara que se detecte en la siguiente iteracion
+  1149→        logger.info(f"[Orchestrator] Tarea {task_id} marcada para cancelacion")
+  1150→        return True
+  1151→
+  1152→    def set_strategy(self, strategy: str):
+  1153→        """
+  1154→        Establece la estrategia de ejecucion.
+  1155→
+  1156→        Args:
+  1157→            strategy: "sequential", "parallel", o "adaptive"
+  1158→        """
+  1159→        valid = {"sequential", "parallel", "adaptive"}
+  1160→        if strategy not in valid:
+  1161→            logger.warning(f"[Orchestrator] Estrategia invalida: {strategy}. Validas: {valid}")
+  1162→            return
+  1163→        self._strategy = strategy
+  1164→        logger.info(f"[Orchestrator] Estrategia cambiada a: {strategy}")
+  1165→
+  1166→    def set_max_parallel(self, max_parallel: int):
+  1167→        """
+  1168→        Establece el maximo de sub-agentes en paralelo.
+  1169→
+  1170→        Args:
+  1171→            max_parallel: Numero maximo (minimo 1, maximo 10)
+  1172→        """
+  1173→        self._max_parallel = max(1, min(10, max_parallel))
+  1174→        logger.info(f"[Orchestrator] Max paralelo ajustado a: {self._max_parallel}")
+  1175→
+  1176→    def reset(self):
+  1177→        """Resetea el estado del orquestador para una nueva ejecucion."""
+  1178→        self._agents.clear()
+  1179→        self._results.clear()
+  1180→        self._cancelled.clear()
+  1181→        self._plan_data = None
+  1182→        logger.info("[Orchestrator] Estado reseteado")
+  1183→
+  1184→
+  1185→# ============================================================
+  1186→# INSTANCIA SINGLETON
+  1187→# ============================================================
+  1188→
+  1189→_orchestrator: Optional[Orchestrator] = None
+  1190→
+  1191→def get_orchestrator() -> Orchestrator:
+  1192→    """Obtiene o crea la instancia singleton del orquestador."""
+  1193→    global _orchestrator
+  1194→    if _orchestrator is None:
+  1195→        _orchestrator = Orchestrator()
+  1196→    return _orchestrator
+  1197→

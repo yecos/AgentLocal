@@ -1,0 +1,1222 @@
+     1→"""
+     2→Registro centralizado de herramientas.
+     3→El agente importa TOOL_FUNCTIONS y TOOL_SCHEMAS desde aqui.
+     4→
+     5→v16: + Skill Loader, Task Planner, Code Executor, File Editor,
+     6→     Git Tool, Database Tool, Error Recovery.
+     7→v14.5: Usa registry.py con decorator @tool para registro automatico.
+     8→Las herramientas de sub-modulos se registran manualmente con register_tool()
+     9→hasta que se migren al decorator. Las herramientas inline usan @tool.
+    10→"""
+    11→import os
+    12→import json
+    13→
+    14→# Importar el registry
+    15→from .registry import tool, register_tool, TOOL_FUNCTIONS, TOOL_SCHEMAS
+    16→
+    17→# Importar herramientas de sub-modulos
+    18→from .sistema import ejecutar_comando, procesos_activos, matar_proceso
+    19→from .archivos import leer_archivo, escribir_archivo, listar_archivos, buscar_en_archivos
+    20→from .apps import abrir_aplicacion, abrir_url, buscar_youtube
+    21→from .proyecto import analizar_proyecto, clonar_repositorio, instalar_dependencias
+    22→from .codigo import generar_codigo
+    23→from .web import buscar_web, leer_web, buscar_web_profundo
+    24→
+    25→# Importar schemas predefinidos (para herramientas de sub-modulos)
+    26→from .schemas import TOOL_SCHEMAS as _SCHEMAS_FROM_FILE
+    27→
+    28→
+    29→# ============================================================
+    30→# REGISTRAR HERRAMIENTAS DE SUB-MODULOS
+    31→# (Se usa register_tool manual hasta migrar esos archivos a @tool)
+    32→# ============================================================
+    33→
+    34→def _register_submodule_tools():
+    35→    """Registra las herramientas importadas de sub-modulos con sus schemas."""
+    36→    # Mapeo nombre -> (funcion, schema)
+    37→    # Los schemas se toman del archivo schemas.py preexistente
+    38→    schema_by_name = {}
+    39→    for s in _SCHEMAS_FROM_FILE:
+    40→        func_info = s.get("function", {})
+    41→        name = func_info.get("name")
+    42→        if name:
+    43→            schema_by_name[name] = s
+    44→
+    45→    submod_tools = {
+    46→        "ejecutar_comando": ejecutar_comando,
+    47→        "abrir_aplicacion": abrir_aplicacion,
+    48→        "abrir_url": abrir_url,
+    49→        "buscar_youtube": buscar_youtube,
+    50→        "generar_codigo": generar_codigo,
+    51→        "leer_archivo": leer_archivo,
+    52→        "escribir_archivo": escribir_archivo,
+    53→        "listar_archivos": listar_archivos,
+    54→        "analizar_proyecto": analizar_proyecto,
+    55→        "clonar_repositorio": clonar_repositorio,
+    56→        "instalar_dependencias": instalar_dependencias,
+    57→        "buscar_en_archivos": buscar_en_archivos,
+    58→        "procesos_activos": procesos_activos,
+    59→        "matar_proceso": matar_proceso,
+    60→        "buscar_web": buscar_web,
+    61→        "leer_web": leer_web,
+    62→        "buscar_web_profundo": buscar_web_profundo,
+    63→    }
+    64→
+    65→    for name, func in submod_tools.items():
+    66→        schema = schema_by_name.get(name)
+    67→        register_tool(name, func, schema=schema)
+    68→
+    69→
+    70→# ============================================================
+    71→# HERRAMIENTAS INLINE CON DECORATOR @tool
+    72→# ============================================================
+    73→
+    74→@tool(schema={
+    75→    "type": "function",
+    76→    "function": {
+    77→        "name": "analizar_imagen",
+    78→        "description": "Analiza una imagen usando vision AI. Describe lo que ve, lee texto de la imagen, o responde preguntas sobre ella. Necesita un modelo de vision instalado (llava, llama3.2-vision, etc).",
+    79→        "parameters": {
+    80→            "type": "object",
+    81→            "properties": {
+    82→                "ruta": {"type": "string", "description": "Ruta de la imagen a analizar"},
+    83→                "pregunta": {"type": "string", "description": "Pregunta sobre la imagen (por defecto: describela)"}
+    84→            },
+    85→            "required": ["ruta"]
+    86→        }
+    87→    }
+    88→})
+    89→def analizar_imagen(ruta: str, pregunta: str = "Describe esta imagen") -> str:
+    90→    """Analiza una imagen usando el modelo de vision del LLM."""
+    91→    from llm import ollama
+    92→    result = ollama.generate_with_image(pregunta, ruta)
+    93→    return result
+    94→
+    95→
+    96→@tool(schema={
+    97→    "type": "function",
+    98→    "function": {
+    99→        "name": "configurar_perfil",
+   100→        "description": "Configura el perfil del usuario para personalizar las respuestas del agente. Se guarda persistentemente entre sesiones. Ejemplo: nombre, rol profesional, intereses, idioma preferido, estilo de respuesta.",
+   101→        "parameters": {
+   102→            "type": "object",
+   103→            "properties": {
+   104→                "nombre": {"type": "string", "description": "Nombre del usuario"},
+   105→                "rol": {"type": "string", "description": "Rol profesional (ej: desarrollador, arquitecto, estudiante)"},
+   106→                "intereses": {"type": "string", "description": "Intereses principales separados por coma"},
+   107→                "idioma": {"type": "string", "description": "Idioma preferido (ej: espanol, ingles)"},
+   108→                "estilo": {"type": "string", "description": "Estilo de respuesta: conciso, detallado, tecnico, simple"}
+   109→            },
+   110→            "required": []
+   111→        }
+   112→    }
+   113→})
+   114→def configurar_perfil(nombre: str = "", rol: str = "", intereses: str = "",
+   115→                      idioma: str = "", estilo: str = "") -> str:
+   116→    """Configura el perfil del usuario para personalizar las respuestas del agente.
+   117→
+   118→    Args:
+   119→        nombre: Nombre del usuario
+   120→        rol: Rol profesional (ej: desarrollador, arquitecto, estudiante)
+   121→        intereses: Intereses principales separados por coma
+   122→        idioma: Idioma preferido para respuestas (ej: espanol, ingles)
+   123→        estilo: Estilo de respuesta (conciso, detallado, tecnico, simple)
+   124→    """
+   125→    from config import USER_PROFILE_FILE, logger
+   126→
+   127→    # Cargar perfil existente
+   128→    profile = {}
+   129→    try:
+   130→        if os.path.exists(USER_PROFILE_FILE):
+   131→            with open(USER_PROFILE_FILE, "r", encoding="utf-8") as f:
+   132→                profile = json.load(f)
+   133→    except Exception:
+   134→        pass
+   135→
+   136→    # Actualizar solo los campos proporcionados
+   137→    if nombre:
+   138→        profile["name"] = nombre
+   139→    if rol:
+   140→        profile["role"] = rol
+   141→    if intereses:
+   142→        profile["interests"] = intereses
+   143→    if idioma:
+   144→        profile["language"] = idioma
+   145→    if estilo:
+   146→        profile["style"] = estilo
+   147→
+   148→    # Guardar perfil
+   149→    try:
+   150→        with open(USER_PROFILE_FILE, "w", encoding="utf-8") as f:
+   151→            json.dump(profile, f, ensure_ascii=False, indent=2)
+   152→        logger.info(f"Perfil de usuario actualizado: {list(profile.keys())}")
+   153→    except Exception as e:
+   154→        return f"ERROR guardando perfil: {e}"
+   155→
+   156→    # Formatear resumen
+   157→    parts = []
+   158→    field_map = {"name": "Nombre", "role": "Rol", "interests": "Intereses",
+   159→                 "language": "Idioma", "style": "Estilo"}
+   160→    for key, label in field_map.items():
+   161→        if key in profile:
+   162→            parts.append(f"  {label}: {profile[key]}")
+   163→
+   164→    return f"Perfil configurado:\n" + "\n".join(parts)
+   165→
+   166→
+   167→@tool(schema={
+   168→    "type": "function",
+   169→    "function": {
+   170→        "name": "crear_nota",
+   171→        "description": "Crea una nota rapida y la guarda persistentemente. Usar cuando el usuario pide anotar, recordar algo, o tomar nota de informacion importante.",
+   172→        "parameters": {
+   173→            "type": "object",
+   174→            "properties": {
+   175→                "titulo": {"type": "string", "description": "Titulo corto de la nota"},
+   176→                "contenido": {"type": "string", "description": "Contenido de la nota"}
+   177→            },
+   178→            "required": ["titulo", "contenido"]
+   179→        }
+   180→    }
+   181→})
+   182→def crear_nota(titulo: str, contenido: str) -> str:
+   183→    """Crea una nota rapida y la guarda en la memoria del agente.
+   184→
+   185→    Args:
+   186→        titulo: Titulo de la nota
+   187→        contenido: Contenido de la nota
+   188→    """
+   189→    from config import LEARN_DIR, logger
+   190→    from utils.security import sanitize_input
+   191→
+   192→    titulo = sanitize_input(titulo)
+   193→
+   194→    notes_file = os.path.join(LEARN_DIR, "notes.json")
+   195→    notes = []
+   196→    try:
+   197→        if os.path.exists(notes_file):
+   198→            with open(notes_file, "r", encoding="utf-8") as f:
+   199→                notes = json.load(f)
+   200→    except Exception:
+   201→        pass
+   202→
+   203→    from datetime import datetime
+   204→    note = {
+   205→        "id": len(notes) + 1,
+   206→        "title": titulo,
+   207→        "content": contenido[:1000],
+   208→        "created": datetime.now().isoformat(),
+   209→    }
+   210→    notes.append(note)
+   211→
+   212→    try:
+   213→        with open(notes_file, "w", encoding="utf-8") as f:
+   214→            json.dump(notes, f, ensure_ascii=False, indent=2)
+   215→        logger.info(f"Nota creada: {titulo}")
+   216→    except Exception as e:
+   217→        return f"ERROR guardando nota: {e}"
+   218→
+   219→    return f"Nota creada: '{titulo}' (ID: {note['id']})"
+   220→
+   221→
+   222→@tool(schema={
+   223→    "type": "function",
+   224→    "function": {
+   225→        "name": "ver_notas",
+   226→        "description": "Lista las notas guardadas del usuario. Usar cuando el usuario pide ver sus notas o recordar lo que anoto.",
+   227→        "parameters": {
+   228→            "type": "object",
+   229→            "properties": {},
+   230→            "required": []
+   231→        }
+   232→    }
+   233→})
+   234→def ver_notas() -> str:
+   235→    """Lista todas las notas guardadas."""
+   236→    from config import LEARN_DIR
+   237→
+   238→    notes_file = os.path.join(LEARN_DIR, "notes.json")
+   239→    try:
+   240→        if not os.path.exists(notes_file):
+   241→            return "No hay notas guardadas."
+   242→        with open(notes_file, "r", encoding="utf-8") as f:
+   243→            notes = json.load(f)
+   244→        if not notes:
+   245→            return "No hay notas guardadas."
+   246→        result = "NOTAS GUARDADAS:\n"
+   247→        for n in notes[-10:]:  # Ultimas 10
+   248→            result += f"  [{n.get('id', '?')}] {n.get('title', 'Sin titulo')} - {n.get('content', '')[:80]}\n"
+   249→        return result
+   250→    except Exception as e:
+   251→        return f"ERROR leyendo notas: {e}"
+   252→
+   253→
+   254→# ============================================================
+   255→# HERRAMIENTAS v16 - NUEVAS CAPACIDADES AGENTICAS
+   256→# ============================================================
+   257→
+   258→# --- Ejecucion de Codigo ---
+   259→
+   260→@tool(schema={
+   261→    "type": "function",
+   262→    "function": {
+   263→        "name": "ejecutar_codigo",
+   264→        "description": "Ejecuta codigo de forma segura con captura de stdout/stderr y timeout. Soporta Python, JavaScript, TypeScript, Bash. Retorna resultado con exit code, output, y errores.",
+   265→        "parameters": {
+   266→            "type": "object",
+   267→            "properties": {
+   268→                "codigo": {"type": "string", "description": "Codigo fuente a ejecutar"},
+   269→                "lenguaje": {"type": "string", "description": "Lenguaje: python, javascript, typescript, bash"},
+   270→                "timeout": {"type": "integer", "description": "Timeout en segundos (default: 60)"},
+   271→                "directorio_trabajo": {"type": "string", "description": "Directorio de trabajo (opcional)"}
+   272→            },
+   273→            "required": ["codigo", "lenguaje"]
+   274→        }
+   275→    }
+   276→})
+   277→def ejecutar_codigo(codigo: str, lenguaje: str = "python", timeout: int = 60,
+   278→                    directorio_trabajo: str = "") -> str:
+   279→    """Ejecuta codigo de forma segura con captura de output."""
+   280→    from .code_executor import execute_code
+   281→    result = execute_code(
+   282→        code=codigo,
+   283→        language=lenguaje,
+   284→        timeout=timeout,
+   285→        working_dir=directorio_trabajo or None,
+   286→    )
+   287→    output = []
+   288→    if result.success:
+   289→        output.append(f"EXITO (exit code: {result.exit_code}, tiempo: {result.duration:.2f}s)")
+   290→    else:
+   291→        output.append(f"ERROR (exit code: {result.exit_code}, tiempo: {result.duration:.2f}s)")
+   292→    if result.stdout:
+   293→        output.append(f"STDOUT:\n{result.stdout[:2000]}")
+   294→    if result.stderr:
+   295→        output.append(f"STDERR:\n{result.stderr[:1000]}")
+   296→    return "\n".join(output) if output else "Sin salida"
+   297→
+   298→
+   299→@tool(schema={
+   300→    "type": "function",
+   301→    "function": {
+   302→        "name": "ejecutar_archivo",
+   303→        "description": "Ejecuta un archivo existente (.py, .js, .ts, .sh) de forma segura con timeout y captura de output.",
+   304→        "parameters": {
+   305→            "type": "object",
+   306→            "properties": {
+   307→                "ruta": {"type": "string", "description": "Ruta al archivo a ejecutar"},
+   308→                "timeout": {"type": "integer", "description": "Timeout en segundos (default: 60)"},
+   309→                "argumentos": {"type": "string", "description": "Argumentos adicionales separados por espacio"}
+   310→            },
+   311→            "required": ["ruta"]
+   312→        }
+   313→    }
+   314→})
+   315→def ejecutar_archivo(ruta: str, timeout: int = 60, argumentos: str = "") -> str:
+   316→    """Ejecuta un archivo existente de forma segura."""
+   317→    from .code_executor import execute_file
+   318→    args = argumentos.split() if argumentos else None
+   319→    result = execute_file(filepath=ruta, timeout=timeout, args=args)
+   320→    output = []
+   321→    if result.success:
+   322→        output.append(f"EXITO (tiempo: {result.duration:.2f}s)")
+   323→    else:
+   324→        output.append(f"ERROR (exit code: {result.exit_code}, tiempo: {result.duration:.2f}s)")
+   325→    if result.stdout:
+   326→        output.append(f"STDOUT:\n{result.stdout[:2000]}")
+   327→    if result.stderr:
+   328→        output.append(f"STDERR:\n{result.stderr[:1000]}")
+   329→    return "\n".join(output) if output else "Sin salida"
+   330→
+   331→
+   332→@tool(schema={
+   333→    "type": "function",
+   334→    "function": {
+   335→        "name": "ejecutar_tests",
+   336→        "description": "Ejecuta los tests de un proyecto. Auto-detecta el framework (pytest, jest, vitest, mocha). Retorna resultados con passed/failed counts.",
+   337→        "parameters": {
+   338→            "type": "object",
+   339→            "properties": {
+   340→                "ruta_proyecto": {"type": "string", "description": "Ruta al proyecto"},
+   341→                "framework": {"type": "string", "description": "Framework de tests: pytest, jest, vitest, mocha (auto-detectar si vacio)"},
+   342→                "ruta_test": {"type": "string", "description": "Ruta especifica de test (opcional)"},
+   343→                "timeout": {"type": "integer", "description": "Timeout en segundos (default: 120)"}
+   344→            },
+   345→            "required": ["ruta_proyecto"]
+   346→        }
+   347→    }
+   348→})
+   349→def ejecutar_tests(ruta_proyecto: str, framework: str = "", ruta_test: str = "",
+   350→                   timeout: int = 120) -> str:
+   351→    """Ejecuta los tests de un proyecto."""
+   352→    from .code_executor import run_tests
+   353→    result = run_tests(
+   354→        project_path=ruta_proyecto,
+   355→        test_framework=framework or None,
+   356→        test_path=ruta_test or None,
+   357→        timeout=timeout,
+   358→    )
+   359→    output = []
+   360→    if result.success:
+   361→        output.append(f"TESTS PASARON (tiempo: {result.duration:.2f}s)")
+   362→    else:
+   363→        output.append(f"TESTS FALLARON (exit code: {result.exit_code}, tiempo: {result.duration:.2f}s)")
+   364→    if result.stdout:
+   365→        output.append(result.stdout[:3000])
+   366→    if result.stderr and not result.success:
+   367→        output.append(f"ERRORES:\n{result.stderr[:1000]}")
+   368→    return "\n".join(output) if output else "Sin salida"
+   369→
+   370→
+   371→# --- Edicion Incremental de Archivos ---
+   372→
+   373→@tool(schema={
+   374→    "type": "function",
+   375→    "function": {
+   376→        "name": "buscar_reemplazar",
+   377→        "description": "Busca y reemplaza texto en un archivo sin reescribirlo completo. Crea backup automatico. Soporta regex. Mas eficiente que escribir_archivo para ediciones pequenas.",
+   378→        "parameters": {
+   379→            "type": "object",
+   380→            "properties": {
+   381→                "ruta": {"type": "string", "description": "Ruta del archivo"},
+   382→                "buscar": {"type": "string", "description": "Texto o patron a buscar"},
+   383→                "reemplazar": {"type": "string", "description": "Texto de reemplazo"},
+   384→                "usar_regex": {"type": "boolean", "description": "Usar expresiones regulares (default: false)"},
+   385→                "case_sensitive": {"type": "boolean", "description": "Busqueda sensible a mayusculas (default: true)"},
+   386→                "max_reemplazos": {"type": "integer", "description": "Maximo de reemplazos (0 = todos)"}
+   387→            },
+   388→            "required": ["ruta", "buscar", "reemplazar"]
+   389→        }
+   390→    }
+   391→})
+   392→def buscar_reemplazar(ruta: str, buscar: str, reemplazar: str,
+   393→                      usar_regex: bool = False, case_sensitive: bool = True,
+   394→                      max_reemplazos: int = 0) -> str:
+   395→    """Busca y reemplaza texto en un archivo de forma incremental."""
+   396→    from .file_editor import search_and_replace
+   397→    result = search_and_replace(
+   398→        filepath=ruta, search=buscar, replace=reemplazar,
+   399→        use_regex=usar_regex, case_sensitive=case_sensitive,
+   400→        max_replacements=max_reemplazos,
+   401→    )
+   402→    if result["success"]:
+   403→        msg = result.get("message", "OK")
+   404→        if result.get("diff"):
+   405→            return f"{msg}\n\nDiff:\n{result['diff'][:1000]}"
+   406→        return msg
+   407→    return f"ERROR: {result.get('error', 'Error desconocido')}"
+   408→
+   409→
+   410→@tool(schema={
+   411→    "type": "function",
+   412→    "function": {
+   413→        "name": "editar_lineas",
+   414→        "description": "Reemplaza un rango de lineas en un archivo. Mas preciso que buscar_reemplazar para cambios en lineas especificas. Crea backup automatico.",
+   415→        "parameters": {
+   416→            "type": "object",
+   417→            "properties": {
+   418→                "ruta": {"type": "string", "description": "Ruta del archivo"},
+   419→                "linea_inicio": {"type": "integer", "description": "Linea de inicio (1-indexed, inclusiva)"},
+   420→                "linea_fin": {"type": "integer", "description": "Linea de fin (1-indexed, inclusiva)"},
+   421→                "nuevo_contenido": {"type": "string", "description": "Nuevo contenido para el rango de lineas"}
+   422→            },
+   423→            "required": ["ruta", "linea_inicio", "linea_fin", "nuevo_contenido"]
+   424→        }
+   425→    }
+   426→})
+   427→def editar_lineas(ruta: str, linea_inicio: int, linea_fin: int,
+   428→                  nuevo_contenido: str) -> str:
+   429→    """Reemplaza un rango de lineas en un archivo."""
+   430→    from .file_editor import edit_lines
+   431→    result = edit_lines(
+   432→        filepath=ruta, start_line=linea_inicio, end_line=linea_fin,
+   433→        new_content=nuevo_contenido,
+   434→    )
+   435→    if result["success"]:
+   436→        msg = result.get("message", "OK")
+   437→        if result.get("diff"):
+   438→            return f"{msg}\n\nDiff:\n{result['diff'][:1000]}"
+   439→        return msg
+   440→    return f"ERROR: {result.get('error', 'Error desconocido')}"
+   441→
+   442→
+   443→@tool(schema={
+   444→    "type": "function",
+   445→    "function": {
+   446→        "name": "insertar_en_linea",
+   447→        "description": "Inserta contenido antes o despues de una linea especifica en un archivo. No reemplaza lineas existentes.",
+   448→        "parameters": {
+   449→            "type": "object",
+   450→            "properties": {
+   451→                "ruta": {"type": "string", "description": "Ruta del archivo"},
+   452→                "linea": {"type": "integer", "description": "Numero de linea de referencia (1-indexed)"},
+   453→                "contenido": {"type": "string", "description": "Contenido a insertar"},
+   454→                "posicion": {"type": "string", "description": "Posicion: 'before' o 'after' (default: 'after')"}
+   455→            },
+   456→            "required": ["ruta", "linea", "contenido"]
+   457→        }
+   458→    }
+   459→})
+   460→def insertar_en_linea(ruta: str, linea: int, contenido: str,
+   461→                      posicion: str = "after") -> str:
+   462→    """Inserta contenido en una posicion especifica del archivo."""
+   463→    from .file_editor import insert_at_line
+   464→    result = insert_at_line(
+   465→        filepath=ruta, line_number=linea, content=contenido, position=posicion,
+   466→    )
+   467→    if result["success"]:
+   468→        return result.get("message", "OK")
+   469→    return f"ERROR: {result.get('error', 'Error desconocido')}"
+   470→
+   471→
+   472→# --- Git Tool ---
+   473→
+   474→@tool(schema={
+   475→    "type": "function",
+   476→    "function": {
+   477→        "name": "git_operacion",
+   478→        "description": "Ejecuta operaciones Git de forma estructurada. Soporta: status, diff, add, commit, branch, log, push, pull, stash, init. No usa ejecutar_comando — parsea y valida cada operacion.",
+   479→        "parameters": {
+   480→            "type": "object",
+   481→            "properties": {
+   482→                "operacion": {"type": "string", "description": "Operacion: status, diff, add, commit, branch, log, push, pull, stash, init"},
+   483→                "ruta_repo": {"type": "string", "description": "Ruta al repositorio (default: directorio de trabajo)"},
+   484→                "mensaje": {"type": "string", "description": "Mensaje para commit o stash"},
+   485→                "branch": {"type": "string", "description": "Nombre del branch (para branch/push/pull)"},
+   486→                "archivos": {"type": "string", "description": "Archivos para add (separados por coma, o 'all')"},
+   487→                "accion_branch": {"type": "string", "description": "Para branch: list, create, switch, delete"},
+   488→                "accion_stash": {"type": "string", "description": "Para stash: save, list, pop, drop"},
+   489→                "staged": {"type": "boolean", "description": "Para diff: mostrar solo staged (default: false)"},
+   490→                "count": {"type": "integer", "description": "Para log: numero de commits (default: 10)"}
+   491→            },
+   492→            "required": ["operacion"]
+   493→        }
+   494→    }
+   495→})
+   496→def git_operacion(operacion: str, ruta_repo: str = "", mensaje: str = "",
+   497→                  branch: str = "", archivos: str = "",
+   498→                  accion_branch: str = "list", accion_stash: str = "save",
+   499→                  staged: bool = False, count: int = 10) -> str:
+   500→    """Ejecuta operaciones Git de forma estructurada."""
+   501→    from . import git_tool as gt
+   502→
+   503→    path = ruta_repo or None
+   504→    op = operacion.lower().strip()
+   505→
+   506→    if op == "status":
+   507→        result = gt.git_status(path)
+   508→    elif op == "diff":
+   509→        result = gt.git_diff(path, staged=staged)
+   510→    elif op == "add":
+   511→        files = [f.strip() for f in archivos.split(",")] if archivos and archivos != "all" else None
+   512→        result = gt.git_add(path, files=files, all_changes=archivos == "all" or not archivos)
+   513→    elif op == "commit":
+   514→        result = gt.git_commit(path, message=mensaje or None, add_all=False)
+   515→    elif op == "branch":
+   516→        result = gt.git_branch(path, action=accion_branch, branch_name=branch or None)
+   517→    elif op == "log":
+   518→        result = gt.git_log(path, count=count)
+   519→    elif op == "push":
+   520→        result = gt.git_push(path, branch=branch or None)
+   521→    elif op == "pull":
+   522→        result = gt.git_pull(path, branch=branch or None)
+   523→    elif op == "stash":
+   524→        result = gt.git_stash(path, action=accion_stash, message=mensaje)
+   525→    elif op == "init":
+   526→        result = gt.git_init(path)
+   527→    else:
+   528→        return f"Operacion no soportada: {op}. Usa: status, diff, add, commit, branch, log, push, pull, stash, init"
+   529→
+   530→    if result.get("success"):
+   531→        # Formatear resultado para el agente
+   532→        return json.dumps(result, ensure_ascii=False, indent=2, default=str)[:2000]
+   533→    return f"ERROR: {result.get('error', 'Error desconocido')}"
+   534→
+   535→
+   536→# --- Database Tool ---
+   537→
+   538→@tool(schema={
+   539→    "type": "function",
+   540→    "function": {
+   541→        "name": "base_de_datos",
+   542→        "description": "Operaciones de base de datos: conectar, consultar, listar tablas, describir estructura, crear tablas, exportar datos. Soporta SQLite, PostgreSQL, MySQL.",
+   543→        "parameters": {
+   544→            "type": "object",
+   545→            "properties": {
+   546→                "accion": {"type": "string", "description": "Accion: conectar, consultar, tablas, describir, crear_tabla, exportar"},
+   547→                "ruta_db": {"type": "string", "description": "Ruta a la base de datos (SQLite) o connection string"},
+   548→                "tipo_db": {"type": "string", "description": "Tipo: sqlite, postgres, mysql (default: sqlite)"},
+   549→                "query": {"type": "string", "description": "Query SQL (para accion=consultar)"},
+   550→                "tabla": {"type": "string", "description": "Nombre de tabla (para describir, exportar, crear_tabla)"},
+   551→                "columnas": {"type": "string", "description": "Columnas para crear_tabla en formato JSON: [{name, type, primary_key}]"},
+   552→                "formato_exportacion": {"type": "string", "description": "Formato para exportar: json o csv (default: json)"},
+   553→                "limit": {"type": "integer", "description": "Maximo de filas a retornar (default: 100)"}
+   554→            },
+   555→            "required": ["accion"]
+   556→        }
+   557→    }
+   558→})
+   559→def base_de_datos(accion: str, ruta_db: str = "", tipo_db: str = "sqlite",
+   560→                  query: str = "", tabla: str = "", columnas: str = "",
+   561→                  formato_exportacion: str = "json", limit: int = 100) -> str:
+   562→    """Operaciones de base de datos."""
+   563→    from . import database_tool as db
+   564→
+   565→    accion = accion.lower().strip()
+   566→
+   567→    if accion == "conectar":
+   568→        result = db.db_connect(ruta_db or ":memory:", tipo_db)
+   569→    elif accion == "consultar":
+   570→        if not query:
+   571→            return "ERROR: Se requiere query SQL"
+   572→        result = db.db_query(query, db_path=ruta_db or None, limit=limit)
+   573→    elif accion == "tablas":
+   574→        result = db.db_tables(db_path=ruta_db or None)
+   575→    elif accion == "describir":
+   576→        if not tabla:
+   577→            return "ERROR: Se requiere nombre de tabla"
+   578→        result = db.db_describe(tabla, db_path=ruta_db or None)
+   579→    elif accion == "crear_tabla":
+   580→        if not tabla or not columnas:
+   581→            return "ERROR: Se requiere nombre de tabla y columnas (JSON)"
+   582→        try:
+   583→            cols = json.loads(columnas)
+   584→        except Exception:
+   585→            return "ERROR: columnas debe ser JSON valido: [{\"name\": \"id\", \"type\": \"INTEGER\", \"primary_key\": true}]"
+   586→        result = db.db_create_table(tabla, cols, db_path=ruta_db or None)
+   587→    elif accion == "exportar":
+   588→        if not tabla:
+   589→            return "ERROR: Se requiere nombre de tabla"
+   590→        result = db.db_export(tabla, output_format=formato_exportacion, db_path=ruta_db or None)
+   591→    else:
+   592→        return f"Accion no soportada: {accion}. Usa: conectar, consultar, tablas, describir, crear_tabla, exportar"
+   593→
+   594→    if result.get("success"):
+   595→        return json.dumps(result, ensure_ascii=False, indent=2, default=str)[:2000]
+   596→    return f"ERROR: {result.get('error', 'Error desconocido')}"
+   597→
+   598→
+   599→# --- Task Planner ---
+   600→
+   601→@tool(schema={
+   602→    "type": "function",
+   603→    "function": {
+   604→        "name": "planificar_tarea",
+   605→        "description": "Descompone una tarea compleja en subtareas ejecutables con dependencias. Usa templates para tareas comunes (web_app, script, automation, analysis). Retorna un plan con progreso.",
+   606→        "parameters": {
+   607→            "type": "object",
+   608→            "properties": {
+   609→                "objetivo": {"type": "string", "description": "Objetivo o tarea compleja a descomponer"},
+   610→                "tipo": {"type": "string", "description": "Tipo de tarea: web_app, script, automation, analysis, project_setup (auto-detectar si vacio)"},
+   611→                "avanzar": {"type": "boolean", "description": "Si true, marca la tarea actual como completada y avanza a la siguiente"},
+   612→                "resultado_tarea": {"type": "string", "description": "Resultado de la tarea actual (para avanzar)"},
+   613→                "ver_progreso": {"type": "boolean", "description": "Si true, muestra el progreso del plan actual"}
+   614→            },
+   615→            "required": ["objetivo"]
+   616→        }
+   617→    }
+   618→})
+   619→def planificar_tarea(objetivo: str, tipo: str = "", avanzar: bool = False,
+   620→                     resultado_tarea: str = "", ver_progreso: bool = False) -> str:
+   621→    """Descompone tareas complejas en subtareas ejecutables."""
+   622→    from .task_planner import get_planner
+   623→
+   624→    planner = get_planner()
+   625→
+   626→    if ver_progreso:
+   627→        progress = planner.get_progress()
+   628→        return json.dumps(progress, ensure_ascii=False, indent=2)
+   629→
+   630→    if avanzar:
+   631→        next_task = planner.advance_plan(resultado_tarea)
+   632→        if next_task:
+   633→            return json.dumps({
+   634→                "message": "Tarea completada. Siguiente tarea:",
+   635→                "task": next_task.to_dict(),
+   636→                "progress": planner.get_progress(),
+   637→            }, ensure_ascii=False, indent=2, default=str)
+   638→        else:
+   639→            return json.dumps({
+   640→                "message": "Plan completado o no hay mas tareas",
+   641→                "progress": planner.get_progress(),
+   642→            }, ensure_ascii=False, indent=2)
+   643→
+   644→    # Crear nuevo plan
+   645→    plan = planner.create_plan(objetivo, task_type=tipo or None)
+   646→    return json.dumps({
+   647→        "plan_id": plan.id,
+   648→        "goal": plan.goal,
+   649→        "total_tasks": len(plan.tasks),
+   650→        "first_task": plan.get_next_task().to_dict() if plan.get_next_task() else None,
+   651→        "all_tasks": [t.to_dict() for t in plan.tasks.values()],
+   652→    }, ensure_ascii=False, indent=2, default=str)
+   653→
+   654→
+   655→# --- Error Recovery ---
+   656→
+   657→@tool(schema={
+   658→    "type": "function",
+   659→    "function": {
+   660→        "name": "diagnosticar_error",
+   661→        "description": "Diagnostica un error y sugiere correcciones automaticas. Clasifica el error, identifica causa raiz, y propone pasos de recuperacion.",
+   662→        "parameters": {
+   663→            "type": "object",
+   664→            "properties": {
+   665→                "mensaje_error": {"type": "string", "description": "Mensaje de error a diagnosticar"},
+   666→                "herramienta": {"type": "string", "description": "Nombre de la herramienta que fallo (opcional)"},
+   667→                "contexto": {"type": "string", "description": "Contexto adicional en formato JSON (opcional)"}
+   668→            },
+   669→            "required": ["mensaje_error"]
+   670→        }
+   671→    }
+   672→})
+   673→def diagnosticar_error(mensaje_error: str, herramienta: str = "",
+   674→                       contexto: str = "") -> str:
+   675→    """Diagnostica un error y sugiere correcciones."""
+   676→    from .error_recovery import diagnose_error
+   677→
+   678→    ctx = {}
+   679→    if contexto:
+   680→        try:
+   681→            ctx = json.loads(contexto)
+   682→        except Exception:
+   683→            ctx = {"raw_context": contexto}
+   684→
+   685→    result = diagnose_error(mensaje_error, herramienta, ctx)
+   686→    return json.dumps(result, ensure_ascii=False, indent=2)
+   687→
+   688→
+   689→# --- Browser Automation (Playwright) ---
+   690→
+   691→@tool(schema={
+   692→    "type": "function",
+   693→    "function": {
+   694→        "name": "navegador_web",
+   695→        "description": "Automatiza un navegador web real con Playwright. Navega, hace click, escribe, toma screenshots, extrae datos, llena formularios, ejecuta JavaScript. Mucho mas potente que abrir_url o navegar_web.",
+   696→        "parameters": {
+   697→            "type": "object",
+   698→            "properties": {
+   699→                "accion": {"type": "string", "description": "Accion: navigate, click, type, screenshot, extract, fill_form, wait, scroll, evaluate, pdf, download, get_page_info, start, stop"},
+   700→                "url": {"type": "string", "description": "URL para navigate/download"},
+   701→                "selector": {"type": "string", "description": "Selector CSS del elemento (para click, type, extract, wait)"},
+   702→                "texto": {"type": "string", "description": "Texto a escribir (para type)"},
+   703→                "tipo_extract": {"type": "string", "description": "Tipo de extraccion: text, html, href, src, value, all_links, all_images (default: text)"},
+   704→                "campos_formulario": {"type": "string", "description": "Campos para fill_form en JSON: [{selector, value}]"},
+   705→                "direccion_scroll": {"type": "string", "description": "Direccion scroll: up, down, left, right (default: down)"},
+   706→                "script_js": {"type": "string", "description": "JavaScript a ejecutar (para evaluate)"},
+   707→                "completa": {"type": "boolean", "description": "Screenshot completa (default: false)"},
+   708→                "esperar": {"type": "integer", "description": "Timeout en milisegundos (default: 5000)"},
+   709→                "presionar_enter": {"type": "boolean", "description": "Presionar Enter despues de escribir (default: false)"},
+   710→                "ruta_destino": {"type": "string", "description": "Ruta de destino para pdf/download"}
+   711→            },
+   712→            "required": ["accion"]
+   713→        }
+   714→    }
+   715→})
+   716→def navegador_web(accion: str, url: str = "", selector: str = "", texto: str = "",
+   717→                  tipo_extract: str = "text", campos_formulario: str = "",
+   718→                  direccion_scroll: str = "down", script_js: str = "",
+   719→                  completa: bool = False, esperar: int = 5000,
+   720→                  presionar_enter: bool = False, ruta_destino: str = "") -> str:
+   721→    """Automatiza un navegador web real con Playwright."""
+   722→    from .browser_automation import browser_automation
+   723→    return browser_automation(
+   724→        accion=accion,
+   725→        url=url,
+   726→        selector=selector,
+   727→        text=texto,
+   728→        extract_type=tipo_extract,
+   729→        fields_json=campos_formulario,
+   730→        direction=direccion_scroll,
+   731→        script=script_js,
+   732→        full_page=completa,
+   733→        timeout=esperar,
+   734→        press_enter=presionar_enter,
+   735→        output_path=ruta_destino,
+   736→    )
+   737→
+   738→
+   739→# --- Docker Sandbox ---
+   740→
+   741→@tool(schema={
+   742→    "type": "function",
+   743→    "function": {
+   744→        "name": "ejecutar_en_contenedor",
+   745→        "description": "Ejecuta codigo dentro de un contenedor Docker aislado. Mas seguro que ejecutar_codigo. Si Docker no esta disponible, hace fallback al sandbox local automaticamente.",
+   746→        "parameters": {
+   747→            "type": "object",
+   748→            "properties": {
+   749→                "codigo": {"type": "string", "description": "Codigo fuente a ejecutar"},
+   750→                "lenguaje": {"type": "string", "description": "Lenguaje: python, javascript, bash (default: python)"},
+   751→                "timeout": {"type": "integer", "description": "Timeout en segundos (default: 60)"},
+   752→                "permitir_red": {"type": "boolean", "description": "Permitir acceso a red en el contenedor (default: false)"},
+   753→                "directorio_trabajo": {"type": "string", "description": "Directorio de trabajo montado en el contenedor (opcional)"}
+   754→            },
+   755→            "required": ["codigo"]
+   756→        }
+   757→    }
+   758→})
+   759→def ejecutar_en_contenedor(codigo: str, lenguaje: str = "python", timeout: int = 60,
+   760→                           permitir_red: bool = False, directorio_trabajo: str = "") -> str:
+   761→    """Ejecuta codigo dentro de un contenedor Docker aislado."""
+   762→    from .docker_sandbox import execute_in_container
+   763→    result = execute_in_container(
+   764→        code=codigo,
+   765→        language=lenguaje,
+   766→        timeout=timeout,
+   767→        working_dir=directorio_trabajo or None,
+   768→        allow_network=permitir_red,
+   769→    )
+   770→    if result.get("success"):
+   771→        output = f"EXITO (docker, tiempo: {result.get('duration', 0):.2f}s)"
+   772→        if result.get("stdout"):
+   773→            output += f"\nSTDOUT:\n{result['stdout'][:2000]}"
+   774→        return output
+   775→    else:
+   776→        output = f"ERROR (docker, exit code: {result.get('exit_code', -1)})"
+   777→        if result.get("stderr"):
+   778→            output += f"\nSTDERR:\n{result['stderr'][:1000]}"
+   779→        return output
+   780→
+   781→
+   782→# --- Project Scaffolding (v18) ---
+   783→
+   784→@tool(schema={
+   785→    "type": "function",
+   786→    "function": {
+   787→        "name": "crear_proyecto",
+   788→        "description": "Crea un proyecto completo con multiples archivos desde una plantilla. Soporta: nextjs_app, express_api, python_cli, python_api, react_app, fullstack_nextjs, python_package. Genera TODOS los archivos necesarios para un proyecto funcionando. Mucho mas rapido que crear archivo por archivo.",
+   789→        "parameters": {
+   790→            "type": "object",
+   791→            "properties": {
+   792→                "plantilla": {"type": "string", "description": "Plantilla: nextjs_app, express_api, python_cli, python_api, react_app, fullstack_nextjs, python_package"},
+   793→                "nombre_proyecto": {"type": "string", "description": "Nombre del proyecto (sin espacios)"},
+   794→                "directorio": {"type": "string", "description": "Directorio destino (default: directorio de trabajo)"},
+   795→                "descripcion": {"type": "string", "description": "Descripcion del proyecto (para README y personalizacion)"},
+   796→                "sobrescribir": {"type": "boolean", "description": "Sobrescribir si ya existe (default: false)"},
+   797→                "instalar": {"type": "boolean", "description": "Ejecutar npm install / pip install despues de crear (default: true)"}
+   798→            },
+   799→            "required": ["plantilla", "nombre_proyecto"]
+   800→        }
+   801→    }
+   802→})
+   803→def crear_proyecto(plantilla: str, nombre_proyecto: str, directorio: str = "",
+   804→                   descripcion: str = "", sobrescribir: bool = False,
+   805→                   instalar: bool = True) -> str:
+   806→    """Crea un proyecto completo desde una plantilla."""
+   807→    from .project_scaffold import ProjectScaffold
+   808→
+   809→    scaffold = ProjectScaffold()
+   810→    options = {
+   811→        "overwrite": sobrescribir,
+   812→        "install_deps": instalar,
+   813→        "description": descripcion or nombre_proyecto,
+   814→    }
+   815→
+   816→    result = scaffold.scaffold_project(
+   817→        template_name=plantilla,
+   818→        project_name=nombre_proyecto,
+   819→        target_dir=directorio or None,
+   820→        options=options,
+   821→    )
+   822→
+   823→    if result.get("success"):
+   824→        files = result.get("files_created", [])
+   825→        output = f"Proyecto '{nombre_proyecto}' creado con {len(files)} archivos."
+   826→        output += f"\nPlantilla: {plantilla}"
+   827→        output += f"\nRuta: {result.get('project_path', '')}"
+   828→        if files:
+   829→            output += f"\nArchivos creados:\n" + "\n".join(f"  - {f}" for f in files[:20])
+   830→            if len(files) > 20:
+   831→                output += f"\n  ... y {len(files) - 20} mas"
+   832→        return output
+   833→    return f"ERROR: {result.get('error', 'Error desconocido')}"
+   834→
+   835→
+   836→@tool(schema={
+   837→    "type": "function",
+   838→    "function": {
+   839→        "name": "listar_plantillas",
+   840→        "description": "Lista las plantillas de proyecto disponibles para usar con crear_proyecto. Muestra nombre, descripcion y archivos que genera cada una.",
+   841→        "parameters": {
+   842→            "type": "object",
+   843→            "properties": {},
+   844→            "required": []
+   845→        }
+   846→    }
+   847→})
+   848→def listar_plantillas() -> str:
+   849→    """Lista las plantillas de proyecto disponibles."""
+   850→    from .project_scaffold import ProjectScaffold
+   851→
+   852→    scaffold = ProjectScaffold()
+   853→    templates = scaffold.list_templates()
+   854→
+   855→    output = "PLANTILLAS DE PROYECTO DISPONIBLES:\n\n"
+   856→    for name, info in templates.items():
+   857→        output += f"  {name}:\n"
+   858→        output += f"    Descripcion: {info.get('description', 'N/A')}\n"
+   859→        output += f"    Archivos: {info.get('file_count', '?')} archivos\n"
+   860→        output += f"    Post-create: {', '.join(info.get('post_create_commands', []))}\n\n"
+   861→
+   862→    return output
+   863→
+   864→
+   865→# --- Deployment Tool (v18) ---
+   866→
+   867→@tool(schema={
+   868→    "type": "function",
+   869→    "function": {
+   870→        "name": "desplegar_proyecto",
+   871→        "description": "Despliega un proyecto a la plataforma indicada. Soporta: local (dev server), docker (contenedor), vercel (cloud), ssh (servidor remoto). Auto-detecta el tipo de proyecto y genera configuracion si falta.",
+   872→        "parameters": {
+   873→            "type": "object",
+   874→            "properties": {
+   875→                "ruta_proyecto": {"type": "string", "description": "Ruta al proyecto a desplegar"},
+   876→                "plataforma": {"type": "string", "description": "Plataforma: local, docker, vercel, ssh"},
+   877→                "produccion": {"type": "boolean", "description": "Desplegar en produccion (default: false, solo para vercel)"},
+   878→                "puerto": {"type": "integer", "description": "Puerto para el servidor (default: auto)"},
+   879→                "imagen_docker": {"type": "string", "description": "Nombre de imagen Docker (para plataforma=docker)"},
+   880→                "host_ssh": {"type": "string", "description": "Host SSH (para plataforma=ssh)"},
+   881→                "usuario_ssh": {"type": "string", "description": "Usuario SSH (para plataforma=ssh)"},
+   882→                "ruta_remota": {"type": "string", "description": "Ruta remota en el servidor SSH"}
+   883→            },
+   884→            "required": ["ruta_proyecto", "plataforma"]
+   885→        }
+   886→    }
+   887→})
+   888→def desplegar_proyecto(ruta_proyecto: str, plataforma: str, produccion: bool = False,
+   889→                       puerto: int = 0, imagen_docker: str = "", host_ssh: str = "",
+   890→                       usuario_ssh: str = "", ruta_remota: str = "") -> str:
+   891→    """Despliega un proyecto a la plataforma indicada."""
+   892→    from . import deployment_tool as dt
+   893→
+   894→    platform = plataforma.lower().strip()
+   895→
+   896→    if platform == "local":
+   897→        result = dt.deploy_local(ruta_proyecto, port=puerto or None)
+   898→    elif platform == "docker":
+   899→        result = dt.deploy_docker(
+   900→            ruta_proyecto,
+   901→            image_name=imagen_docker or None,
+   902→            ports=puerto or None,
+   903→        )
+   904→    elif platform == "vercel":
+   905→        result = dt.deploy_vercel(ruta_proyecto, production=produccion)
+   906→    elif platform == "ssh":
+   907→        if not host_ssh or not usuario_ssh:
+   908→            return "ERROR: Para SSH se requiere host_ssh y usuario_ssh"
+   909→        result = dt.deploy_ssh(
+   910→            ruta_proyecto,
+   911→            host=host_ssh,
+   912→            user=usuario_ssh,
+   913→            remote_path=ruta_remota or None,
+   914→        )
+   915→    else:
+   916→        return f"Plataforma no soportada: {platform}. Usa: local, docker, vercel, ssh"
+   917→
+   918→    if result.get("success"):
+   919→        output = f"Despliegue exitoso en {platform}!"
+   920→        if result.get("url"):
+   921→            output += f"\nURL: {result['url']}"
+   922→        if result.get("pid"):
+   923→            output += f"\nPID: {result['pid']}"
+   924→        if result.get("container_id"):
+   925→            output += f"\nContainer: {result['container_id'][:12]}"
+   926→        return output
+   927→    return f"ERROR desplegando: {result.get('error', 'Error desconocido')}"
+   928→
+   929→
+   930→@tool(schema={
+   931→    "type": "function",
+   932→    "function": {
+   933→        "name": "opciones_despliegue",
+   934→        "description": "Analiza un proyecto y lista las opciones de despliegue disponibles. Verifica que herramientas estan instaladas (Docker, Vercel, SSH) y recomienda la mejor plataforma.",
+   935→        "parameters": {
+   936→            "type": "object",
+   937→            "properties": {
+   938→                "ruta_proyecto": {"type": "string", "description": "Ruta al proyecto"}
+   939→            },
+   940→            "required": ["ruta_proyecto"]
+   941→        }
+   942→    }
+   943→})
+   944→def opciones_despliegue(ruta_proyecto: str) -> str:
+   945→    """Lista opciones de despliegue para un proyecto."""
+   946→    from . import deployment_tool as dt
+   947→
+   948→    result = dt.list_deployment_options(ruta_proyecto)
+   949→
+   950→    output = f"Tipo de proyecto: {result.get('project_type', 'desconocido')}\n"
+   951→    output += f"Opciones disponibles: {', '.join(result.get('available', []))}\n"
+   952→    output += f"Recomendado: {result.get('recommended', 'N/A')}\n"
+   953→
+   954→    reasons = result.get("reasons", {})
+   955→    if reasons:
+   956→        output += "\nRazones:\n"
+   957→        for platform, reason in reasons.items():
+   958→            output += f"  {platform}: {reason}\n"
+   959→
+   960→    return output
+   961→
+   962→
+   963→@tool(schema={
+   964→    "type": "function",
+   965→    "function": {
+   966→        "name": "detener_despliegue",
+   967→        "description": "Detiene un despliegue activo. Puede detener servidores locales (por PID), contenedores Docker, o indicar como detener despliegues cloud.",
+   968→        "parameters": {
+   969→            "type": "object",
+   970→            "properties": {
+   971→                "ruta_proyecto": {"type": "string", "description": "Ruta del proyecto desplegado"},
+   972→                "plataforma": {"type": "string", "description": "Plataforma donde esta desplegado: local, docker"}
+   973→            },
+   974→            "required": ["ruta_proyecto"]
+   975→        }
+   976→    }
+   977→})
+   978→def detener_despliegue(ruta_proyecto: str, plataforma: str = "") -> str:
+   979→    """Detiene un despliegue activo."""
+   980→    from . import deployment_tool as dt
+   981→
+   982→    result = dt.stop_deployment(project_path=ruta_proyecto)
+   983→
+   984→    if result.get("success"):
+   985→        return result.get("message", "Despliegue detenido")
+   986→    return f"ERROR: {result.get('error', 'No se pudo detener')}"
+   987→
+   988→
+   989→# --- Model Router (v18) ---
+   990→
+   991→@tool(schema={
+   992→    "type": "function",
+   993→    "function": {
+   994→        "name": "info_modelos",
+   995→        "description": "Muestra informacion sobre los modelos de IA disponibles, sus capacidades (chat, codigo, vision, embeddings), y recomendaciones de instalacion.",
+   996→        "parameters": {
+   997→            "type": "object",
+   998→            "properties": {},
+   999→            "required": []
+  1000→        }
+  1001→    }
+  1002→})
+  1003→def info_modelos() -> str:
+  1004→    """Muestra informacion sobre modelos disponibles."""
+  1005→    from .model_router import get_router
+  1006→
+  1007→    router = get_router()
+  1008→    info = router.get_model_info()
+  1009→
+  1010→    output = "MODELOS DE IA DISPONIBLES:\n\n"
+  1011→
+  1012→    by_cap = info.get("by_capability", {})
+  1013→    for capability, models in by_cap.items():
+  1014→        output += f"  {capability.upper()}:\n"
+  1015→        for model in models:
+  1016→            output += f"    - {model}\n"
+  1017→        output += "\n"
+  1018→
+  1019→    output += f"Modelo por defecto: {info.get('recommended', 'N/A')}\n"
+  1020→
+  1021→    recommendations = router.recommend_model_install()
+  1022→    if recommendations:
+  1023→        output += "\nRECOMENDACIONES DE INSTALACION:\n"
+  1024→        for rec in recommendations:
+  1025→            output += f"  - {rec}\n"
+  1026→
+  1027→    return output
+  1028→
+  1029→
+  1030→# --- Environment Manager (v18) ---
+  1031→
+  1032→@tool(schema={
+  1033→    "type": "function",
+  1034→    "function": {
+  1035→        "name": "gestionar_entorno",
+  1036→        "description": "Gestiona entornos de desarrollo: crear virtualenvs, instalar paquetes Python/Node, detectar entorno de proyecto, ejecutar comandos en el entorno correcto. Usa ESTO en vez de ejecutar_comando para pip install o npm install.",
+  1037→        "parameters": {
+  1038→            "type": "object",
+  1039→            "properties": {
+  1040→                "accion": {"type": "string", "description": "Accion: crear_venv, instalar_python, instalar_node, detectar_entorno, ejecutar, version_node, set_version_node"},
+  1041→                "ruta_proyecto": {"type": "string", "description": "Ruta al proyecto"},
+  1042→                "paquetes": {"type": "string", "description": "Paquetes a instalar (separados por coma)"},
+  1043→                "dev": {"type": "boolean", "description": "Instalar como dependencia de desarrollo (default: false)"},
+  1044→                "comando": {"type": "string", "description": "Comando a ejecutar (para accion=ejecutar)"},
+  1045→                "version": {"type": "string", "description": "Version (para set_version_node)"},
+  1046→                "nombre_venv": {"type": "string", "description": "Nombre del venv (default: .venv)"}
+  1047→            },
+  1048→            "required": ["accion"]
+  1049→        }
+  1050→    }
+  1051→})
+  1052→def gestionar_entorno(accion: str, ruta_proyecto: str = "", paquetes: str = "",
+  1053→                      dev: bool = False, comando: str = "", version: str = "",
+  1054→                      nombre_venv: str = ".venv") -> str:
+  1055→    """Gestiona entornos de desarrollo (Python/Node)."""
+  1056→    from .env_manager import get_env_manager
+  1057→
+  1058→    mgr = get_env_manager()
+  1059→    accion = accion.lower().strip()
+  1060→
+  1061→    if accion == "crear_venv":
+  1062→        result = mgr.create_venv(ruta_proyecto or REPOS_DIR, name=nombre_venv)
+  1063→    elif accion == "instalar_python":
+  1064→        if not paquetes:
+  1065→            return "ERROR: Especifica los paquetes a instalar"
+  1066→        pkg_list = [p.strip() for p in paquetes.split(",")]
+  1067→        result = mgr.install_python_packages(pkg_list, project_path=ruta_proyecto or None, dev=dev)
+  1068→    elif accion == "instalar_node":
+  1069→        if not paquetes:
+  1070→            return "ERROR: Especifica los paquetes a instalar"
+  1071→        pkg_list = [p.strip() for p in paquetes.split(",")]
+  1072→        result = mgr.install_node_packages(pkg_list, project_path=ruta_proyecto or None, dev=dev)
+  1073→    elif accion == "detectar_entorno":
+  1074→        result = mgr.detect_project_environment(ruta_proyecto or REPOS_DIR)
+  1075→    elif accion == "ejecutar":
+  1076→        if not comando:
+  1077→            return "ERROR: Especifica el comando a ejecutar"
+  1078→        result = mgr.run_in_env(comando, project_path=ruta_proyecto or REPOS_DIR)
+  1079→    elif accion == "version_node":
+  1080→        result = {"node_version": mgr.get_node_version()}
+  1081→    elif accion == "set_version_node":
+  1082→        if not version:
+  1083→            return "ERROR: Especifica la version de Node.js"
+  1084→        result = mgr.set_node_version(version, project_path=ruta_proyecto or None)
+  1085→    else:
+  1086→        return f"Accion no soportada: {accion}. Usa: crear_venv, instalar_python, instalar_node, detectar_entorno, ejecutar, version_node, set_version_node"
+  1087→
+  1088→    if result.get("success") or "node_version" in result or isinstance(result, dict):
+  1089→        return json.dumps(result, ensure_ascii=False, indent=2, default=str)[:2000]
+  1090→    return f"ERROR: {result.get('error', 'Error desconocido')}"
+  1091→
+  1092→
+  1093→# --- User Feedback (v18) ---
+  1094→
+  1095→@tool(schema={
+  1096→    "type": "function",
+  1097→    "function": {
+  1098→        "name": "registrar_feedback",
+  1099→        "description": "Registra feedback del usuario sobre una respuesta del agente (thumbs up/down, rating, correccion). Esto ayuda al agente a mejorar con el tiempo.",
+  1100→        "parameters": {
+  1101→            "type": "object",
+  1102→            "properties": {
+  1103→                "id_mensaje": {"type": "string", "description": "ID del mensaje al que corresponde el feedback"},
+  1104→                "tipo_feedback": {"type": "string", "description": "Tipo: thumbs_up, thumbs_down, rating, correction"},
+  1105→                "calificacion": {"type": "integer", "description": "Calificacion 1-5 (para tipo=rating)"},
+  1106→                "comentario": {"type": "string", "description": "Comentario o correccion del usuario"},
+  1107→                "herramienta": {"type": "string", "description": "Herramienta que se uso en la respuesta (opcional)"}
+  1108→            },
+  1109→            "required": ["id_mensaje", "tipo_feedback"]
+  1110→        }
+  1111→    }
+  1112→})
+  1113→def registrar_feedback(id_mensaje: str, tipo_feedback: str, calificacion: int = 0,
+  1114→                       comentario: str = "", herramienta: str = "") -> str:
+  1115→    """Registra feedback del usuario."""
+  1116→    from .user_feedback import feedback_tracker
+  1117→
+  1118→    details = {}
+  1119→    if calificacion:
+  1120→        details["rating"] = calificacion
+  1121→    if comentario:
+  1122→        details["comment"] = comentario
+  1123→    if herramienta:
+  1124→        details["tool"] = herramienta
+  1125→
+  1126→    result = feedback_tracker.record_feedback(id_mensaje, tipo_feedback, details or None)
+  1127→
+  1128→    if result.get("success"):
+  1129→        return "Feedback registrado. Gracias por ayudarme a mejorar!"
+  1130→    return f"ERROR: {result.get('error', 'No se pudo registrar')}"
+  1131→
+  1132→
+  1133→@tool(schema={
+  1134→    "type": "function",
+  1135→    "function": {
+  1136→        "name": "stats_feedback",
+  1137→        "description": "Muestra estadisticas de feedback del usuario: thumbs up/down, rating promedio, tendencias, y areas de mejora.",
+  1138→        "parameters": {
+  1139→            "type": "object",
+  1140→            "properties": {},
+  1141→            "required": []
+  1142→        }
+  1143→    }
+  1144→})
+  1145→def stats_feedback() -> str:
+  1146→    """Muestra estadisticas de feedback."""
+  1147→    from .user_feedback import feedback_tracker
+  1148→
+  1149→    stats = feedback_tracker.get_feedback_stats()
+  1150→    output = "ESTADISTICAS DE FEEDBACK:\n\n"
+  1151→    output += f"  Total: {stats.get('total_feedback', 0)}\n"
+  1152→    output += f"  Thumbs up: {stats.get('thumbs_up', 0)}\n"
+  1153→    output += f"  Thumbs down: {stats.get('thumbs_down', 0)}\n"
+  1154→    output += f"  Rating promedio: {stats.get('avg_rating', 0):.1f}/5\n"
+  1155→    output += f"  Tendencia: {stats.get('recent_trend', 'N/A')}\n"
+  1156→
+  1157→    by_tool = stats.get("by_tool", {})
+  1158→    if by_tool:
+  1159→        output += "\n  Por herramienta:\n"
+  1160→        for tool, counts in by_tool.items():
+  1161→            output += f"    {tool}: +{counts.get('positive', 0)} / -{counts.get('negative', 0)}\n"
+  1162→
+  1163→    return output
+  1164→
+  1165→
+  1166→# ============================================================
+  1167→# CARGAR SKILLS DINAMICAMENTE
+  1168→# ============================================================
+  1169→
+  1170→def load_skills():
+  1171→    """Carga los skills disponibles como herramientas del agente."""
+  1172→    try:
+  1173→        from .skill_loader import load_all_skills
+  1174→        result = load_all_skills()
+  1175→        logger.info(f"[Tools] Skills cargados: {result['loaded']} herramientas, {result.get('reference', 0)} referencia")
+  1176→        return result
+  1177→    except Exception as e:
+  1178→        logger.warning(f"[Tools] Error cargando skills: {e}")
+  1179→        return {"loaded": 0, "errors": 1, "error_details": [str(e)]}
+  1180→
+  1181→
+  1182→# ============================================================
+  1183→# REGISTRAR SUB-MODULOS AL FINAL
+  1184→# (Debe ejecutarse despues de que registry.py tenga sus dicts limpios
+  1185→#  y despues de definir las herramientas inline con @tool)
+  1186→# ============================================================
+  1187→_register_submodule_tools()
+  1188→
+  1189→# v22: Importar API Integration Framework (se auto-registra)
+  1190→try:
+  1191→    from . import api_integration  # noqa: F401
+  1192→except Exception as e:
+  1193→    import logging
+  1194→    logging.getLogger(__name__).warning(f"[Tools] Error importando api_integration: {e}")
+  1195→
+  1196→# v22.1: Importar Scheduler & Monitoring (se auto-registra)
+  1197→try:
+  1198→    from . import scheduler  # noqa: F401
+  1199→except Exception as e:
+  1200→    import logging
+  1201→    logging.getLogger(__name__).warning(f"[Tools] Error importando scheduler: {e}")
+  1202→
+  1203→# v23: Importar Notifications Framework (se auto-registra)
+  1204→try:
+  1205→    from . import notifications  # noqa: F401
+  1206→except Exception as e:
+  1207→    import logging
+  1208→    logging.getLogger(__name__).warning(f"[Tools] Error importando notifications: {e}")
+  1209→
+  1210→# v23: Importar Benchmarking Framework (se auto-registra)
+  1211→try:
+  1212→    from . import benchmarking  # noqa: F401
+  1213→except Exception as e:
+  1214→    import logging
+  1215→    logging.getLogger(__name__).warning(f"[Tools] Error importando benchmarking: {e}")
+  1216→
+  1217→# Cargar skills al importar (si es posible)
+  1218→try:
+  1219→    load_skills()
+  1220→except Exception:
+  1221→    pass
+  1222→
