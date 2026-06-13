@@ -2,9 +2,8 @@
 Registro centralizado de herramientas.
 El agente importa TOOL_FUNCTIONS y TOOL_SCHEMAS desde aqui.
 
-v14.5: Usa registry.py con decorator @tool para registro automatico.
-Las herramientas de sub-modulos se registran manualmente con register_tool()
-hasta que se migren al decorator. Las herramientas inline usan @tool.
+v14.7: Super Agente - herramientas de documentos, creacion,
+       percepcion (audio/OCR/web) e integracion (email/API/cron).
 """
 import os
 import json
@@ -12,7 +11,7 @@ import json
 # Importar el registry
 from .registry import tool, register_tool, TOOL_FUNCTIONS, TOOL_SCHEMAS
 
-# Importar herramientas de sub-modulos
+# Importar herramientas de sub-modulos (originales)
 from .sistema import ejecutar_comando, procesos_activos, matar_proceso
 from .archivos import leer_archivo, escribir_archivo, listar_archivos, buscar_en_archivos
 from .apps import abrir_aplicacion, abrir_url, buscar_youtube
@@ -20,19 +19,33 @@ from .proyecto import analizar_proyecto, clonar_repositorio, instalar_dependenci
 from .codigo import generar_codigo
 from .web import buscar_web
 
+# Importar herramientas nuevas v14.7 (Super Agente)
+from .documentos import (
+    leer_pdf, leer_docx, leer_xlsx, leer_pptx,
+    leer_csv, leer_archivo_comprimido, consultar_sqlite,
+    leer_epub, leer_documento
+)
+from .crear_documentos import crear_pdf, crear_docx, crear_xlsx, crear_grafico
+from .percepcion import (
+    transcribir_audio, leer_imagen_ocr,
+    scrapear_web, automatizar_web
+)
+from .integracion import (
+    leer_email, enviar_email, configurar_email,
+    llamar_api, programar_tarea, listar_tareas,
+    leer_portapapeles, escribir_portapapeles
+)
+
 # Importar schemas predefinidos (para herramientas de sub-modulos)
 from .schemas import TOOL_SCHEMAS as _SCHEMAS_FROM_FILE
 
 
 # ============================================================
 # REGISTRAR HERRAMIENTAS DE SUB-MODULOS
-# (Se usa register_tool manual hasta migrar esos archivos a @tool)
 # ============================================================
 
 def _register_submodule_tools():
     """Registra las herramientas importadas de sub-modulos con sus schemas."""
-    # Mapeo nombre -> (funcion, schema)
-    # Los schemas se toman del archivo schemas.py preexistente
     schema_by_name = {}
     for s in _SCHEMAS_FROM_FILE:
         func_info = s.get("function", {})
@@ -41,6 +54,7 @@ def _register_submodule_tools():
             schema_by_name[name] = s
 
     submod_tools = {
+        # Originales
         "ejecutar_comando": ejecutar_comando,
         "abrir_aplicacion": abrir_aplicacion,
         "abrir_url": abrir_url,
@@ -56,6 +70,35 @@ def _register_submodule_tools():
         "procesos_activos": procesos_activos,
         "matar_proceso": matar_proceso,
         "buscar_web": buscar_web,
+        # v14.7 Super Agente - Documentos (lectura)
+        "leer_pdf": leer_pdf,
+        "leer_docx": leer_docx,
+        "leer_xlsx": leer_xlsx,
+        "leer_pptx": leer_pptx,
+        "leer_csv": leer_csv,
+        "leer_archivo_comprimido": leer_archivo_comprimido,
+        "consultar_sqlite": consultar_sqlite,
+        "leer_epub": leer_epub,
+        "leer_documento": leer_documento,
+        # v14.7 Super Agente - Creacion
+        "crear_pdf": crear_pdf,
+        "crear_docx": crear_docx,
+        "crear_xlsx": crear_xlsx,
+        "crear_grafico": crear_grafico,
+        # v14.7 Super Agente - Percepcion
+        "transcribir_audio": transcribir_audio,
+        "leer_imagen_ocr": leer_imagen_ocr,
+        "scrapear_web": scrapear_web,
+        "automatizar_web": automatizar_web,
+        # v14.7 Super Agente - Integracion
+        "leer_email": leer_email,
+        "enviar_email": enviar_email,
+        "configurar_email": configurar_email,
+        "llamar_api": llamar_api,
+        "programar_tarea": programar_tarea,
+        "listar_tareas": listar_tareas,
+        "leer_portapapeles": leer_portapapeles,
+        "escribir_portapapeles": escribir_portapapeles,
     }
 
     for name, func in submod_tools.items():
@@ -109,18 +152,9 @@ def analizar_imagen(ruta: str, pregunta: str = "Describe esta imagen") -> str:
 })
 def configurar_perfil(nombre: str = "", rol: str = "", intereses: str = "",
                       idioma: str = "", estilo: str = "") -> str:
-    """Configura el perfil del usuario para personalizar las respuestas del agente.
-
-    Args:
-        nombre: Nombre del usuario
-        rol: Rol profesional (ej: desarrollador, arquitecto, estudiante)
-        intereses: Intereses principales separados por coma
-        idioma: Idioma preferido para respuestas (ej: espanol, ingles)
-        estilo: Estilo de respuesta (conciso, detallado, tecnico, simple)
-    """
+    """Configura el perfil del usuario para personalizar las respuestas del agente."""
     from config import USER_PROFILE_FILE, logger
 
-    # Cargar perfil existente
     profile = {}
     try:
         if os.path.exists(USER_PROFILE_FILE):
@@ -129,19 +163,12 @@ def configurar_perfil(nombre: str = "", rol: str = "", intereses: str = "",
     except Exception:
         pass
 
-    # Actualizar solo los campos proporcionados
-    if nombre:
-        profile["name"] = nombre
-    if rol:
-        profile["role"] = rol
-    if intereses:
-        profile["interests"] = intereses
-    if idioma:
-        profile["language"] = idioma
-    if estilo:
-        profile["style"] = estilo
+    if nombre: profile["name"] = nombre
+    if rol: profile["role"] = rol
+    if intereses: profile["interests"] = intereses
+    if idioma: profile["language"] = idioma
+    if estilo: profile["style"] = estilo
 
-    # Guardar perfil
     try:
         with open(USER_PROFILE_FILE, "w", encoding="utf-8") as f:
             json.dump(profile, f, ensure_ascii=False, indent=2)
@@ -149,7 +176,6 @@ def configurar_perfil(nombre: str = "", rol: str = "", intereses: str = "",
     except Exception as e:
         return f"ERROR guardando perfil: {e}"
 
-    # Formatear resumen
     parts = []
     field_map = {"name": "Nombre", "role": "Rol", "interests": "Intereses",
                  "language": "Idioma", "style": "Estilo"}
@@ -176,12 +202,7 @@ def configurar_perfil(nombre: str = "", rol: str = "", intereses: str = "",
     }
 })
 def crear_nota(titulo: str, contenido: str) -> str:
-    """Crea una nota rapida y la guarda en la memoria del agente.
-
-    Args:
-        titulo: Titulo de la nota
-        contenido: Contenido de la nota
-    """
+    """Crea una nota rapida y la guarda en la memoria del agente."""
     from config import LEARN_DIR, logger
     from utils.security import sanitize_input
 
@@ -240,7 +261,7 @@ def ver_notas() -> str:
         if not notes:
             return "No hay notas guardadas."
         result = "NOTAS GUARDADAS:\n"
-        for n in notes[-10:]:  # Ultimas 10
+        for n in notes[-10:]:
             result += f"  [{n.get('id', '?')}] {n.get('title', 'Sin titulo')} - {n.get('content', '')[:80]}\n"
         return result
     except Exception as e:
@@ -249,7 +270,5 @@ def ver_notas() -> str:
 
 # ============================================================
 # REGISTRAR SUB-MODULOS AL FINAL
-# (Debe ejecutarse despues de que registry.py tenga sus dicts limpios
-#  y despues de definir las herramientas inline con @tool)
 # ============================================================
 _register_submodule_tools()
