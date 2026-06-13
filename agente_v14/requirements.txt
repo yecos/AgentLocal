@@ -3,3 +3,37 @@ ollama>=0.1.0
 chromadb>=0.4.0
 fastapi>=0.100.0
 uvicorn>=0.23.0
+
+# v15 - Documentos
+fpdf2>=2.7.0
+reportlab>=4.0.0
+python-docx>=0.8.11
+openpyxl>=3.1.0
+python-pptx>=0.6.21
+PyMuPDF>=1.23.0
+
+# v15 - Visualizacion y Diagramas
+matplotlib>=3.7.0
+numpy>=1.24.0
+networkx>=3.1
+
+# v15 - Datos
+pandas>=2.0.0
+
+# v15 - Multimedia
+Pillow>=10.0.0
+edge-tts>=6.1.0
+
+# v15 - OCR y ASR
+pytesseract>=0.3.10
+openai-whisper>=20230314
+
+# v15 - Web
+duckduckgo-search>=4.0.0
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+playwright>=1.40.0
+
+# v15 - Otros
+pyperclip>=1.8.2
+scipy>=1.11.0

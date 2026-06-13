@@ -2,8 +2,11 @@
 Registro centralizado de herramientas.
 El agente importa TOOL_FUNCTIONS y TOOL_SCHEMAS desde aqui.
 
-v14.7: Super Agente - herramientas de documentos, creacion,
-       percepcion (audio/OCR/web) e integracion (email/API/cron).
+v15: Super Agente - herramientas de documentos, creacion,
+     percepcion (audio/OCR/web), integracion (email/API/cron),
+     visualizacion avanzada (15+ graficos), diagramas (13+ tipos),
+     procesamiento de datos, multimedia (TTS/imagenes/video),
+     sub-agentes con ejecucion paralela, PPTX.
 """
 import os
 import json
@@ -19,13 +22,13 @@ from .proyecto import analizar_proyecto, clonar_repositorio, instalar_dependenci
 from .codigo import generar_codigo
 from .web import buscar_web
 
-# Importar herramientas nuevas v14.7 (Super Agente)
+# Importar herramientas v14.7 (Super Agente)
 from .documentos import (
     leer_pdf, leer_docx, leer_xlsx, leer_pptx,
     leer_csv, leer_archivo_comprimido, consultar_sqlite,
     leer_epub, leer_documento
 )
-from .crear_documentos import crear_pdf, crear_docx, crear_xlsx, crear_grafico
+from .crear_documentos import crear_pdf, crear_docx, crear_xlsx, crear_grafico, crear_pptx
 from .percepcion import (
     transcribir_audio, leer_imagen_ocr,
     scrapear_web, automatizar_web
@@ -34,6 +37,23 @@ from .integracion import (
     leer_email, enviar_email, configurar_email,
     llamar_api, programar_tarea, listar_tareas,
     leer_portapapeles, escribir_portapapeles
+)
+
+# Importar herramientas v15 (Super Agente Avanzado)
+from .visualizacion import crear_grafico_avanzado, crear_dashboard
+from .diagramas import crear_diagrama, generar_mermaid
+from .datos import (
+    ejecutar_python, ejecutar_bash, ejecutar_nodo,
+    estadisticas, tabla_pivote, merge_datos,
+    limpiar_datos, transformar_datos, parsear_datos, exportar_datos
+)
+from .multimedia import (
+    texto_a_voz, generar_imagen, editar_imagen,
+    buscar_imagenes, analizar_video
+)
+from .subagentes import (
+    ejecutar_subagente, ejecutar_paralelo, orquestar,
+    listar_subagentes, ver_contexto_compartido, limpiar_contexto
 )
 
 # Importar schemas predefinidos (para herramientas de sub-modulos)
@@ -85,6 +105,7 @@ def _register_submodule_tools():
         "crear_docx": crear_docx,
         "crear_xlsx": crear_xlsx,
         "crear_grafico": crear_grafico,
+        "crear_pptx": crear_pptx,
         # v14.7 Super Agente - Percepcion
         "transcribir_audio": transcribir_audio,
         "leer_imagen_ocr": leer_imagen_ocr,
@@ -99,6 +120,34 @@ def _register_submodule_tools():
         "listar_tareas": listar_tareas,
         "leer_portapapeles": leer_portapapeles,
         "escribir_portapapeles": escribir_portapapeles,
+        # v15 Super Agente - Visualizacion
+        "crear_grafico_avanzado": crear_grafico_avanzado,
+        "crear_dashboard": crear_dashboard,
+        # v15 Super Agente - Diagramas
+        "crear_diagrama": crear_diagrama,
+        "generar_mermaid": generar_mermaid,
+        # v15 Super Agente - Datos
+        "ejecutar_python": ejecutar_python,
+        "ejecutar_bash": ejecutar_bash,
+        "ejecutar_nodo": ejecutar_nodo,
+        "estadisticas": estadisticas,
+        "tabla_pivote": tabla_pivote,
+        "merge_datos": merge_datos,
+        "limpiar_datos": limpiar_datos,
+        "transformar_datos": transformar_datos,
+        "parsear_datos": parsear_datos,
+        "exportar_datos": exportar_datos,
+        # v15 Super Agente - Multimedia
+        "texto_a_voz": texto_a_voz,
+        "generar_imagen": generar_imagen,
+        "editar_imagen": editar_imagen,
+        "buscar_imagenes": buscar_imagenes,
+        "analizar_video": analizar_video,
+        # v15 Super Agente - Sub-agentes
+        "ejecutar_subagente": ejecutar_subagente,
+        "ejecutar_paralelo": ejecutar_paralelo,
+        "orquestar": orquestar,
+        "listar_subagentes": listar_subagentes,
     }
 
     for name, func in submod_tools.items():

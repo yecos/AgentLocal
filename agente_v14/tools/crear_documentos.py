@@ -14,6 +14,7 @@ y si no esta instalada, da instrucciones claras.
 """
 
 import os
+import json
 import logging
 from datetime import datetime
 
@@ -516,3 +517,155 @@ def _parse_datos_grafico(datos):
             values.append(0)
 
     return labels, values
+
+
+# ============================================================
+# CREACION DE PPTX (PowerPoint)
+# ============================================================
+
+def crear_pptx(ruta: str, titulo: str = "", diapositivas: str = "[]",
+               autor: str = "") -> str:
+    """Crea una presentacion PowerPoint (.pptx) con titulo y diapositivas.
+
+    Args:
+        ruta: Ruta donde guardar el .pptx
+        titulo: Titulo de la presentacion
+        diapositivas: Lista JSON de diapositivas: [{"titulo": "...", "contenido": "...", "notas": "..."}]
+        autor: Autor de la presentacion
+    """
+    validation = validate_path(ruta)
+    if validation != ruta:
+        return validation
+
+    try:
+        from pptx import Presentation
+        from pptx.util import Inches, Pt, Emu
+        from pptx.dml.color import RGBColor
+        from pptx.enum.text import PP_ALIGN
+
+        prs = Presentation()
+        prs.slide_width = Inches(13.333)
+        prs.slide_height = Inches(7.5)
+
+        # Diapositiva de titulo
+        if titulo:
+            slide_layout = prs.slide_layouts[0]  # Title slide
+            slide = prs.slides.add_slide(slide_layout)
+            title_shape = slide.shapes.title
+            subtitle_shape = slide.placeholders[1]
+
+            title_shape.text = titulo
+            for paragraph in title_shape.text_frame.paragraphs:
+                for run in paragraph.runs:
+                    run.font.size = Pt(40)
+                    run.font.bold = True
+                    run.font.color.rgb = RGBColor(0x44, 0x72, 0xC4)
+
+            if autor:
+                subtitle_shape.text = autor
+                for paragraph in subtitle_shape.text_frame.paragraphs:
+                    for run in paragraph.runs:
+                        run.font.size = Pt(20)
+                        run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+
+        # Parsear diapositivas
+        try:
+            slides_data = json.loads(diapositivas) if diapositivas else []
+        except json.JSONDecodeError:
+            # Si no es JSON, tratar como texto separado por "---"
+            slides_data = [{"titulo": "", "contenido": s.strip()}
+                           for s in diapositivas.split("---") if s.strip()]
+
+        for slide_data in slides_data:
+            slide_title = slide_data.get("titulo", slide_data.get("title", ""))
+            slide_content = slide_data.get("contenido", slide_data.get("content", ""))
+            slide_notes = slide_data.get("notas", slide_data.get("notes", ""))
+
+            if slide_title and not slide_content:
+                # Diapositiva de seccion
+                slide_layout = prs.slide_layouts[2]  # Section header
+                slide = prs.slides.add_slide(slide_layout)
+                title_shape = slide.shapes.title
+                title_shape.text = slide_title
+                for paragraph in title_shape.text_frame.paragraphs:
+                    for run in paragraph.runs:
+                        run.font.size = Pt(32)
+                        run.font.bold = True
+                        run.font.color.rgb = RGBColor(0x44, 0x72, 0xC4)
+            else:
+                # Diapositiva de titulo + contenido
+                slide_layout = prs.slide_layouts[1]  # Title and content
+                slide = prs.slides.add_slide(slide_layout)
+
+                if slide_title:
+                    title_shape = slide.shapes.title
+                    title_shape.text = slide_title
+                    for paragraph in title_shape.text_frame.paragraphs:
+                        for run in paragraph.runs:
+                            run.font.size = Pt(28)
+                            run.font.bold = True
+                            run.font.color.rgb = RGBColor(0x44, 0x72, 0xC4)
+
+                if slide_content:
+                    body_shape = slide.placeholders[1]
+                    tf = body_shape.text_frame
+
+                    # Parsear contenido: soporta bullets y texto
+                    lines = slide_content.split("\n")
+                    for i, line in enumerate(lines):
+                        line = line.strip()
+                        if not line:
+                            continue
+
+                        if i == 0:
+                            p = tf.paragraphs[0]
+                        else:
+                            p = tf.add_paragraph()
+
+                        # Detectar bullets
+                        if line.startswith("- ") or line.startswith("* "):
+                            p.text = line[2:]
+                            p.level = 0
+                            p.space_before = Pt(4)
+                            p.space_after = Pt(4)
+                        elif line.startswith("  - ") or line.startswith("  * "):
+                            p.text = line.strip()[2:]
+                            p.level = 1
+                            p.space_before = Pt(2)
+                            p.space_after = Pt(2)
+                        elif line.startswith("# "):
+                            p.text = line[2:]
+                            for run in p.runs:
+                                run.font.size = Pt(20)
+                                run.font.bold = True
+                        elif line.startswith("## "):
+                            p.text = line[3:]
+                            for run in p.runs:
+                                run.font.size = Pt(16)
+                                run.font.bold = True
+                        else:
+                            p.text = line
+
+                        for run in p.runs:
+                            run.font.size = Pt(16)
+
+            # Notas del orador
+            if slide_notes:
+                notes_slide = slide.notes_slide
+                notes_slide.notes_text_frame.text = slide_notes
+
+        # Guardar
+        dir_name = os.path.dirname(ruta)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
+
+        prs.save(ruta)
+        n_slides = len(prs.slides)
+        size_kb = os.path.getsize(ruta) / 1024
+        return f"PPTX creado: {ruta} ({size_kb:.0f} KB, {n_slides} diapositivas)"
+
+    except ImportError:
+        return ("ERROR: python-pptx no instalado. Instala:\n"
+                "  pip install python-pptx")
+    except Exception as e:
+        return f"ERROR creando PPTX: {e}"
