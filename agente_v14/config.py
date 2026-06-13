@@ -105,6 +105,20 @@ FILE_SEARCH_MAX_DEPTH = 10        # Profundidad maxima de busqueda recursiva
 FILE_SEARCH_MAX_RESULTS = 50      # Max resultados de busqueda en archivos
 
 # ============================================================
+# PENSAMIENTO PROFUNDO (v14.6)
+# ============================================================
+DEEP_THINKING_MODE = "full"        # "off", "native", "cot", "reflection", "full"
+                                   # off: deshabilitado
+                                   # native: solo usar <think> nativo del modelo (qwen3, deepseek-r1)
+                                   # cot: solo Chain-of-Thought antes de actuar
+                                   # reflection: solo post-reflexión de la respuesta
+                                   # full: cot + native + reflection (recomendado)
+DEEP_THINKING_MIN_COMPLEXITY = 0.3 # Umbral mínimo de complejidad para activar (0-1)
+DEEP_THINKING_MAX_THINKING_TOKENS = 1024  # Max tokens para razonamiento interno
+DEEP_THINKING_REFLECT_ON_ERRORS = True    # Siempre reflexionar si hubo errores
+DEEP_THINKING_SHOW_THOUGHTS = True        # Mostrar pensamientos al usuario en UI
+
+# ============================================================
 # TIMEOUTS
 # ============================================================
 DEFAULT_TIMEOUT = 90             # Segundos para comandos normales (reducido)

@@ -88,6 +88,7 @@ class OllamaClient:
         self._detected = False
         self._client = None
         self._gpu_status = None  # None = no verificado, True/False
+        self._last_thinking = ""  # Último thinking nativo generado (qwen3, deepseek-r1)
 
     @classmethod
     def get(cls):
@@ -679,35 +680,86 @@ class OllamaClient:
     # METODOS INTERNOS
     # ----------------------------------------------------------
 
-    def _try_method(self, host, method, model, messages, tools, timeout):
-        """Intenta una combinacion de host/metodo/modelo. Retorna None si falla."""
+    def _try_method(self, host, method, model, messages, tools, timeout, think=None):
+        """Intenta una combinacion de host/metodo/modelo. Retorna None si falla.
+
+        Args:
+            think: Si True, activa pensamiento nativo del modelo (qwen3, deepseek-r1).
+                   Si None, se detecta automaticamente segun el modelo.
+        """
+        # Auto-detectar soporte de think nativo
+        if think is None:
+            try:
+                from agent.deep_thinking import detect_native_thinking_support
+                think = detect_native_thinking_support(model)
+            except ImportError:
+                think = False
+
         if method == 'client':
-            return self._try_client(host, model, messages, tools, timeout)
+            return self._try_client(host, model, messages, tools, timeout, think=think)
         elif method == 'http':
-            return self._try_http(host, model, messages, tools, timeout)
+            return self._try_http(host, model, messages, tools, timeout, think=think)
         return None
 
-    def _try_client(self, host, model, messages, tools, timeout):
-        """Intenta via ollama.Client."""
+    def _try_client(self, host, model, messages, tools, timeout, think=False):
+        """Intenta via ollama.Client. Soporta think nativo para modelos compatibles."""
         try:
             import ollama
             client = self._get_or_create_client(host)
+
+            # Construir kwargs
+            kwargs = {"model": model, "messages": messages}
             if tools:
-                response = client.chat(model=model, messages=messages, tools=tools)
-                msg = response.get("message", response)
-                if msg.get("content") or msg.get("tool_calls"):
+                kwargs["tools"] = tools
+            if think and not tools:
+                # Think nativo: solo sin tools (Ollama no soporta ambos)
+                kwargs["think"] = True
+
+            response = client.chat(**kwargs)
+
+            # Procesar respuesta con posible thinking
+            msg = response.get("message", response)
+            content = msg.get("content", "") if isinstance(msg, dict) else ""
+            thinking_content = msg.get("thinking", "") if isinstance(msg, dict) else ""
+
+            # Si hay thinking, guardarlo para referencia
+            if thinking_content:
+                self._last_thinking = thinking_content
+                logger.debug(f"Native thinking: {len(thinking_content)} chars")
+
+            if tools:
+                if content or msg.get("tool_calls"):
                     return response
             else:
-                response = client.chat(model=model, messages=messages)
-                content = response.get("message", {}).get("content", "")
                 if content:
                     return content
+        except TypeError as e:
+            # Si el client no soporta 'think', reintentar sin él
+            if 'think' in str(e).lower():
+                logger.debug("Cliente no soporta param 'think', reintentando sin él")
+                try:
+                    import ollama as ollama_lib
+                    client = self._get_or_create_client(host)
+                    if tools:
+                        response = client.chat(model=model, messages=messages, tools=tools)
+                    else:
+                        response = client.chat(model=model, messages=messages)
+                    msg = response.get("message", response)
+                    content = msg.get("content", "") if isinstance(msg, dict) else ""
+                    if tools:
+                        if content or msg.get("tool_calls"):
+                            return response
+                    else:
+                        if content:
+                            return content
+                except Exception:
+                    pass
         except Exception as e:
             logger.debug(f"Client method failed: {e}")
         return None
 
-    def _try_http(self, host, model, messages, tools, timeout):
-        """Intenta via HTTP directo (sin lib ollama)."""
+    def _try_http(self, host, model, messages, tools, timeout, think=False):
+        """Intenta via HTTP directo (sin lib ollama). Soporta think nativo."""
         try:
             import urllib.request
             payload = {
@@ -717,6 +769,10 @@ class OllamaClient:
             }
             if tools:
                 payload["tools"] = tools
+            if think and not tools:
+                # Think nativo via API de Ollama (v0.6+)
+                payload["think"] = True
+
             data = json.dumps(payload).encode("utf-8")
             req = urllib.request.Request(
                 f"{host}/api/chat",
@@ -725,12 +781,20 @@ class OllamaClient:
             )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 result = json.loads(resp.read().decode("utf-8"))
+
+                # Procesar thinking nativo si existe
+                msg = result.get("message", result)
+                thinking_content = msg.get("thinking", "") if isinstance(msg, dict) else ""
+                if thinking_content:
+                    self._last_thinking = thinking_content
+                    logger.debug(f"Native thinking (HTTP): {len(thinking_content)} chars")
+
                 if tools:
-                    msg = result.get("message", result)
-                    if msg.get("content") or msg.get("tool_calls"):
+                    content = msg.get("content", "") if isinstance(msg, dict) else ""
+                    if content or msg.get("tool_calls"):
                         return result
                 else:
-                    content = result.get("message", {}).get("content", "")
+                    content = msg.get("content", "") if isinstance(msg, dict) else ""
                     if content:
                         return content
         except Exception as e:

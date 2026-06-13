@@ -24,6 +24,7 @@ from memory.triple_memory import TripleMemory, learning
 from llm import ollama
 from agent.schemas import SYSTEM_PROMPT, JSON_TOOLS_PROMPT
 from agent.metacognition import Metacognition
+from agent.deep_thinking import DeepThinking
 from utils.metrics import get_metrics
 
 
@@ -39,6 +40,7 @@ class ReactAgent:
         self.thinking_log = []
         self.supports_tool_calling = None
         self.metacognition = Metacognition()
+        self.deep_thinking = DeepThinking()  # Motor de pensamiento profundo
         self._models_cache = None  # Cache de modelos para no llamar API cada vez
         self._tool_call_counts = {}  # Rate limiting por herramienta
         self._total_tool_calls = 0   # Total de tool calls en esta conversacion
@@ -53,6 +55,7 @@ class ReactAgent:
     def run(self, user_message):
         """
         Bucle ReAct principal. Retorna (respuesta, thinking_log).
+        v14.6: Incluye fase de pensamiento profundo antes del bucle.
         """
         self.thinking_log = []
         self.metacognition.reset()
@@ -61,6 +64,23 @@ class ReactAgent:
         self._log(f"Mensaje del usuario: {user_message}", "input")
 
         messages = self._build_messages(user_message)
+
+        # ---- PENSAMIENTO PROFUNDO (v14.6) ----
+        deep_result = self.deep_thinking.think(
+            user_message,
+            context=self.memory.get_context_for(user_message)
+        )
+        if deep_result.should_deep_think:
+            _nsteps = len(deep_result.plan)
+            self._log(
+                f"Pensamiento profundo: complejidad={deep_result.complexity:.2f}, "
+                f"tipo={deep_result.query_type}, pasos={_nsteps}",
+                "deep_thinking"
+            )
+            thinking_prompt = self.deep_thinking.get_thinking_prompt(deep_result)
+            if thinking_prompt:
+                messages.append({"role": "user", "content": thinking_prompt})
+                messages.append({"role": "assistant", "content": "Entendido. Analizaré la situación antes de actuar."})
 
         if self.supports_tool_calling is None:
             self.supports_tool_calling = self._detect_tool_calling_support()
@@ -158,6 +178,16 @@ class ReactAgent:
 
                 for lesson in reflection.get("lessons", []):
                     learning.add_knowledge(lesson, source="metacognition")
+
+                # ---- POST-REFLEXIÓN DEEP THINKING (v14.6) ----
+                had_errors = self.metacognition.error_count > 0
+                improved_response, was_improved = self.deep_thinking.reflect(
+                    user_message, final_response, had_errors=had_errors
+                )
+                if was_improved:
+                    final_response = improved_response
+                    self._log("Respuesta mejorada via pensamiento profundo", "deep_thinking")
+
                 self._log("Respuesta final generada", "success")
                 self._save_interaction(user_message, final_response)
                 return final_response, self.thinking_log
@@ -194,7 +224,8 @@ class ReactAgent:
     def run_stream(self, user_message):
         """
         Bucle ReAct con streaming REAL. Yields cada token al instante.
-        Eventos: {"type": "text"|"tool_start"|"tool_result"|"meta"|"done", "data": ...}
+        Eventos: {"type": "text"|"tool_start"|"tool_result"|"meta"|"thinking"|"done", "data": ...}
+        v14.6: Incluye fase de pensamiento profundo y evento "thinking".
         """
         self.thinking_log = []
         self.metacognition.reset()
@@ -203,6 +234,34 @@ class ReactAgent:
         self._log(f"Mensaje del usuario: {user_message}", "input")
 
         messages = self._build_messages(user_message)
+
+        # ---- PENSAMIENTO PROFUNDO (v14.6) ----
+        deep_result = self.deep_thinking.think(
+            user_message,
+            context=self.memory.get_context_for(user_message)
+        )
+        if deep_result.should_deep_think:
+            _nsteps = len(deep_result.plan)
+            self._log(
+                f"Pensamiento profundo: complejidad={deep_result.complexity:.2f}, "
+                f"tipo={deep_result.query_type}, pasos={_nsteps}",
+                "deep_thinking"
+            )
+            # Emitir evento de thinking para la UI
+            yield {
+                "type": "thinking",
+                "data": {
+                    "reasoning": deep_result.reasoning[:500],
+                    "plan": deep_result.plan,
+                    "complexity": deep_result.complexity,
+                    "query_type": deep_result.query_type,
+                }
+            }
+            # Inyectar razonamiento en la conversación
+            thinking_prompt = self.deep_thinking.get_thinking_prompt(deep_result)
+            if thinking_prompt:
+                messages.append({"role": "user", "content": thinking_prompt})
+                messages.append({"role": "assistant", "content": "Entendido. Analizaré la situación antes de actuar."})
 
         if self.supports_tool_calling is None:
             self.supports_tool_calling = self._detect_tool_calling_support()
@@ -313,6 +372,15 @@ class ReactAgent:
                 for lesson in reflection.get("lessons", []):
                     learning.add_knowledge(lesson, source="metacognition")
 
+                # ---- POST-REFLEXIÓN DEEP THINKING (v14.6) ----
+                had_errors = self.metacognition.error_count > 0
+                improved_response, was_improved = self.deep_thinking.reflect(
+                    user_message, full_text, had_errors=had_errors
+                )
+                if was_improved:
+                    full_text = improved_response
+                    self._log("Respuesta mejorada via pensamiento profundo", "deep_thinking")
+
                 self._log("Respuesta final generada (streaming)", "success")
                 self._save_interaction(user_message, full_text)
                 yield {
@@ -320,6 +388,7 @@ class ReactAgent:
                     "data": full_text,
                     "thinking_log": self.thinking_log,
                     "meta_status": self.metacognition.get_status(),
+                    "deep_thinking_stats": self.deep_thinking.stats(),
                 }
                 return
 
