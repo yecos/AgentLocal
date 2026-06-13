@@ -595,4 +595,409 @@ TOOL_SCHEMAS = [
             }
         }
     },
+    # ============================================================
+    # v15 SUPER AGENTE - VISUALIZACION AVANZADA
+    # ============================================================
+    {
+        "type": "function",
+        "function": {
+            "name": "crear_grafico_avanzado",
+            "description": "Crea un grafico avanzado (15+ tipos) y lo guarda como PNG/SVG. Tipos: bar, line, pie, scatter, histogram, area, heatmap, radar, candlestick, boxplot, waterfall, regression, distribution, violin, stem.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ruta": {"type": "string", "description": "Ruta donde guardar (PNG o SVG)"},
+                    "tipo": {"type": "string", "enum": ["bar", "line", "pie", "scatter", "histogram", "area", "heatmap", "radar", "candlestick", "boxplot", "waterfall", "regression", "distribution", "violin", "stem"], "description": "Tipo de grafico"},
+                    "datos": {"type": "string", "description": "Datos en JSON o CSV"},
+                    "titulo": {"type": "string", "description": "Titulo del grafico"},
+                    "xlabel": {"type": "string", "description": "Etiqueta eje X"},
+                    "ylabel": {"type": "string", "description": "Etiqueta eje Y"},
+                    "opciones": {"type": "string", "description": "Opciones extra en JSON (colores, leyenda, grid, etc.)"}
+                },
+                "required": ["ruta", "tipo", "datos"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "crear_dashboard",
+            "description": "Crea un dashboard con multiples graficos en una sola imagen. Cada grafico se define como JSON con tipo, datos y opciones.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ruta": {"type": "string", "description": "Ruta donde guardar el dashboard (PNG o SVG)"},
+                    "graficos": {"type": "string", "description": "Lista JSON de graficos: [{tipo, datos, titulo}, ...]"},
+                    "titulo": {"type": "string", "description": "Titulo del dashboard"},
+                    "layout": {"type": "string", "description": "Layout: auto, 2x2, 3x2, 2x3, 1x3, 3x1"}
+                },
+                "required": ["ruta", "graficos"]
+            }
+        }
+    },
+    # ============================================================
+    # v15 SUPER AGENTE - DIAGRAMAS
+    # ============================================================
+    {
+        "type": "function",
+        "function": {
+            "name": "crear_diagrama",
+            "description": "Crea un diagrama (13+ tipos) y lo guarda como imagen PNG. Tipos: flowchart, mindmap, tree, org, architecture, network, er, class, gantt, swimlane, sequence, topology, knowledge_graph, mermaid.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ruta": {"type": "string", "description": "Ruta donde guardar (PNG, SVG, o .md para Mermaid)"},
+                    "tipo": {"type": "string", "description": "Tipo de diagrama"},
+                    "datos": {"type": "string", "description": "Datos del diagrama en JSON (nodes, edges, hierarchy, etc.)"},
+                    "titulo": {"type": "string", "description": "Titulo del diagrama"},
+                    "opciones": {"type": "string", "description": "Opciones extra en JSON"}
+                },
+                "required": ["ruta", "tipo", "datos"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generar_mermaid",
+            "description": "Genera codigo Mermaid para un diagrama sin renderizar. Retorna el codigo listo para usar.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tipo": {"type": "string", "description": "Tipo de diagrama"},
+                    "datos": {"type": "string", "description": "Datos del diagrama en JSON"},
+                    "titulo": {"type": "string", "description": "Titulo (opcional)"}
+                },
+                "required": ["tipo", "datos"]
+            }
+        }
+    },
+    # ============================================================
+    # v15 SUPER AGENTE - PROCESAMIENTO DE DATOS
+    # ============================================================
+    {
+        "type": "function",
+        "function": {
+            "name": "ejecutar_python",
+            "description": "Ejecuta codigo Python en un subproceso aislado y retorna la salida.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "codigo": {"type": "string", "description": "Codigo Python a ejecutar"},
+                    "timeout": {"type": "integer", "description": "Timeout en segundos (default 60)"}
+                },
+                "required": ["codigo"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ejecutar_bash",
+            "description": "Ejecuta un comando Bash/Linux y retorna la salida.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "comando": {"type": "string", "description": "Comando Bash a ejecutar"},
+                    "timeout": {"type": "integer", "description": "Timeout en segundos (default 30)"}
+                },
+                "required": ["comando"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ejecutar_nodo",
+            "description": "Ejecuta codigo JavaScript/Node.js y retorna la salida.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "codigo": {"type": "string", "description": "Codigo JavaScript a ejecutar"},
+                    "timeout": {"type": "integer", "description": "Timeout en segundos (default 30)"}
+                },
+                "required": ["codigo"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "estadisticas",
+            "description": "Calcula estadisticas descriptivas de un dataset: media, mediana, desv.est, percentiles, etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "datos": {"type": "string", "description": "Datos en formato CSV o JSON"},
+                    "columna": {"type": "string", "description": "Columna especifica (opcional)"}
+                },
+                "required": ["datos"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tabla_pivote",
+            "description": "Crea una tabla pivote a partir de datos tabulares.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "datos": {"type": "string", "description": "Datos en CSV o JSON"},
+                    "filas": {"type": "string", "description": "Columna para las filas"},
+                    "columnas": {"type": "string", "description": "Columna para las columnas"},
+                    "valores": {"type": "string", "description": "Columna de valores a agregar"},
+                    "funcion": {"type": "string", "description": "Funcion: sum, mean, count, min, max"}
+                },
+                "required": ["datos", "filas"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "merge_datos",
+            "description": "Combina dos datasets usando merge/join (como SQL JOIN).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "datos1": {"type": "string", "description": "Primer dataset (CSV o JSON)"},
+                    "datos2": {"type": "string", "description": "Segundo dataset (CSV o JSON)"},
+                    "clave": {"type": "string", "description": "Columna clave para el join"},
+                    "tipo": {"type": "string", "description": "Tipo: inner, left, right, outer"}
+                },
+                "required": ["datos1", "datos2"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "limpiar_datos",
+            "description": "Limpia un dataset: elimina duplicados, trata nulos, elimina outliers, normaliza.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "datos": {"type": "string", "description": "Datos en CSV o JSON"},
+                    "operaciones": {"type": "string", "description": "Operaciones: duplicados, nulos, outliers, normalizar, tipos, todo"}
+                },
+                "required": ["datos"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "transformar_datos",
+            "description": "Transforma datos: filtrar, ordenar, agrupar, seleccionar, renombrar columnas.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "datos": {"type": "string", "description": "Datos en CSV o JSON"},
+                    "operacion": {"type": "string", "description": "Operacion: filtrar, ordenar, agrupar, seleccionar, renombrar, agregar_columna, head, sample"},
+                    "parametros": {"type": "string", "description": "Parametros en JSON"}
+                },
+                "required": ["datos", "operacion"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "parsear_datos",
+            "description": "Convierte datos entre formatos: CSV, JSON, TSV, YAML, XML.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "datos": {"type": "string", "description": "Datos en formato de origen"},
+                    "formato_origen": {"type": "string", "description": "Formato: auto, csv, json, tsv, yaml, xml"},
+                    "formato_destino": {"type": "string", "description": "Formato: json, csv, tsv, yaml, tabla"}
+                },
+                "required": ["datos"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "exportar_datos",
+            "description": "Exporta datos a un archivo en formato CSV, JSON, XLSX o TSV.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "datos": {"type": "string", "description": "Datos en CSV o JSON"},
+                    "ruta": {"type": "string", "description": "Ruta del archivo de salida"},
+                    "formato": {"type": "string", "description": "Formato: csv, json, xlsx, tsv"}
+                },
+                "required": ["datos", "ruta"]
+            }
+        }
+    },
+    # ============================================================
+    # v15 SUPER AGENTE - MULTIMEDIA
+    # ============================================================
+    {
+        "type": "function",
+        "function": {
+            "name": "texto_a_voz",
+            "description": "Convierte texto a voz (TTS). Genera un archivo de audio con el texto hablado.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "texto": {"type": "string", "description": "Texto a convertir a voz"},
+                    "ruta": {"type": "string", "description": "Ruta donde guardar el audio (opcional)"},
+                    "voz": {"type": "string", "description": "Idioma/voz: es, en, fr, de, pt, it, ja, ko, zh"},
+                    "velocidad": {"type": "number", "description": "Velocidad (0.5=lenta, 1.0=normal, 2.0=rapida)"},
+                    "formato": {"type": "string", "description": "Formato: mp3, wav"}
+                },
+                "required": ["texto"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generar_imagen",
+            "description": "Genera una imagen a partir de una descripcion usando IA (Stable Diffusion, etc.).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "descripcion": {"type": "string", "description": "Descripcion de la imagen (prompt)"},
+                    "ruta": {"type": "string", "description": "Ruta donde guardar (opcional)"},
+                    "tamano": {"type": "string", "description": "Tamano: 256x256, 512x512, 768x768"},
+                    "estilo": {"type": "string", "description": "Estilo: realista, anime, pintura, etc."},
+                    "negativo": {"type": "string", "description": "Prompt negativo (que NO incluir)"}
+                },
+                "required": ["descripcion"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "editar_imagen",
+            "description": "Edita una imagen: redimensionar, recortar, rotar, convertir, grayscale, ajustar brillo/contraste.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ruta_entrada": {"type": "string", "description": "Ruta de la imagen"},
+                    "accion": {"type": "string", "description": "Accion: info, redimensionar, recortar, rotar, convertir, espejo, grayscale, ajustar"},
+                    "parametros": {"type": "string", "description": "Parametros en JSON segun la accion"},
+                    "ruta_salida": {"type": "string", "description": "Ruta de salida (opcional, sobreescribe si vacio)"}
+                },
+                "required": ["ruta_entrada", "accion"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "buscar_imagenes",
+            "description": "Busca imagenes en internet a partir de una consulta.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "consulta": {"type": "string", "description": "Texto de busqueda"},
+                    "cantidad": {"type": "integer", "description": "Cantidad de imagenes (max 10)"}
+                },
+                "required": ["consulta"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analizar_video",
+            "description": "Analiza un archivo de video: info, extraer frames, analizar con VLM, transcribir audio.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ruta": {"type": "string", "description": "Ruta del video"},
+                    "accion": {"type": "string", "description": "Accion: info, frames, analizar, transcribir"},
+                    "parametros": {"type": "string", "description": "Parametros extra en JSON"}
+                },
+                "required": ["ruta", "accion"]
+            }
+        }
+    },
+    # ============================================================
+    # v15 SUPER AGENTE - SUB-AGENTES
+    # ============================================================
+    {
+        "type": "function",
+        "function": {
+            "name": "ejecutar_subagente",
+            "description": "Ejecuta un sub-agente especializado: researcher, coder, analyst, writer, reviewer, general.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tipo": {"type": "string", "description": "Tipo: researcher, coder, analyst, writer, reviewer, general"},
+                    "tarea": {"type": "string", "description": "Descripcion de la tarea"},
+                    "contexto": {"type": "string", "description": "Contexto adicional (opcional)"},
+                    "timeout": {"type": "integer", "description": "Timeout en segundos (default 60)"}
+                },
+                "required": ["tipo", "tarea"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ejecutar_paralelo",
+            "description": "Ejecuta multiples sub-agentes en paralelo. Lista JSON de tareas con tipo y descripcion.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tareas": {"type": "string", "description": "Lista JSON: [{tipo, tarea, contexto?}, ...]"},
+                    "agregar_resultados": {"type": "boolean", "description": "Sintetizar resultados (default True)"}
+                },
+                "required": ["tareas"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "orquestar",
+            "description": "Orquesta automaticamente sub-agentes para una tarea compleja. Divide, asigna y sintetiza.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tarea_principal": {"type": "string", "description": "Descripcion de la tarea compleja"},
+                    "estrategia": {"type": "string", "description": "Estrategia: auto, secuencial, paralelo, mixto"},
+                    "max_subagentes": {"type": "integer", "description": "Max sub-agentes (default 4)"}
+                },
+                "required": ["tarea_principal"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "crear_pptx",
+            "description": "Crea una presentacion PowerPoint (.pptx) con diapositivas formateadas.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ruta": {"type": "string", "description": "Ruta donde guardar el .pptx"},
+                    "titulo": {"type": "string", "description": "Titulo de la presentacion"},
+                    "diapositivas": {"type": "string", "description": "Lista JSON: [{titulo, contenido, notas}, ...]"},
+                    "autor": {"type": "string", "description": "Autor de la presentacion"}
+                },
+                "required": ["ruta"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "listar_subagentes",
+            "description": "Lista los tipos de sub-agentes disponibles y sus capacidades.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
 ]

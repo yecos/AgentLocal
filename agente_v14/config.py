@@ -128,6 +128,25 @@ DEEP_THINKING_PERSIST_THOUGHTS = True       # Guardar pensamientos en archivo pa
 DEEP_THINKING_MAX_PERSISTED = 100           # Max pensamientos guardados
 
 # ============================================================
+# SUB-AGENTES (v15)
+# ============================================================
+SUBAGENT_MAX_PARALLEL = 4          # Max sub-agentes ejecutandose en paralelo
+SUBAGENT_DEFAULT_TIMEOUT = 60      # Timeout por defecto para sub-agentes (segundos)
+SUBAGENT_MAX_TASKS = 8             # Max tareas en una ejecucion paralela
+ORCHESTRATOR_MAX_SUBAGENTS = 4     # Max sub-agentes que el orquestador puede crear
+ORCHESTRATOR_AUTO_STRATEGY = True  # El orquestador elige estrategia automaticamente
+
+# ============================================================
+# MULTIMEDIA (v15)
+# ============================================================
+TTS_DEFAULT_VOICE = "es"           # Voz por defecto para TTS
+TTS_DEFAULT_SPEED = 1.0            # Velocidad por defecto
+TTS_MAX_TEXT_LENGTH = 5000         # Max caracteres para TTS
+IMAGE_DEFAULT_SIZE = "512x512"     # Tamano por defecto para generacion de imagenes
+IMAGE_TIMEOUT = 120                # Timeout para generacion de imagenes
+VIDEO_FRAME_INTERVAL = 5           # Intervalo en segundos para extraccion de frames
+
+# ============================================================
 # TIMEOUTS
 # ============================================================
 DEFAULT_TIMEOUT = 90             # Segundos para comandos normales (reducido)
