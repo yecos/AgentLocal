@@ -1,0 +1,915 @@
+     1→     1→"""
+     2→     2→=============================================================
+     3→     3→AGENTE v15 - Herramientas de Procesamiento de Datos
+     4→     4→=============================================================
+     5→     5→Procesamiento y analisis de datos:
+     6→     6→- Estadisticas descriptivas (media, mediana, desv.est, percentiles)
+     7→     7→- Tablas pivote (pivot tables)
+     8→     8→- Merge/Join de datasets
+     9→     9→- Limpieza de datos (duplicados, nulos, outliers, normalizacion)
+    10→    10→- Transformaciones (agrupacion, filtrado, ordenamiento, mapeo)
+    11→    11→- Ejecucion de Python/Bash/Node.js
+    12→    12→- Parsing (CSV, JSON, XML, YAML)
+    13→    13→- Exportacion a multiples formatos
+    14→    14→
+    15→    15→Dependencias: pandas (recomendado), numpy, scipy (opcional)
+    16→    16→=============================================================
+    17→    17→"""
+    18→    18→
+    19→    19→import os
+    20→    20→import json
+    21→    21→import csv
+    22→    22→import io
+    23→    23→import logging
+    24→    24→import subprocess
+    25→    25→import tempfile
+    26→    26→from config import REPOS_DIR, MAX_TOOL_OUTPUT, logger
+    27→    27→from utils.security import validate_path, sanitize_input
+    28→    28→
+    29→    29→
+    30→    30→# ============================================================
+    31→    31→# EJECUCION DE CODIGO
+    32→    32→# ============================================================
+    33→    33→
+    34→    34→def ejecutar_python(codigo: str, timeout: int = 60) -> str:
+    35→    35→    """Ejecuta codigo Python y retorna la salida. Se ejecuta en un subproceso aislado.
+    36→    36→
+    37→    37→    Args:
+    38→    38→        codigo: Codigo Python a ejecutar
+    39→    39→        timeout: Timeout en segundos (default 60, max 300)
+    40→    40→    """
+    41→    41→    timeout = min(max(timeout, 5), 300)
+    42→    42→
+    43→    43→    # Escribir codigo a archivo temporal
+    44→    44→    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False,
+    45→    45→                                      encoding='utf-8') as f:
+    46→    46→        f.write(codigo)
+    47→    47→        tmp_path = f.name
+    48→    48→
+    49→    49→    try:
+    50→    50→        result = subprocess.run(
+    51→    51→            ['python', tmp_path],
+    52→    52→            capture_output=True, text=True, timeout=timeout,
+    53→    53→            cwd=tempfile.gettempdir()
+    54→    54→        )
+    55→    55→
+    56→    56→        output = ""
+    57→    57→        if result.stdout:
+    58→    58→            output += result.stdout
+    59→    59→        if result.stderr:
+    60→    60→            output += f"\nSTDERR:\n{result.stderr}"
+    61→    61→
+    62→    62→        if result.returncode != 0:
+    63→    63→            output = f"ERROR (exit code {result.returncode}):\n{output}"
+    64→    64→
+    65→    65→        if len(output) > MAX_TOOL_OUTPUT * 3:
+    66→    66→            output = output[:MAX_TOOL_OUTPUT * 3] + "\n... [truncado]"
+    67→    67→
+    68→    68→        return output.strip() or "(sin salida)"
+    69→    69→
+    70→    70→    except subprocess.TimeoutExpired:
+    71→    71→        return f"ERROR: Timeout de {timeout}s alcanzado. El codigo tardo demasiado."
+    72→    72→    except Exception as e:
+    73→    73→        return f"ERROR ejecutando Python: {e}"
+    74→    74→    finally:
+    75→    75→        try:
+    76→    76→            os.remove(tmp_path)
+    77→    77→        except Exception:
+    78→    78→            pass
+    79→    79→
+    80→    80→
+    81→    81→def ejecutar_bash(comando: str, timeout: int = 30) -> str:
+    82→    82→    """Ejecuta un comando Bash/Linux y retorna la salida. Aislado del sistema principal.
+    83→    83→
+    84→    84→    Args:
+    85→    85→        comando: Comando Bash a ejecutar
+    86→    86→        timeout: Timeout en segundos (default 30, max 300)
+    87→    87→    """
+    88→    88→    timeout = min(max(timeout, 5), 300)
+    89→    89→
+    90→    90→    # Sanitizar - no permitir comandos extremadamente peligrosos
+    91→    91→    dangerous = ["rm -rf /", "mkfs", "dd if=", "> /dev/sd", "format c:"]
+    92→    92→    for d in dangerous:
+    93→    93→        if d in comando.lower():
+    94→    94→            return f"ERROR: Comando potencialmente peligroso bloqueado: {d}"
+    95→    95→
+    96→    96→    try:
+    97→    97→        result = subprocess.run(
+    98→    98→            ['bash', '-c', comando],
+    99→    99→            capture_output=True, text=True, timeout=timeout
+   100→   100→        )
+   101→   101→
+   102→   102→        output = ""
+   103→   103→        if result.stdout:
+   104→   104→            output += result.stdout
+   105→   105→        if result.stderr:
+   106→   106→            output += f"\nSTDERR:\n{result.stderr}"
+   107→   107→
+   108→   108→        if result.returncode != 0:
+   109→   109→            output = f"ERROR (exit code {result.returncode}):\n{output}"
+   110→   110→
+   111→   111→        if len(output) > MAX_TOOL_OUTPUT * 3:
+   112→   112→            output = output[:MAX_TOOL_OUTPUT * 3] + "\n... [truncado]"
+   113→   113→
+   114→   114→        return output.strip() or "(sin salida)"
+   115→   115→
+   116→   116→    except subprocess.TimeoutExpired:
+   117→   117→        return f"ERROR: Timeout de {timeout}s alcanzado."
+   118→   118→    except FileNotFoundError:
+   119→   119→        return "ERROR: Bash no disponible en este sistema."
+   120→   120→    except Exception as e:
+   121→   121→        return f"ERROR ejecutando bash: {e}"
+   122→   122→
+   123→   123→
+   124→   124→def ejecutar_nodo(codigo: str, timeout: int = 30) -> str:
+   125→   125→    """Ejecuta codigo JavaScript/Node.js y retorna la salida.
+   126→   126→
+   127→   127→    Args:
+   128→   128→        codigo: Codigo JavaScript a ejecutar
+   129→   129→        timeout: Timeout en segundos (default 30)
+   130→   130→    """
+   131→   131→    timeout = min(max(timeout, 5), 120)
+   132→   132→
+   133→   133→    with tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False,
+   134→   134→                                      encoding='utf-8') as f:
+   135→   135→        f.write(codigo)
+   136→   136→        tmp_path = f.name
+   137→   137→
+   138→   138→    try:
+   139→   139→        result = subprocess.run(
+   140→   140→            ['node', tmp_path],
+   141→   141→            capture_output=True, text=True, timeout=timeout
+   142→   142→        )
+   143→   143→
+   144→   144→        output = ""
+   145→   145→        if result.stdout:
+   146→   146→            output += result.stdout
+   147→   147→        if result.stderr:
+   148→   148→            output += f"\nSTDERR:\n{result.stderr}"
+   149→   149→
+   150→   150→        if result.returncode != 0:
+   151→   151→            output = f"ERROR (exit code {result.returncode}):\n{output}"
+   152→   152→
+   153→   153→        if len(output) > MAX_TOOL_OUTPUT * 3:
+   154→   154→            output = output[:MAX_TOOL_OUTPUT * 3] + "\n... [truncado]"
+   155→   155→
+   156→   156→        return output.strip() or "(sin salida)"
+   157→   157→
+   158→   158→    except FileNotFoundError:
+   159→   159→        return "ERROR: Node.js no instalado. Instala: https://nodejs.org"
+   160→   160→    except subprocess.TimeoutExpired:
+   161→   161→        return f"ERROR: Timeout de {timeout}s alcanzado."
+   162→   162→    except Exception as e:
+   163→   163→        return f"ERROR ejecutando Node.js: {e}"
+   164→   164→    finally:
+   165→   165→        try:
+   166→   166→            os.remove(tmp_path)
+   167→   167→        except Exception:
+   168→   168→            pass
+   169→   169→
+   170→   170→
+   171→   171→# ============================================================
+   172→   172→# ESTADISTICAS DESCRIPTIVAS
+   173→   173→# ============================================================
+   174→   174→
+   175→   175→def estadisticas(datos: str, columna: str = "") -> str:
+   176→   176→    """Calcula estadisticas descriptivas de un dataset. Media, mediana, desv.est, min, max, percentiles, etc.
+   177→   177→
+   178→   178→    Args:
+   179→   179→        datos: Datos en formato CSV o JSON
+   180→   180→        columna: Columna especifica (si vacio, calcula para todas las numericas)
+   181→   181→    """
+   182→   182→    try:
+   183→   183→        df = _load_dataframe(datos)
+   184→   184→        if df is None:
+   185→   185→            return "ERROR: No se pudieron parsear los datos."
+   186→   186→
+   187→   187→        if columna and columna in df.columns:
+   188→   188→            serie = df[columna]
+   189→   189→            if not _is_numeric(serie):
+   190→   190→                # Estadisticas para datos categoricos
+   191→   191→                stats = {
+   192→   192→                    "count": int(serie.count()),
+   193→   193→                    "unique": int(serie.nunique()),
+   194→   194→                    "top": str(serie.mode().iloc[0]) if len(serie.mode()) > 0 else "",
+   195→   195→                    "freq": int(serie.value_counts().iloc[0]) if len(serie.value_counts()) > 0 else 0,
+   196→   196→                }
+   197→   197→                return f"Estadisticas de '{columna}' (categorico):\n" + _format_stats(stats)
+   198→   198→            else:
+   199→   199→                serie = serie.dropna()
+   200→   200→                stats = _calc_numeric_stats(serie)
+   201→   201→                return f"Estadisticas de '{columna}':\n" + _format_stats(stats)
+   202→   202→        else:
+   203→   203→            # Todas las columnas numericas
+   204→   204→            numeric_cols = df.select_dtypes(include='number').columns
+   205→   205→            if len(numeric_cols) == 0:
+   206→   206→                return "No hay columnas numericas en los datos."
+   207→   207→
+   208→   208→            parts = []
+   209→   209→            for col in numeric_cols:
+   210→   210→                serie = df[col].dropna()
+   211→   211→                stats = _calc_numeric_stats(serie)
+   212→   212→                parts.append(f"--- {col} ---\n" + _format_stats(stats))
+   213→   213→
+   214→   214→            return f"Estadisticas descriptivas ({len(numeric_cols)} columnas numericas):\n\n" + "\n\n".join(parts)
+   215→   215→
+   216→   216→    except ImportError:
+   217→   217→        return _estadisticas_simple(datos, columna)
+   218→   218→    except Exception as e:
+   219→   219→        return f"ERROR calculando estadisticas: {e}"
+   220→   220→
+   221→   221→
+   222→   222→def _calc_numeric_stats(serie) -> dict:
+   223→   223→    """Calcula estadisticas para una serie numerica."""
+   224→   224→    import numpy as np
+   225→   225→    values = serie.values
+   226→   226→
+   227→   227→    stats = {
+   228→   228→        "count": int(len(values)),
+   229→   229→        "mean": float(np.mean(values)),
+   230→   230→        "std": float(np.std(values, ddof=1)) if len(values) > 1 else 0.0,
+   231→   231→        "min": float(np.min(values)),
+   232→   232→        "25%": float(np.percentile(values, 25)),
+   233→   233→        "50%": float(np.median(values)),
+   234→   234→        "75%": float(np.percentile(values, 75)),
+   235→   235→        "max": float(np.max(values)),
+   236→   236→        "range": float(np.max(values) - np.min(values)),
+   237→   237→        "var": float(np.var(values, ddof=1)) if len(values) > 1 else 0.0,
+   238→   238→        "skew": float(_skewness(values)),
+   239→   239→        "kurtosis": float(_kurtosis(values)),
+   240→   240→        "sum": float(np.sum(values)),
+   241→   241→    }
+   242→   242→    return stats
+   243→   243→
+   244→   244→
+   245→   245→def _skewness(values):
+   246→   246→    """Calcula asimetria (skewness) sin scipy."""
+   247→   247→    import numpy as np
+   248→   248→    n = len(values)
+   249→   249→    if n < 3:
+   250→   250→        return 0.0
+   251→   251→    mean = np.mean(values)
+   252→   252→    std = np.std(values, ddof=1)
+   253→   253→    if std == 0:
+   254→   254→        return 0.0
+   255→   255→    return (1/n) * np.sum(((values - mean) / std) ** 3)
+   256→   256→
+   257→   257→
+   258→   258→def _kurtosis(values):
+   259→   259→    """Calcula curtosis sin scipy."""
+   260→   260→    import numpy as np
+   261→   261→    n = len(values)
+   262→   262→    if n < 4:
+   263→   263→        return 0.0
+   264→   264→    mean = np.mean(values)
+   265→   265→    std = np.std(values, ddof=1)
+   266→   266→    if std == 0:
+   267→   267→        return 0.0
+   268→   268→    k = (1/n) * np.sum(((values - mean) / std) ** 4) - 3
+   269→   269→    return k
+   270→   270→
+   271→   271→
+   272→   272→def _format_stats(stats: dict) -> str:
+   273→   273→    """Formatea estadisticas como texto legible."""
+   274→   274→    lines = []
+   275→   275→    for key, value in stats.items():
+   276→   276→        if isinstance(value, float):
+   277→   277→            lines.append(f"  {key:>10s}: {value:>12.4f}")
+   278→   278→        else:
+   279→   279→            lines.append(f"  {key:>10s}: {value}")
+   280→   280→    return "\n".join(lines)
+   281→   281→
+   282→   282→
+   283→   283→def _estadisticas_simple(datos: str, columna: str = "") -> str:
+   284→   284→    """Estadisticas sin pandas (fallback)."""
+   285→   285→    import numpy as np
+   286→   286→
+   287→   287→    values = _parse_numeric_list(datos)
+   288→   288→    if not values:
+   289→   289→        return "ERROR: No se pudieron extraer valores numericos."
+   290→   290→
+   291→   291→    values = np.array(values, dtype=float)
+   292→   292→    stats = _calc_numeric_stats(values)
+   293→   293→    return "Estadisticas descriptivas:\n" + _format_stats(stats)
+   294→   294→
+   295→   295→
+   296→   296→# ============================================================
+   297→   297→# PIVOT TABLE
+   298→   298→# ============================================================
+   299→   299→
+   300→   300→def tabla_pivote(datos: str, filas: str = "", columnas: str = "",
+   301→   301→                 valores: str = "", funcion: str = "sum") -> str:
+   302→   302→    """Crea una tabla pivote a partir de datos tabulares.
+   303→   303→
+   304→   304→    Args:
+   305→   305→        datos: Datos en CSV o JSON
+   306→   306→        filas: Columna para las filas de la pivot
+   307→   307→        columnas: Columna para las columnas de la pivot
+   308→   308→        valores: Columna de valores a agregar
+   309→   309→        funcion: Funcion de agregacion: sum, mean, count, min, max
+   310→   310→    """
+   311→   311→    try:
+   312→   312→        df = _load_dataframe(datos)
+   313→   313→        if df is None:
+   314→   314→            return "ERROR: No se pudieron parsear los datos."
+   315→   315→
+   316→   316→        if not filas:
+   317→   317→            return "ERROR: Debes especificar al menos la columna de filas."
+   318→   318→
+   319→   319→        # Verificar columnas
+   320→   320→        for col_name, col_label in [(filas, "filas"), (columnas, "columnas"), (valores, "valores")]:
+   321→   321→            if col_name and col_name not in df.columns:
+   322→   322→                return f"ERROR: Columna '{col_name}' no encontrada. Disponibles: {list(df.columns)}"
+   323→   323→
+   324→   324→        # Funcion de agregacion
+   325→   325→        agg_map = {
+   326→   326→            "sum": "sum", "suma": "sum",
+   327→   327→            "mean": "mean", "promedio": "mean", "media": "mean",
+   328→   328→            "count": "count", "conteo": "count",
+   329→   329→            "min": "min", "minimo": "min",
+   330→   330→            "max": "max", "maximo": "max",
+   331→   331→            "std": "std", "desv": "std",
+   332→   332→        }
+   333→   333→        agg_func = agg_map.get(funcion.lower(), "sum")
+   334→   334→
+   335→   335→        # Crear pivot
+   336→   336→        if columnas and valores:
+   337→   337→            pivot = df.pivot_table(index=filas, columns=columnas, values=valores,
+   338→   338→                                    aggfunc=agg_func, fill_value=0)
+   339→   339→        elif valores:
+   340→   340→            pivot = df.pivot_table(index=filas, values=valores, aggfunc=agg_func)
+   341→   341→        else:
+   342→   342→            pivot = df.pivot_table(index=filas, aggfunc=agg_func)
+   343→   343→
+   344→   344→        # Formatear como tabla
+   345→   345→        return f"Tabla Pivote ({funcion}):\n\n{pivot.to_string()}"
+   346→   346→
+   347→   347→    except ImportError:
+   348→   348→        return "ERROR: pandas no instalado. Instala: pip install pandas"
+   349→   349→    except Exception as e:
+   350→   350→        return f"ERROR creando tabla pivote: {e}"
+   351→   351→
+   352→   352→
+   353→   353→# ============================================================
+   354→   354→# MERGE / JOIN
+   355→   355→# ============================================================
+   356→   356→
+   357→   357→def merge_datos(datos1: str, datos2: str, clave: str = "",
+   358→   358→                tipo: str = "inner", sufijo1: str = "_1",
+   359→   359→                sufijo2: str = "_2") -> str:
+   360→   360→    """Combina dos datasets usando merge/join. Similar a SQL JOIN.
+   361→   361→
+   362→   362→    Args:
+   363→   363→        datos1: Primer dataset (CSV o JSON)
+   364→   364→        datos2: Segundo dataset (CSV o JSON)
+   365→   365→        clave: Columna clave para el join (si vacio, usa columnas en comun)
+   366→   366→        tipo: Tipo de join: inner, left, right, outer
+   367→   367→        sufijo1: Sufijo para columnas duplicadas del dataset 1
+   368→   368→        sufijo2: Sufijo para columnas duplicadas del dataset 2
+   369→   369→    """
+   370→   370→    try:
+   371→   371→        df1 = _load_dataframe(datos1)
+   372→   372→        df2 = _load_dataframe(datos2)
+   373→   373→
+   374→   374→        if df1 is None or df2 is None:
+   375→   375→            return "ERROR: No se pudieron parsear los datos."
+   376→   376→
+   377→   377→        # Detectar clave comun si no se especifica
+   378→   378→        if not clave:
+   379→   379→            common_cols = list(set(df1.columns) & set(df2.columns))
+   380→   380→            if not common_cols:
+   381→   381→                return (f"ERROR: No hay columnas en comun.\n"
+   382→   382→                        f"  Dataset 1: {list(df1.columns)}\n"
+   383→   383→                        f"  Dataset 2: {list(df2.columns)}")
+   384→   384→            clave = common_cols[0]
+   385→   385→
+   386→   386→        if clave not in df1.columns:
+   387→   387→            return f"ERROR: Columna '{clave}' no existe en dataset 1. Columnas: {list(df1.columns)}"
+   388→   388→        if clave not in df2.columns:
+   389→   389→            return f"ERROR: Columna '{clave}' no existe en dataset 2. Columnas: {list(df2.columns)}"
+   390→   390→
+   391→   391→        # Validar tipo de join
+   392→   392→        tipo_map = {"inner": "inner", "left": "left", "right": "right",
+   393→   393→                    "outer": "outer", "completo": "outer", "interno": "inner"}
+   394→   394→        how = tipo_map.get(tipo.lower(), "inner")
+   395→   395→
+   396→   396→        # Merge
+   397→   397→        merged = df1.merge(df2, on=clave, how=how, suffixes=(sufijo1, sufijo2))
+   398→   398→
+   399→   399→        # Formatear resultado
+   400→   400→        result = (f"Merge [{how}] en clave '{clave}':\n"
+   401→   401→                  f"  Dataset 1: {len(df1)} filas, {len(df1.columns)} columnas\n"
+   402→   402→                  f"  Dataset 2: {len(df2)} filas, {len(df2.columns)} columnas\n"
+   403→   403→                  f"  Resultado: {len(merged)} filas, {len(merged.columns)} columnas\n\n")
+   404→   404→
+   405→   405→        # Mostrar preview
+   406→   406→        result += merged.head(20).to_string()
+   407→   407→        if len(merged) > 20:
+   408→   408→            result += f"\n... ({len(merged) - 20} filas mas)"
+   409→   409→
+   410→   410→        return result
+   411→   411→
+   412→   412→    except ImportError:
+   413→   413→        return "ERROR: pandas no instalado. Instala: pip install pandas"
+   414→   414→    except Exception as e:
+   415→   415→        return f"ERROR haciendo merge: {e}"
+   416→   416→
+   417→   417→
+   418→   418→# ============================================================
+   419→   419→# LIMPIEZA DE DATOS
+   420→   420→# ============================================================
+   421→   421→
+   422→   422→def limpiar_datos(datos: str, operaciones: str = "todo") -> str:
+   423→   423→    """Limpia un dataset aplicando operaciones de limpieza.
+   424→   424→
+   425→   425→    Args:
+   426→   426→        datos: Datos en CSV o JSON
+   427→   427→        operaciones: Operaciones separadas por coma: duplicados, nulos, outliers, normalizar, tipos, todo
+   428→   428→    """
+   429→   429→    try:
+   430→   430→        df = _load_dataframe(datos)
+   431→   431→        if df is None:
+   432→   432→            return "ERROR: No se pudieron parsear los datos."
+   433→   433→
+   434→   434→        original_shape = df.shape
+   435→   435→        ops = [op.strip().lower() for op in operaciones.split(",")]
+   436→   436→        if "todo" in ops:
+   437→   437→            ops = ["duplicados", "nulos", "outliers", "normalizar", "tipos"]
+   438→   438→
+   439→   439→        report = [f"Limpieza de datos - Original: {original_shape[0]} filas, {original_shape[1]} columnas\n"]
+   440→   440→
+   441→   441→        # 1. Eliminar duplicados
+   442→   442→        if "duplicados" in ops:
+   443→   443→            before = len(df)
+   444→   444→            df = df.drop_duplicates()
+   445→   445→            removed = before - len(df)
+   446→   446→            report.append(f"[duplicados] {removed} filas duplicadas eliminadas")
+   447→   447→
+   448→   448→        # 2. Tratar nulos
+   449→   449→        if "nulos" in ops:
+   450→   450→            null_counts = df.isnull().sum()
+   451→   451→            total_nulls = null_counts.sum()
+   452→   452→            if total_nulls > 0:
+   453→   453→                # Para numericos: rellenar con mediana
+   454→   454→                for col in df.select_dtypes(include='number').columns:
+   455→   455→                    if df[col].isnull().any():
+   456→   456→                        median = df[col].median()
+   457→   457→                        df[col].fillna(median, inplace=True)
+   458→   458→                # Para categoricos: rellenar con moda
+   459→   459→                for col in df.select_dtypes(exclude='number').columns:
+   460→   460→                    if df[col].isnull().any():
+   461→   461→                        mode = df[col].mode().iloc[0] if len(df[col].mode()) > 0 else "N/A"
+   462→   462→                        df[col].fillna(mode, inplace=True)
+   463→   463→                report.append(f"[nulos] {total_nulls} valores nulos tratados (mediana/moda)")
+   464→   464→            else:
+   465→   465→                report.append(f"[nulos] Sin valores nulos encontrados")
+   466→   466→
+   467→   467→        # 3. Eliminar outliers (IQR)
+   468→   468→        if "outliers" in ops:
+   469→   469→            total_removed = 0
+   470→   470→            for col in df.select_dtypes(include='number').columns:
+   471→   471→                Q1 = df[col].quantile(0.25)
+   472→   472→                Q3 = df[col].quantile(0.75)
+   473→   473→                IQR = Q3 - Q1
+   474→   474→                lower = Q1 - 1.5 * IQR
+   475→   475→                upper = Q3 + 1.5 * IQR
+   476→   476→                outliers = ((df[col] < lower) | (df[col] > upper)).sum()
+   477→   477→                if outliers > 0:
+   478→   478→                    df = df[(df[col] >= lower) & (df[col] <= upper)]
+   479→   479→                    total_removed += outliers
+   480→   480→            report.append(f"[outliers] {total_removed} valores atipicos eliminados (IQR)")
+   481→   481→
+   482→   482→        # 4. Normalizar (min-max)
+   483→   483→        if "normalizar" in ops:
+   484→   484→            for col in df.select_dtypes(include='number').columns:
+   485→   485→                col_min = df[col].min()
+   486→   486→                col_max = df[col].max()
+   487→   487→                if col_max > col_min:
+   488→   488→                    df[col] = (df[col] - col_min) / (col_max - col_min)
+   489→   489→            report.append(f"[normalizar] Columnas numericas normalizadas a [0,1]")
+   490→   490→
+   491→   491→        # 5. Detectar y convertir tipos
+   492→   492→        if "tipos" in ops:
+   493→   493→            converted = []
+   494→   494→            for col in df.columns:
+   495→   495→                if df[col].dtype == 'object':
+   496→   496→                    try:
+   497→   497→                        df[col] = df[col].astype(float)
+   498→   498→                        converted.append(f"{col}: texto -> numerico")
+   499→   499→                    except (ValueError, TypeError):
+   500→   500→                        pass
+   501→   501→            if converted:
+   502→   502→                report.append(f"[tipos] Conversiones: {', '.join(converted)}")
+   503→   503→            else:
+   504→   504→                report.append(f"[tipos] Sin conversiones necesarias")
+   505→   505→
+   506→   506→        report.append(f"\nResultado: {df.shape[0]} filas, {df.shape[1]} columnas")
+   507→   507→        report.append(f"Filas eliminadas: {original_shape[0] - df.shape[0]}")
+   508→   508→
+   509→   509→        # Preview
+   510→   510→        report.append(f"\nPreview (5 filas):\n{df.head().to_string()}")
+   511→   511→
+   512→   512→        return "\n".join(report)
+   513→   513→
+   514→   514→    except ImportError:
+   515→   515→        return "ERROR: pandas no instalado. Instala: pip install pandas"
+   516→   516→    except Exception as e:
+   517→   517→        return f"ERROR limpiando datos: {e}"
+   518→   518→
+   519→   519→
+   520→   520→# ============================================================
+   521→   521→# TRANSFORMACIONES
+   522→   522→# ============================================================
+   523→   523→
+   524→   524→def transformar_datos(datos: str, operacion: str = "", parametros: str = "{}") -> str:
+   525→   525→    """Transforma un dataset aplicando operaciones de filtrado, ordenamiento, agrupacion, etc.
+   526→   526→
+   527→   527→    Args:
+   528→   528→        datos: Datos en CSV o JSON
+   529→   529→        operacion: Operacion a realizar: filtrar, ordenar, agrupar, seleccionar, renombrar, agregar_columna, head, sample
+   530→   530→        parametros: Parametros de la operacion en JSON
+   531→   531→    """
+   532→   532→    try:
+   533→   533→        df = _load_dataframe(datos)
+   534→   534→        if df is None:
+   535→   535→            return "ERROR: No se pudieron parsear los datos."
+   536→   536→
+   537→   537→        params = _parse_json(parametros, {})
+   538→   538→        op = operacion.lower().strip()
+   539→   539→
+   540→   540→        if op == "filtrar" or op == "filter":
+   541→   541→            columna = params.get("columna", params.get("column", ""))
+   542→   542→            condicion = params.get("condicion", params.get("condition", ""))
+   543→   543→            valor = params.get("valor", params.get("value", ""))
+   544→   544→
+   545→   545→            if not columna or columna not in df.columns:
+   546→   546→                return f"ERROR: Columna '{columna}' no encontrada."
+   547→   547→
+   548→   548→            if condicion in (">", "mayor"):
+   549→   549→                df = df[df[columna] > float(valor)]
+   550→   550→            elif condicion in ("<", "menor"):
+   551→   551→                df = df[df[columna] < float(valor)]
+   552→   552→            elif condicion in ("==", "igual"):
+   553→   553→                df = df[df[columna] == valor]
+   554→   554→            elif condicion in ("!=", "diferente"):
+   555→   555→                df = df[df[columna] != valor]
+   556→   556→            elif condicion in (">=", "mayor_igual"):
+   557→   557→                df = df[df[columna] >= float(valor)]
+   558→   558→            elif condicion in ("<=", "menor_igual"):
+   559→   559→                df = df[df[columna] <= float(valor)]
+   560→   560→            elif condicion in ("contains", "contiene"):
+   561→   561→                df = df[df[columna].astype(str).str.contains(str(valor), case=False)]
+   562→   562→            else:
+   563→   563→                return f"ERROR: Condicion '{condicion}' no reconocida. Usar: >, <, ==, !=, >=, <=, contiene"
+   564→   564→
+   565→   565→        elif op == "ordenar" or op == "sort":
+   566→   566→            columna = params.get("columna", params.get("column", ""))
+   567→   567→            ascendente = params.get("ascendente", params.get("ascending", True))
+   568→   568→
+   569→   569→            if not columna:
+   570→   570→                return "ERROR: Especifica columna para ordenar."
+   571→   571→            if columna not in df.columns:
+   572→   572→                return f"ERROR: Columna '{columna}' no encontrada."
+   573→   573→
+   574→   574→            df = df.sort_values(by=columna, ascending=ascendente)
+   575→   575→
+   576→   576→        elif op == "agrupar" or op == "groupby":
+   577→   577→            columna = params.get("columna", params.get("column", ""))
+   578→   578→            agg = params.get("agregacion", params.get("agg", "sum"))
+   579→   579→
+   580→   580→            if not columna:
+   581→   581→                return "ERROR: Especifica columna para agrupar."
+   582→   582→
+   583→   583→            agg_map = {"sum": "sum", "mean": "mean", "count": "count",
+   584→   584→                       "min": "min", "max": "max", "std": "std"}
+   585→   585→            agg_func = agg_map.get(agg, "sum")
+   586→   586→            df = df.groupby(columna).agg(agg_func)
+   587→   587→
+   588→   588→        elif op == "seleccionar" or op == "select":
+   589→   589→            columnas = params.get("columnas", params.get("columns", []))
+   590→   590→            if isinstance(columnas, str):
+   591→   591→                columnas = [c.strip() for c in columnas.split(",")]
+   592→   592→
+   593→   593→            missing = [c for c in columnas if c not in df.columns]
+   594→   594→            if missing:
+   595→   595→                return f"ERROR: Columnas no encontradas: {missing}"
+   596→   596→
+   597→   597→            df = df[columnas]
+   598→   598→
+   599→   599→        elif op == "renombrar" or op == "rename":
+   600→   600→            mapeo = params.get("mapeo", params.get("mapping", {}))
+   601→   601→            df = df.rename(columns=mapeo)
+   602→   602→
+   603→   603→        elif op == "agregar_columna" or op == "add_column":
+   604→   604→            nombre = params.get("nombre", params.get("name", "nueva"))
+   605→   605→            formula = params.get("formula", "")
+   606→   606→
+   607→   607→            if not formula:
+   608→   608→                return "ERROR: Especifica formula para la nueva columna."
+   609→   609→
+   610→   610→            # Evaluar formula de forma segura
+   611→   611→            try:
+   612→   612→                df[nombre] = df.eval(formula)
+   613→   613→            except Exception as e:
+   614→   614→                return f"ERROR evaluando formula: {e}"
+   615→   615→
+   616→   616→        elif op == "head":
+   617→   617→            n = int(params.get("n", 10))
+   618→   618→            df = df.head(n)
+   619→   619→
+   620→   620→        elif op == "sample":
+   621→   621→            n = int(params.get("n", 5))
+   622→   622→            df = df.sample(min(n, len(df)))
+   623→   623→
+   624→   624→        else:
+   625→   625→            return (f"ERROR: Operacion '{op}' no reconocida.\n"
+   626→   626→                    "Usar: filtrar, ordenar, agrupar, seleccionar, renombrar, agregar_columna, head, sample")
+   627→   627→
+   628→   628→        # Formatear resultado
+   629→   629→        result = f"Transformacion [{op}]:\n{df.to_string()}"
+   630→   630→        if len(result) > MAX_TOOL_OUTPUT * 5:
+   631→   631→            result = result[:MAX_TOOL_OUTPUT * 5] + "\n... [truncado]"
+   632→   632→        return result
+   633→   633→
+   634→   634→    except ImportError:
+   635→   635→        return "ERROR: pandas no instalado. Instala: pip install pandas"
+   636→   636→    except Exception as e:
+   637→   637→        return f"ERROR transformando datos: {e}"
+   638→   638→
+   639→   639→
+   640→   640→# ============================================================
+   641→   641→# PARSING
+   642→   642→# ============================================================
+   643→   643→
+   644→   644→def parsear_datos(datos: str, formato_origen: str = "auto",
+   645→   645→                  formato_destino: str = "json") -> str:
+   646→   646→    """Convierte datos entre formatos: CSV, JSON, TSV, YAML, XML.
+   647→   647→
+   648→   648→    Args:
+   649→   649→        datos: Datos en formato de origen
+   650→   650→        formato_origen: Formato de entrada: auto, csv, json, tsv, yaml, xml
+   651→   651→        formato_destino: Formato de salida: json, csv, tsv, yaml, tabla
+   652→   652→    """
+   653→   653→    try:
+   654→   654→        # Auto-detectar formato
+   655→   655→        if formato_origen == "auto":
+   656→   656→            formato_origen = _detect_format(datos)
+   657→   657→
+   658→   658→        # Parsear a estructura Python
+   659→   659→        parsed = _parse_to_dict(datos, formato_origen)
+   660→   660→        if parsed is None:
+   661→   661→            return f"ERROR: No se pudieron parsear los datos como {formato_origen}"
+   662→   662→
+   663→   663→        # Convertir a formato destino
+   664→   664→        if formato_destino == "json":
+   665→   665→            return json.dumps(parsed, ensure_ascii=False, indent=2)
+   666→   666→        elif formato_destino == "csv":
+   667→   667→            return _dict_to_csv(parsed)
+   668→   668→        elif formato_destino == "tsv":
+   669→   669→            return _dict_to_csv(parsed, delimiter="\t")
+   670→   670→        elif formato_destino == "yaml":
+   671→   671→            try:
+   672→   672→                import yaml
+   673→   673→                return yaml.dump(parsed, allow_unicode=True, default_flow_style=False)
+   674→   674→            except ImportError:
+   675→   675→                return "ERROR: PyYAML no instalado. Instala: pip install pyyaml"
+   676→   676→        elif formato_destino == "tabla":
+   677→   677→            try:
+   678→   678→                import pandas as pd
+   679→   679→                df = pd.DataFrame(parsed) if isinstance(parsed, list) else pd.DataFrame([parsed])
+   680→   680→                return df.to_string()
+   681→   681→            except ImportError:
+   682→   682→                return _dict_to_csv(parsed)
+   683→   683→        else:
+   684→   684→            return f"ERROR: Formato destino '{formato_destino}' no soportado. Usar: json, csv, tsv, yaml, tabla"
+   685→   685→
+   686→   686→    except Exception as e:
+   687→   687→        return f"ERROR parseando datos: {e}"
+   688→   688→
+   689→   689→
+   690→   690→# ============================================================
+   691→   691→# EXPORTAR DATOS
+   692→   692→# ============================================================
+   693→   693→
+   694→   694→def exportar_datos(datos: str, ruta: str, formato: str = "csv") -> str:
+   695→   695→    """Exporta datos a un archivo en el formato especificado.
+   696→   696→
+   697→   697→    Args:
+   698→   698→        datos: Datos en CSV o JSON
+   699→   699→        ruta: Ruta del archivo de salida
+   700→   700→        formato: Formato: csv, json, xlsx, tsv
+   701→   701→    """
+   702→   702→    validation = validate_path(ruta)
+   703→   703→    if validation != ruta:
+   704→   704→        return validation
+   705→   705→
+   706→   706→    try:
+   707→   707→        df = _load_dataframe(datos)
+   708→   708→        if df is None:
+   709→   709→            return "ERROR: No se pudieron parsear los datos."
+   710→   710→
+   711→   711→        dir_name = os.path.dirname(ruta)
+   712→   712→        if dir_name:
+   713→   713→            os.makedirs(dir_name, exist_ok=True)
+   714→   714→
+   715→   715→        if formato == "csv":
+   716→   716→            df.to_csv(ruta, index=False, encoding='utf-8')
+   717→   717→        elif formato == "json":
+   718→   718→            df.to_json(ruta, orient='records', force_ascii=False, indent=2)
+   719→   719→        elif formato == "xlsx":
+   720→   720→            try:
+   721→   721→                df.to_excel(ruta, index=False, engine='openpyxl')
+   722→   722→            except ImportError:
+   723→   723→                return "ERROR: openpyxl no instalado. Instala: pip install openpyxl"
+   724→   724→        elif formato == "tsv":
+   725→   725→            df.to_csv(ruta, index=False, sep='\t', encoding='utf-8')
+   726→   726→        else:
+   727→   727→            return f"ERROR: Formato '{formato}' no soportado. Usar: csv, json, xlsx, tsv"
+   728→   728→
+   729→   729→        size_kb = os.path.getsize(ruta) / 1024
+   730→   730→        return f"Datos exportados: {ruta} ({size_kb:.1f} KB, {len(df)} filas, {len(df.columns)} columnas)"
+   731→   731→
+   732→   732→    except ImportError:
+   733→   733→        # Fallback sin pandas
+   734→   734→        return _export_simple(datos, ruta, formato)
+   735→   735→    except Exception as e:
+   736→   736→        return f"ERROR exportando datos: {e}"
+   737→   737→
+   738→   738→
+   739→   739→def _export_simple(datos: str, ruta: str, formato: str) -> str:
+   740→   740→    """Exporta datos sin pandas (fallback simple)."""
+   741→   741→    try:
+   742→   742→        dir_name = os.path.dirname(ruta)
+   743→   743→        if dir_name:
+   744→   744→            os.makedirs(dir_name, exist_ok=True)
+   745→   745→
+   746→   746→        if formato in ("csv", "tsv"):
+   747→   747→            # Intentar reescribir tal cual
+   748→   748→            with open(ruta, 'w', encoding='utf-8') as f:
+   749→   749→                f.write(datos)
+   750→   750→        elif formato == "json":
+   751→   751→            # Intentar parsear y reescribir formateado
+   752→   752→            try:
+   753→   753→                parsed = json.loads(datos)
+   754→   754→                with open(ruta, 'w', encoding='utf-8') as f:
+   755→   755→                    json.dump(parsed, f, ensure_ascii=False, indent=2)
+   756→   756→            except json.JSONDecodeError:
+   757→   757→                with open(ruta, 'w', encoding='utf-8') as f:
+   758→   758→                    f.write(datos)
+   759→   759→        else:
+   760→   760→            return f"ERROR: Formato '{formato}' no soportado sin pandas."
+   761→   761→
+   762→   762→        size_kb = os.path.getsize(ruta) / 1024
+   763→   763→        return f"Datos exportados: {ruta} ({size_kb:.1f} KB)"
+   764→   764→    except Exception as e:
+   765→   765→        return f"ERROR exportando: {e}"
+   766→   766→
+   767→   767→
+   768→   768→# ============================================================
+   769→   769→# UTILIDADES INTERNAS
+   770→   770→# ============================================================
+   771→   771→
+   772→   772→def _load_dataframe(datos_str: str):
+   773→   773→    """Carga datos como DataFrame de pandas. Retorna None si falla."""
+   774→   774→    import pandas as pd
+   775→   775→
+   776→   776→    datos_str = datos_str.strip()
+   777→   777→
+   778→   778→    # Intentar JSON
+   779→   779→    if datos_str.startswith('[') or datos_str.startswith('{'):
+   780→   780→        try:
+   781→   781→            parsed = json.loads(datos_str)
+   782→   782→            if isinstance(parsed, list):
+   783→   783→                return pd.DataFrame(parsed)
+   784→   784→            elif isinstance(parsed, dict):
+   785→   785→                return pd.DataFrame([parsed])
+   786→   786→        except json.JSONDecodeError:
+   787→   787→            pass
+   788→   788→
+   789→   789→    # Intentar CSV
+   790→   790→    try:
+   791→   791→        return pd.read_csv(io.StringIO(datos_str))
+   792→   792→    except Exception:
+   793→   793→        pass
+   794→   794→
+   795→   795→    # Intentar TSV
+   796→   796→    try:
+   797→   797→        return pd.read_csv(io.StringIO(datos_str), sep='\t')
+   798→   798→    except Exception:
+   799→   799→        pass
+   800→   800→
+   801→   801→    return None
+   802→   802→
+   803→   803→
+   804→   804→def _parse_json(s, default=None):
+   805→   805→    """Parsea JSON de forma segura."""
+   806→   806→    if not s or s in ("{}", "[]", ""):
+   807→   807→        return default if default is not None else {}
+   808→   808→    try:
+   809→   809→        return json.loads(s)
+   810→   810→    except (json.JSONDecodeError, TypeError):
+   811→   811→        return default if default is not None else {}
+   812→   812→
+   813→   813→
+   814→   814→def _is_numeric(serie) -> bool:
+   815→   815→    """Verifica si una serie es numerica."""
+   816→   816→    try:
+   817→   817→        import pandas as pd
+   818→   818→        return pd.api.types.is_numeric_dtype(serie)
+   819→   819→    except ImportError:
+   820→   820→        try:
+   821→   821→            [float(x) for x in serie.dropna()]
+   822→   822→            return True
+   823→   823→        except (ValueError, TypeError):
+   824→   824→            return False
+   825→   825→
+   826→   826→
+   827→   827→def _parse_numeric_list(datos_str: str) -> list:
+   828→   828→    """Extrae lista de numeros de un string."""
+   829→   829→    import numpy as np
+   830→   830→
+   831→   831→    values = []
+   832→   832→    for line in datos_str.strip().split("\n"):
+   833→   833→        line = line.strip()
+   834→   834→        if not line or line.startswith("#"):
+   835→   835→            continue
+   836→   836→        for part in line.replace(",", " ").split():
+   837→   837→            try:
+   838→   838→                values.append(float(part))
+   839→   839→            except ValueError:
+   840→   840→                continue
+   841→   841→    return values
+   842→   842→
+   843→   843→
+   844→   844→def _detect_format(datos: str) -> str:
+   845→   845→    """Detecta automaticamente el formato de los datos."""
+   846→   846→    datos = datos.strip()
+   847→   847→    if datos.startswith('[') or datos.startswith('{'):
+   848→   848→        return "json"
+   849→   849→    if '\t' in datos.split('\n')[0]:
+   850→   850→        return "tsv"
+   851→   851→    if datos.startswith('<?xml') or datos.startswith('<'):
+   852→   852→        return "xml"
+   853→   853→    if datos.startswith('---') or datos.startswith('- '):
+   854→   854→        return "yaml"
+   855→   855→    return "csv"
+   856→   856→
+   857→   857→
+   858→   858→def _parse_to_dict(datos: str, formato: str) -> list | dict | None:
+   859→   859→    """Parsea datos a estructura Python (lista de dicts)."""
+   860→   860→    if formato == "json":
+   861→   861→        return json.loads(datos)
+   862→   862→    elif formato in ("csv", "tsv"):
+   863→   863→        delimiter = '\t' if formato == "tsv" else ','
+   864→   864→        reader = csv.DictReader(io.StringIO(datos), delimiter=delimiter)
+   865→   865→        return [row for row in reader]
+   866→   866→    elif formato == "yaml":
+   867→   867→        try:
+   868→   868→            import yaml
+   869→   869→            return yaml.safe_load(datos)
+   870→   870→        except ImportError:
+   871→   871→            return None
+   872→   872→    elif formato == "xml":
+   873→   873→        try:
+   874→   874→            import xml.etree.ElementTree as ET
+   875→   875→            root = ET.fromstring(datos)
+   876→   876→            # Conversion simple: elementos hijos como dicts
+   877→   877→            result = []
+   878→   878→            for child in root:
+   879→   879→                result.append({elem.tag: elem.text for elem in child})
+   880→   880→            return result
+   881→   881→        except Exception:
+   882→   882→            return None
+   883→   883→    else:
+   884→   884→        # Fallback: CSV
+   885→   885→        reader = csv.DictReader(io.StringIO(datos))
+   886→   886→        return [row for row in reader]
+   887→   887→
+   888→   888→
+   889→   889→def _dict_to_csv(data, delimiter=",") -> str:
+   890→   890→    """Convierte lista de dicts a CSV."""
+   891→   891→    if not data:
+   892→   892→        return ""
+   893→   893→    if isinstance(data, dict):
+   894→   894→        data = [data]
+   895→   895→
+   896→   896→    if not isinstance(data, list) or not data:
+   897→   897→        return str(data)
+   898→   898→
+   899→   899→    # Obtener todas las keys
+   900→   900→    all_keys = []
+   901→   901→    for item in data:
+   902→   902→        if isinstance(item, dict):
+   903→   903→            for key in item:
+   904→   904→                if key not in all_keys:
+   905→   905→                    all_keys.append(key)
+   906→   906→
+   907→   907→    output = io.StringIO()
+   908→   908→    writer = csv.DictWriter(output, fieldnames=all_keys, delimiter=delimiter)
+   909→   909→    writer.writeheader()
+   910→   910→    for item in data:
+   911→   911→        if isinstance(item, dict):
+   912→   912→            writer.writerow(item)
+   913→   913→
+   914→   914→    return output.getvalue()
+   915→   915→

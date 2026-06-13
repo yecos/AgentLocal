@@ -1,0 +1,1159 @@
+     1→"""
+     2→=============================================================
+     3→AGENTE v15.2 - Herramientas Avanzadas del Super Agente
+     4→=============================================================
+     5→Herramientas avanzadas que completan las capacidades de Super Z:
+     6→- Busqueda profunda (deep search multi-ronda)
+     7→- Edicion multiple de archivos (multi-edit)
+     8→- Generacion batch de archivos
+     9→- Busqueda con patrones (grep-like)
+    10→- Listado con glob patterns
+    11→- Creacion de proyectos web (Next.js/React scaffolding)
+    12→- Resumen de URL (web reader)
+    13→
+    14→Dependencias: requests, beautifulsoup4 (opcionales)
+    15→=============================================================
+    16→"""
+    17→
+    18→import os
+    19→import re
+    20→import json
+    21→import glob as glob_module
+    22→import logging
+    23→import subprocess
+    24→import tempfile
+    25→import time
+    26→from config import REPOS_DIR, LEARN_DIR, MAX_TOOL_OUTPUT, logger
+    27→from utils.security import validate_path, sanitize_input, validate_url
+    28→
+    29→
+    30→# ============================================================
+    31→# BUSQUEDA PROFUNDA (DEEP SEARCH)
+    32→# ============================================================
+    33→
+    34→def busqueda_profunda(
+    35→    tema: str,
+    36→    profundidad: int = 3,
+    37→    idioma: str = "es",
+    38→    guardar: bool = True,
+    39→) -> str:
+    40→    """Realiza una busqueda profunda multi-ronda sobre un tema. Busca en multiples
+    41→    fuentes, sigue enlaces relevantes y sintetiza un informe completo.
+    42→
+    43→    Es como un investigador que busca en Google, abre los mejores resultados,
+    44→    lee el contenido y compila un resumen exhaustivo.
+    45→
+    46→    Args:
+    47→        tema: Tema a investigar en profundidad
+    48→        profundidad: Nivel de profundidad (1=rapido, 2=medio, 3=profundo)
+    49→        idioma: Idioma preferido para resultados (es, en, fr, de, pt)
+    50→        guardar: Si True, guarda el informe en un archivo
+    51→    """
+    52→    profundidad = min(max(profundidad, 1), 3)
+    53→    tema = sanitize_input(tema)
+    54→
+    55→    logger.info(f"Busqueda profunda: '{tema}' (profundidad={profundidad})")
+    56→
+    57→    max_rounds = profundidad * 2  # 2, 4, 6 busquedas
+    58→    max_urls_per_round = profundidad + 1  # 2, 3, 4 URLs
+    59→    all_findings = []
+    60→    visited_urls = set()
+    61→
+    62→    # Ronda 1: Busqueda principal
+    63→    search_queries = [tema]
+    64→
+    65→    # Generar queries derivados segun profundidad
+    66→    if profundidad >= 2:
+    67→        search_queries.append(f"{tema} que es definicion")
+    68→        search_queries.append(f"{tema} ultimas novedades")
+    69→
+    70→    if profundidad >= 3:
+    71→        search_queries.append(f"{tema} estudios cientificos")
+    72→        search_queries.append(f"{tema} opinion expertos")
+    73→        search_queries.append(f"{tema} estadisticas datos")
+    74→
+    75→    for round_num in range(min(max_rounds, len(search_queries))):
+    76→        query = search_queries[round_num]
+    77→
+    78→        # Buscar en web
+    79→        try:
+    80→            from tools.web import buscar_web
+    81→            search_result = buscar_web(query, use_cache=False)
+    82→        except Exception:
+    83→            search_result = _fallback_search(query)
+    84→
+    85→        if not search_result or "No se encontraron" in search_result:
+    86→            continue
+    87→
+    88→        all_findings.append(f"--- Busqueda: {query} ---\n{search_result}")
+    89→
+    90→        # Extraer URLs de los resultados
+    91→        urls = _extract_urls(search_result)
+    92→        urls_to_visit = [u for u in urls if u not in visited_urls][:max_urls_per_round]
+    93→
+    94→        # Visitar las URLs mas relevantes
+    95→        for url in urls_to_visit:
+    96→            if url in visited_urls:
+    97→                continue
+    98→            visited_urls.add(url)
+    99→
+   100→            try:
+   101→                content = _fetch_url_content(url, max_chars=3000)
+   102→                if content and len(content) > 100:
+   103→                    all_findings.append(f"--- Fuente: {url} ---\n{content}")
+   104→            except Exception as e:
+   105→                logger.debug(f"Error leyendo {url}: {e}")
+   106→
+   107→        # No hacer demasiadas busquedas seguidas
+   108→        if round_num < min(max_rounds, len(search_queries)) - 1:
+   109→            time.sleep(1)
+   110→
+   111→    if not all_findings:
+   112→        return f"No se encontraron resultados para '{tema}'. Intenta con otro termino."
+   113→
+   114→    # Compilar informe
+   115→    report = _compile_deep_report(tema, all_findings, profundidad)
+   116→
+   117→    # Guardar si se solicita
+   118→    if guardar:
+   119→        safe_name = re.sub(r'[^\w\s-]', '', tema)[:40].strip().replace(' ', '_')
+   120→        report_file = os.path.join(LEARN_DIR, f"deep_search_{safe_name}.md")
+   121→        try:
+   122→            with open(report_file, "w", encoding="utf-8") as f:
+   123→                f.write(report)
+   124→            report += f"\n\nInforme guardado en: {report_file}"
+   125→        except Exception as e:
+   126→            report += f"\n\nNo se pudo guardar: {e}"
+   127→
+   128→    return report
+   129→
+   130→
+   131→def _fallback_search(query: str) -> str:
+   132→    """Busqueda fallback cuando buscar_web no esta disponible."""
+   133→    try:
+   134→        import urllib.request
+   135→        import urllib.parse
+   136→
+   137→        encoded = urllib.parse.quote(query)
+   138→        url = f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1"
+   139→        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+   140→        with urllib.request.urlopen(req, timeout=10) as resp:
+   141→            data = json.loads(resp.read().decode("utf-8"))
+   142→
+   143→        parts = []
+   144→        if data.get("AbstractText"):
+   145→            parts.append(f"Resumen: {data['AbstractText']}")
+   146→            if data.get("AbstractURL"):
+   147→                parts.append(f"Fuente: {data['AbstractURL']}")
+   148→        if data.get("Answer"):
+   149→            parts.append(f"Respuesta: {data['Answer']}")
+   150→        for r in data.get("RelatedTopics", [])[:5]:
+   151→            if isinstance(r, dict) and r.get("Text"):
+   152→                parts.append(f"- {r['Text']}")
+   153→                if r.get("FirstURL"):
+   154→                    parts.append(f"  Link: {r['FirstURL']}")
+   155→
+   156→        return "\n".join(parts) if parts else ""
+   157→    except Exception:
+   158→        return ""
+   159→
+   160→
+   161→def _extract_urls(text: str) -> list:
+   162→    """Extrae URLs de un texto."""
+   163→    url_pattern = r'https?://[^\s<>"\')\]]+'
+   164→    urls = re.findall(url_pattern, text)
+   165→    # Filtrar URLs no utiles
+   166→    skip_domains = ['duckduckgo.com', 'google.com', 'bing.com']
+   167→    filtered = []
+   168→    for url in urls:
+   169→        if not any(d in url for d in skip_domains):
+   170→            filtered.append(url.rstrip('.,;:'))
+   171→    return filtered[:10]
+   172→
+   173→
+   174→def _fetch_url_content(url: str, max_chars: int = 3000) -> str:
+   175→    """Obtiene el contenido textual de una URL."""
+   176→    try:
+   177→        validate_url(url)
+   178→    except Exception:
+   179→        return ""
+   180→
+   181→    try:
+   182→        import urllib.request
+   183→
+   184→        req = urllib.request.Request(url, headers={
+   185→            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+   186→        })
+   187→        with urllib.request.urlopen(req, timeout=10) as resp:
+   188→            html = resp.read().decode("utf-8", errors="replace")
+   189→
+   190→        # Intentar con BeautifulSoup si esta disponible
+   191→        try:
+   192→            from bs4 import BeautifulSoup
+   193→            soup = BeautifulSoup(html, 'html.parser')
+   194→            for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside', 'iframe']):
+   195→                tag.decompose()
+   196→            main = soup.find('main') or soup.find('article') or soup.find(class_='content')
+   197→            text = main.get_text(separator="\n", strip=True) if main else soup.get_text(separator="\n", strip=True)
+   198→        except ImportError:
+   199→            # Fallback basico
+   200→            text = re.sub(r'<[^>]+>', ' ', html)
+   201→            text = re.sub(r'\s+', ' ', text).strip()
+   202→
+   203→        # Limpiar
+   204→        lines = [l.strip() for l in text.split('\n') if l.strip()]
+   205→        text = '\n'.join(lines)
+   206→
+   207→        if len(text) > max_chars:
+   208→            text = text[:max_chars] + "... [truncado]"
+   209→
+   210→        return text
+   211→
+   212→    except Exception as e:
+   213→        logger.debug(f"Error fetching {url}: {e}")
+   214→        return ""
+   215→
+   216→
+   217→def _compile_deep_report(tema: str, findings: list, profundidad: int) -> str:
+   218→    """Compila los hallazgos en un informe estructurado."""
+   219→    from datetime import datetime
+   220→
+   221→    parts = [
+   222→        f"# Busqueda Profunda: {tema}",
+   223→        f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+   224→        f"Profundidad: {profundidad}/3",
+   225→        f"Fuentes consultadas: {len(findings)}",
+   226→        "",
+   227→    ]
+   228→
+   229→    # Intentar sintetizar con LLM si esta disponible
+   230→    try:
+   231→        from llm import ollama
+   232→        all_text = "\n\n".join(findings)[:6000]
+   233→        prompt = (
+   234→            f"Sintetiza la siguiente informacion sobre '{tema}' en un informe "
+   235→            f"estructurado con secciones: Resumen, Puntos Clave, Contexto, "
+   236→            f"Detalles, y Conclusiones. Usa formato Markdown.\n\n"
+   237→            f"INFORMACION RECOPILADA:\n{all_text}"
+   238→        )
+   239→
+   240→        if hasattr(ollama, 'generate'):
+   241→            synthesis = ollama.generate(prompt)
+   242→            if synthesis and len(synthesis) > 100:
+   243→                parts.append(synthesis)
+   244→                return "\n".join(parts)
+   245→    except Exception:
+   246→        pass
+   247→
+   248→    # Fallback: compilacion directa
+   249→    parts.append("## Resultados de la Investigacion\n")
+   250→    for i, finding in enumerate(findings, 1):
+   251→        parts.append(finding)
+   252→        parts.append("")
+   253→
+   254→    return "\n".join(parts)
+   255→
+   256→
+   257→# ============================================================
+   258→# EDICION MULTIPLE DE ARCHIVOS (MULTI-EDIT)
+   259→# ============================================================
+   260→
+   261→def editar_multiples(ediciones: str, crear_archivos: bool = True) -> str:
+   262→    """Realiza multiples ediciones en uno o varios archivos en una sola operacion.
+   263→    Cada edicion especifica: archivo, texto_a_buscar, texto_nuevo. Si crear_archivos
+   264→    es True, los archivos que no existen se crean automaticamente.
+   265→
+   266→    Args:
+   267→        ediciones: Lista JSON de ediciones: [{"archivo": "ruta", "buscar": "texto viejo", "reemplazar": "texto nuevo"}, ...]
+   268→        crear_archivos: Si True, crea archivos que no existen (usa "buscar" vacio para archivos nuevos)
+   269→    """
+   270→    try:
+   271→        edits = json.loads(ediciones)
+   272→    except json.JSONDecodeError as e:
+   273→        return f"ERROR: Formato JSON invalido: {e}. Usa: [{{archivo, buscar, reemplazar}}, ...]"
+   274→
+   275→    if not edits:
+   276→        return "ERROR: Lista de ediciones vacia."
+   277→
+   278→    if len(edits) > 50:
+   279→        return "ERROR: Maximo 50 ediciones por operacion."
+   280→
+   281→    results = []
+   282→    success_count = 0
+   283→    error_count = 0
+   284→
+   285→    for i, edit in enumerate(edits):
+   286→        archivo = edit.get("archivo", edit.get("file", ""))
+   287→        buscar = edit.get("buscar", edit.get("find", edit.get("old", "")))
+   288→        reemplazar = edit.get("reemplazar", edit.get("replace", edit.get("new", "")))
+   289→
+   290→        if not archivo:
+   291→            results.append(f"  [{i+1}] ERROR: No se especifico archivo")
+   292→            error_count += 1
+   293→            continue
+   294→
+   295→        # Resolver ruta
+   296→        ruta = _resolve_file_path(archivo)
+   297→
+   298→        # Si el archivo no existe
+   299→        if not os.path.exists(ruta):
+   300→            if crear_archivos:
+   301→                try:
+   302→                    os.makedirs(os.path.dirname(ruta) if os.path.dirname(ruta) else ".", exist_ok=True)
+   303→                    with open(ruta, "w", encoding="utf-8") as f:
+   304→                        f.write(reemplazar)
+   305→                    results.append(f"  [{i+1}] CREADO: {archivo} ({len(reemplazar)} chars)")
+   306→                    success_count += 1
+   307→                except Exception as e:
+   308→                    results.append(f"  [{i+1}] ERROR creando {archivo}: {e}")
+   309→                    error_count += 1
+   310→                continue
+   311→            else:
+   312→                results.append(f"  [{i+1}] ERROR: {archivo} no existe")
+   313→                error_count += 1
+   314→                continue
+   315→
+   316→        # Leer archivo actual
+   317→        try:
+   318→            with open(ruta, "r", encoding="utf-8", errors="replace") as f:
+   319→                content = f.read()
+   320→        except Exception as e:
+   321→            results.append(f"  [{i+1}] ERROR leyendo {archivo}: {e}")
+   322→            error_count += 1
+   323→            continue
+   324→
+   325→        # Realizar reemplazo
+   326→        if buscar:
+   327→            if buscar not in content:
+   328→                results.append(f"  [{i+1}] NO ENCONTRADO: '{buscar[:50]}...' en {archivo}")
+   329→                error_count += 1
+   330→                continue
+   331→
+   332→            count = content.count(buscar)
+   333→            replace_all = edit.get("reemplazar_todo", edit.get("replaceAll", False))
+   334→            if replace_all:
+   335→                content = content.replace(buscar, reemplazar)
+   336→                results.append(f"  [{i+1}] OK: {archivo} ({count} reemplazos)")
+   337→            else:
+   338→                content = content.replace(buscar, reemplazar, 1)
+   339→                results.append(f"  [{i+1}] OK: {archivo} (1 de {count} reemplazos)")
+   340→        else:
+   341→            # Si no hay texto a buscar, agregar al final
+   342→            content += reemplazar
+   343→            results.append(f"  [{i+1}] OK: {archivo} (agregado al final)")
+   344→
+   345→        # Escribir archivo
+   346→        try:
+   347→            with open(ruta, "w", encoding="utf-8") as f:
+   348→                f.write(content)
+   349→            success_count += 1
+   350→        except Exception as e:
+   351→            results.append(f"  [{i+1}] ERROR escribiendo {archivo}: {e}")
+   352→            error_count += 1
+   353→
+   354→    summary = f"Ediciones: {success_count} exitosas, {error_count} errores de {len(edits)} totales\n"
+   355→    return summary + "\n".join(results)
+   356→
+   357→
+   358→def _resolve_file_path(ruta: str) -> str:
+   359→    """Resuelve la ruta de un archivo."""
+   360→    if os.path.isabs(ruta):
+   361→        return ruta
+   362→    if os.path.exists(ruta):
+   363→        return os.path.abspath(ruta)
+   364→    alt = os.path.join(REPOS_DIR, ruta)
+   365→    if os.path.exists(os.path.dirname(alt)):
+   366→        return alt
+   367→    return os.path.abspath(ruta)
+   368→
+   369→
+   370→# ============================================================
+   371→# GENERACION BATCH DE ARCHIVOS
+   372→# ============================================================
+   373→
+   374→def generacion_batch(archivos: str) -> str:
+   375→    """Genera multiples archivos en una sola operacion. Ideal para crear
+   376→    estructuras de proyecto, templates, o conjuntos de archivos relacionados.
+   377→
+   378→    Args:
+   379→        archivos: Lista JSON de archivos: [{"ruta": "dir/archivo.py", "contenido": "..."}, ...]
+   380→    """
+   381→    try:
+   382→        file_list = json.loads(archivos)
+   383→    except json.JSONDecodeError as e:
+   384→        return f"ERROR: Formato JSON invalido: {e}"
+   385→
+   386→    if not file_list:
+   387→        return "ERROR: Lista de archivos vacia."
+   388→
+   389→    if len(file_list) > 30:
+   390→        return "ERROR: Maximo 30 archivos por operacion batch."
+   391→
+   392→    results = []
+   393→    created = 0
+   394→    skipped = 0
+   395→
+   396→    for i, file_info in enumerate(file_list):
+   397→        ruta = file_info.get("ruta", file_info.get("path", file_info.get("file", "")))
+   398→        contenido = file_info.get("contenido", file_info.get("content", ""))
+   399→        sobreescribir = file_info.get("sobreescribir", file_info.get("overwrite", True))
+   400→
+   401→        if not ruta:
+   402→            results.append(f"  [{i+1}] ERROR: No se especifico ruta")
+   403→            continue
+   404→
+   405→        # Resolver ruta
+   406→        full_path = _resolve_file_path(ruta)
+   407→
+   408→        # Verificar si ya existe
+   409→        if os.path.exists(full_path) and not sobreescribir:
+   410→            results.append(f"  [{i+1}] SKIP: {ruta} (ya existe)")
+   411→            skipped += 1
+   412→            continue
+   413→
+   414→        # Crear directorios necesarios
+   415→        dir_path = os.path.dirname(full_path)
+   416→        if dir_path:
+   417→            os.makedirs(dir_path, exist_ok=True)
+   418→
+   419→        # Escribir archivo
+   420→        try:
+   421→            with open(full_path, "w", encoding="utf-8") as f:
+   422→                f.write(contenido)
+   423→            size = len(contenido)
+   424→            results.append(f"  [{i+1}] OK: {ruta} ({size} chars)")
+   425→            created += 1
+   426→        except Exception as e:
+   427→            results.append(f"  [{i+1}] ERROR: {ruta}: {e}")
+   428→
+   429→    summary = f"Generacion batch: {created} creados, {skipped} omitidos de {len(file_list)} totales\n"
+   430→    return summary + "\n".join(results)
+   431→
+   432→
+   433→# ============================================================
+   434→# BUSQUEDA CON PATRONES (GREP-LIKE)
+   435→# ============================================================
+   436→
+   437→def buscar_patron(
+   438→    patron: str,
+   439→    directorio: str = ".",
+   440→    tipo_archivo: str = "",
+   441→    max_resultados: int = 30,
+   442→    ignorar_case: bool = True,
+   443→    contexto: int = 2,
+   444→) -> str:
+   445→    """Busca un patron de texto o regex en archivos (como grep). Busca en el
+   446→    contenido de los archivos del directorio especificado.
+   447→
+   448→    Args:
+   449→        patron: Patron de texto o expresion regular a buscar
+   450→        directorio: Directorio donde buscar (default: directorio actual)
+   451→        tipo_archivo: Filtrar por extension (ej: .py, .js, .txt, .md)
+   452→        max_resultados: Maximo resultados a mostrar (default 30)
+   453→        ignorar_case: Ignorar mayusculas/minusculas (default True)
+   454→        contexto: Lineas de contexto antes/despues (default 2)
+   455→    """
+   456→    directorio = _resolve_file_path(directorio)
+   457→    if not os.path.isdir(directorio):
+   458→        return f"ERROR: Directorio no encontrado: {directorio}"
+   459→
+   460→    # Intentar con ripgrep primero (mucho mas rapido)
+   461→    rg_result = _search_ripgrep(patron, directorio, tipo_archivo, max_resultados, ignorar_case, contexto)
+   462→    if rg_result is not None:
+   463→        return rg_result
+   464→
+   465→    # Fallback: busqueda Python pura
+   466→    return _search_python(patron, directorio, tipo_archivo, max_resultados, ignorar_case, contexto)
+   467→
+   468→
+   469→def _search_ripgrep(patron, directorio, tipo_archivo, max_resultados, ignorar_case, contexto):
+   470→    """Busqueda usando ripgrep (rg)."""
+   471→    try:
+   472→        cmd = ["rg"]
+   473→        if ignorar_case:
+   474→            cmd.append("-i")
+   475→        cmd.extend(["-n", "--max-count", str(max_resultados)])
+   476→        if contexto > 0:
+   477→            cmd.extend(["-C", str(contexto)])
+   478→        if tipo_archivo:
+   479→            cmd.extend(["--glob", f"*{tipo_archivo}"])
+   480→        cmd.extend([patron, directorio])
+   481→
+   482→        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+   483→
+   484→        if result.returncode == 0 and result.stdout.strip():
+   485→            lines = result.stdout.strip().split('\n')
+   486→            if len(lines) > max_resultados:
+   487→                lines = lines[:max_resultados]
+   488→                lines.append(f"... ({len(result.stdout.strip().split(chr(10)))} resultados totales, mostrando {max_resultados})")
+   489→
+   490→            output = "\n".join(lines)
+   491→            if len(output) > MAX_TOOL_OUTPUT:
+   492→                output = output[:MAX_TOOL_OUTPUT] + "\n... [truncado]"
+   493→            return f"Resultados de busqueda '{patron}':\n{output}"
+   494→        elif result.returncode == 1:
+   495→            return f"No se encontraron coincidencias para '{patron}' en {directorio}"
+   496→        else:
+   497→            return None  # rg fallo, usar fallback
+   498→
+   499→    except FileNotFoundError:
+   500→        return None  # rg no instalado
+   501→    except subprocess.TimeoutExpired:
+   502→        return "ERROR: Busqueda excedio el timeout."
+   503→    except Exception:
+   504→        return None
+   505→
+   506→
+   507→def _search_python(patron, directorio, tipo_archivo, max_resultados, ignorar_case, contexto):
+   508→    """Busqueda fallback usando Python puro."""
+   509→    flags = re.IGNORECASE if ignorar_case else 0
+   510→    try:
+   511→        pattern = re.compile(patron, flags)
+   512→    except re.error as e:
+   513→        return f"ERROR: Patron regex invalido: {e}"
+   514→
+   515→    # Directorios a ignorar
+   516→    skip_dirs = {'.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build', '.next', '.cache'}
+   517→
+   518→    results = []
+   519→    count = 0
+   520→
+   521→    for root, dirs, files in os.walk(directorio):
+   522→        # Filtrar directorios
+   523→        dirs[:] = [d for d in dirs if d not in skip_dirs]
+   524→
+   525→        for fname in files:
+   526→            # Filtrar por extension
+   527→            if tipo_archivo and not fname.endswith(tipo_archivo):
+   528→                continue
+   529→
+   530→            fpath = os.path.join(root, fname)
+   531→
+   532→            # Solo leer archivos de texto
+   533→            try:
+   534→                with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+   535→                    lines = f.readlines()
+   536→            except Exception:
+   537→                continue
+   538→
+   539→            for line_num, line in enumerate(lines, 1):
+   540→                if pattern.search(line):
+   541→                    # Mostrar con contexto
+   542→                    context_lines = []
+   543→                    start = max(0, line_num - 1 - contexto)
+   544→                    end = min(len(lines), line_num + contexto)
+   545→
+   546→                    for ctx_i in range(start, end):
+   547→                        prefix = ">>>" if ctx_i == line_num - 1 else "   "
+   548→                        context_lines.append(f"{prefix} {fpath}:{ctx_i+1}: {lines[ctx_i].rstrip()}")
+   549→
+   550→                    results.append("\n".join(context_lines))
+   551→                    count += 1
+   552→
+   553→                    if count >= max_resultados:
+   554→                        break
+   555→
+   556→            if count >= max_resultados:
+   557→                break
+   558→
+   559→        if count >= max_resultados:
+   560→            break
+   561→
+   562→    if not results:
+   563→        return f"No se encontraron coincidencias para '{patron}' en {directorio}"
+   564→
+   565→    output = "\n\n".join(results)
+   566→    if len(output) > MAX_TOOL_OUTPUT:
+   567→        output = output[:MAX_TOOL_OUTPUT] + "\n... [truncado]"
+   568→
+   569→    return f"Resultados de busqueda '{patron}' ({count} encontrados):\n{output}"
+   570→
+   571→
+   572→# ============================================================
+   573→# LISTADO CON GLOB PATTERNS
+   574→# ============================================================
+   575→
+   576→def listar_glob(
+   577→    patron: str = "**/*",
+   578→    directorio: str = ".",
+   579→    solo_tipo: str = "todos",
+   580→    max_resultados: int = 100,
+   581→) -> str:
+   582→    """Lista archivos usando glob patterns (como **/*.py, **/test_*.js, etc.).
+   583→    Permite busqueda flexible de archivos por nombre, extension o patron.
+   584→
+   585→    Args:
+   586→        patron: Patron glob (ej: **/*.py, src/**/*.ts, **/test_*.js, *.md)
+   587→        directorio: Directorio base para la busqueda (default: actual)
+   588→        solo_tipo: Filtrar: todos, archivos, directorios
+   589→        max_resultados: Maximo resultados (default 100)
+   590→    """
+   591→    directorio = _resolve_file_path(directorio)
+   592→    if not os.path.isdir(directorio):
+   593→        return f"ERROR: Directorio no encontrado: {directorio}"
+   594→
+   595→    try:
+   596→        matches = glob_module.glob(os.path.join(directorio, patron), recursive=True)
+   597→    except Exception as e:
+   598→        return f"ERROR: Patron glob invalido: {e}"
+   599→
+   600→    # Filtrar por tipo
+   601→    if solo_tipo == "archivos":
+   602→        matches = [m for m in matches if os.path.isfile(m)]
+   603→    elif solo_tipo == "directorios":
+   604→        matches = [m for m in matches if os.path.isdir(m)]
+   605→
+   606→    # Ordenar por modificacion (mas recientes primero)
+   607→    try:
+   608→        matches.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+   609→    except Exception:
+   610→        matches.sort()
+   611→
+   612→    if not matches:
+   613→        return f"No se encontraron archivos con patron '{patron}' en {directorio}"
+   614→
+   615→    # Limitar resultados
+   616→    total = len(matches)
+   617→    if len(matches) > max_resultados:
+   618→        matches = matches[:max_resultados]
+   619→
+   620→    # Formatear resultados
+   621→    results = [f"Archivos encontrados: {total} (mostrando {len(matches)})\n"]
+   622→
+   623→    for match in matches:
+   624→        rel_path = os.path.relpath(match, directorio)
+   625→        if os.path.isfile(match):
+   626→            try:
+   627→                size = os.path.getsize(match)
+   628→                size_str = f"{size:,} bytes" if size < 1024 else f"{size/1024:.1f} KB"
+   629→            except Exception:
+   630→                size_str = ""
+   631→            results.append(f"  {rel_path}  ({size_str})")
+   632→        else:
+   633→            results.append(f"  {rel_path}/")
+   634→
+   635→    output = "\n".join(results)
+   636→    if len(output) > MAX_TOOL_OUTPUT:
+   637→        output = output[:MAX_TOOL_OUTPUT] + "\n... [truncado]"
+   638→
+   639→    return output
+   640→
+   641→
+   642→# ============================================================
+   643→# CREACION DE PROYECTOS WEB (Next.js / React)
+   644→# ============================================================
+   645→
+   646→def crear_proyecto_web(
+   647→    nombre: str,
+   648→    tipo: str = "nextjs",
+   649→    directorio: str = "",
+   650→    opciones: str = "{}",
+   651→) -> str:
+   652→    """Crea un proyecto web con scaffolding completo. Soporta Next.js, React,
+   653→    Vue, y mas. Genera la estructura de archivos, configuracion y codigo base.
+   654→
+   655→    Args:
+   656→        nombre: Nombre del proyecto
+   657→        tipo: Tipo de proyecto: nextjs, react, vue, express, static
+   658→        directorio: Directorio donde crear el proyecto (default: REPOS_DIR)
+   659→        opciones: Opciones adicionales como JSON: {"typescript": true, "tailwind": true, "prisma": true}
+   660→    """
+   661→    tipo = tipo.lower().strip()
+   662→    supported_types = ["nextjs", "react", "vue", "express", "static"]
+   663→
+   664→    if tipo not in supported_types:
+   665→        return f"ERROR: Tipo '{tipo}' no soportado. Usar: {', '.join(supported_types)}"
+   666→
+   667→    # Parsear opciones
+   668→    try:
+   669→        opts = json.loads(opciones) if opciones else {}
+   670→    except json.JSONDecodeError:
+   671→        opts = {}
+   672→
+   673→    use_typescript = opts.get("typescript", True)
+   674→    use_tailwind = opts.get("tailwind", True)
+   675→    use_prisma = opts.get("prisma", False)
+   676→
+   677→    # Directorio del proyecto
+   678→    base_dir = directorio or REPOS_DIR
+   679→    project_dir = os.path.join(base_dir, nombre)
+   680→
+   681→    if os.path.exists(project_dir):
+   682→        return f"ERROR: El directorio {project_dir} ya existe. Elige otro nombre o elimina el existente."
+   683→
+   684→    ext = ".ts" if use_typescript else ".js"
+   685→    extx = ".tsx" if use_typescript else ".jsx"
+   686→
+   687→    # Generar archivos segun tipo
+   688→    files = {}
+   689→
+   690→    if tipo == "nextjs":
+   691→        files = _generate_nextjs_project(nombre, ext, extx, use_typescript, use_tailwind, use_prisma)
+   692→    elif tipo == "react":
+   693→        files = _generate_react_project(nombre, ext, extx, use_typescript, use_tailwind)
+   694→    elif tipo == "vue":
+   695→        files = _generate_vue_project(nombre, use_typescript, use_tailwind)
+   696→    elif tipo == "express":
+   697→        files = _generate_express_project(nombre, ext, use_typescript)
+   698→    elif tipo == "static":
+   699→        files = _generate_static_project(nombre, use_tailwind)
+   700→
+   701→    # Crear todos los archivos
+   702→    results = []
+   703→    created = 0
+   704→
+   705→    for rel_path, content in files.items():
+   706→        full_path = os.path.join(project_dir, rel_path)
+   707→        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+   708→
+   709→        try:
+   710→            with open(full_path, "w", encoding="utf-8") as f:
+   711→                f.write(content)
+   712→            results.append(f"  OK: {rel_path}")
+   713→            created += 1
+   714→        except Exception as e:
+   715→            results.append(f"  ERROR: {rel_path}: {e}")
+   716→
+   717→    # Intentar instalar dependencias
+   718→    install_msg = ""
+   719→    if os.path.exists(os.path.join(project_dir, "package.json")):
+   720→        results.append("\nDependencias por instalar:")
+   721→        results.append(f"  cd {project_dir} && npm install")
+   722→
+   723→        if use_prisma and tipo == "nextjs":
+   724→            results.append("  npx prisma init")
+   725→
+   726→        install_msg = (
+   727→            f"\n\nPara completar la instalacion:\n"
+   728→            f"  cd {project_dir}\n"
+   729→            f"  npm install\n"
+   730→        )
+   731→        if use_prisma:
+   732→            install_msg += "  npx prisma init\n  npx prisma generate\n"
+   733→
+   734→    summary = f"Proyecto {tipo} '{nombre}' creado: {created} archivos\n"
+   735→    return summary + "\n".join(results) + install_msg
+   736→
+   737→
+   738→def _generate_nextjs_project(nombre, ext, extx, ts, tailwind, prisma):
+   739→    """Genera estructura de proyecto Next.js."""
+   740→    files = {
+   741→        "package.json": json.dumps({
+   742→            "name": nombre,
+   743→            "version": "0.1.0",
+   744→            "private": True,
+   745→            "scripts": {
+   746→                "dev": "next dev",
+   747→                "build": "next build",
+   748→                "start": "next start",
+   749→                "lint": "next lint"
+   750→            },
+   751→            "dependencies": {
+   752→                "next": "^15.0.0",
+   753→                "react": "^19.0.0",
+   754→                "react-dom": "^19.0.0",
+   755→                **({"@prisma/client": "^6.0.0"} if prisma else {})
+   756→            },
+   757→            "devDependencies": {
+   758→                **({"typescript": "^5.0.0", "@types/node": "^20.0.0", "@types/react": "^19.0.0"} if ts else {}),
+   759→                **({"tailwindcss": "^4.0.0", "@tailwindcss/postcss": "^4.0.0"} if tailwind else {}),
+   760→            }
+   761→        }, indent=2),
+   762→
+   763→        f"app/layout{extx}": (
+   764→            f"{'import type { Metadata } from \"next\";' + chr(10) if ts else ''}"
+   765→            f"import './globals.css';\n\n"
+   766→            f"{'export const metadata: Metadata = ' if ts else 'export const metadata = '}"
+   767→            f"{{\n  title: '{nombre}',\n  description: 'Created with Agente Local',\n}};\n\n"
+   768→            f"export default function RootLayout({{ children }}: "
+   769→            f"{{' children: React.ReactNode' if ts else ' children'}}) {{\n"
+   770→            f"  return (\n    <html lang=\"es\">\n      <body>{{children}}</body>\n"
+   771→            f"    </html>\n  );\n}}\n"
+   772→        ),
+   773→
+   774→        f"app/page{extx}": (
+   775→            f"export default function Home() {{\n"
+   776→            f"  return (\n    <main{' className=\"min-h-screen p-8\"' if tailwind else ''}>\n"
+   777→            f"      <h1{' className=\"text-4xl font-bold\"' if tailwind else ''}>"
+   778→            f"{nombre}</h1>\n"
+   779→            f"      <p>Bienvenido a {nombre}</p>\n"
+   780→            f"    </main>\n  );\n}}\n"
+   781→        ),
+   782→
+   783→        "app/globals.css": (
+   784→            f"@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\n"
+   785→            f"body {{\n  font-family: system-ui, sans-serif;\n}}\n"
+   786→            if tailwind else
+   787→            "body { font-family: system-ui, sans-serif; margin: 0; padding: 20px; }\n"
+   788→        ),
+   789→
+   790→        "next.config.mjs": (
+   791→            "/** @type {import('next').NextConfig} */\n"
+   792→            "const nextConfig = {};\nexport default nextConfig;\n"
+   793→        ),
+   794→
+   795→        "tsconfig.json": (
+   796→            json.dumps({
+   797→                "compilerOptions": {
+   798→                    "target": "ES2017", "lib": ["dom", "dom.iterable", "esnext"],
+   799→                    "allowJs": True, "skipLibCheck": True, "strict": True,
+   800→                    "noEmit": True, "esModuleInterop": True, "module": "esnext",
+   801→                    "moduleResolution": "bundler", "resolveJsonModule": True,
+   802→                    "isolatedModules": True, "jsx": "preserve", "incremental": True,
+   803→                    "plugins": [{"name": "next"}], "paths": {"@/*": ["./*"]}
+   804→                },
+   805→                "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+   806→                "exclude": ["node_modules"]
+   807→            }, indent=2)
+   808→        ) if ts else None,
+   809→
+   810→        ".gitignore": (
+   811→            "node_modules/\n.next/\nout/\nbuild/\n.env*\n*.tsbuildinfo\n"
+   812→            "next-env.d.ts\n.DS_Store\n"
+   813→        ),
+   814→
+   815→        "README.md": f"# {nombre}\n\nProyecto Next.js creado con Agente Local.\n\n## Getting Started\n\n```bash\nnpm install\nnpm run dev\n```\n\nOpen [http://localhost:3000](http://localhost:3000)\n",
+   816→    }
+   817→
+   818→    if prisma:
+   819→        files["prisma/schema.prisma"] = (
+   820→            'generator client {\n  provider = "prisma-client-js"\n}\n\n'
+   821→            'datasource db {\n  provider = "sqlite"\n  url      = "file:./dev.db"\n}\n\n'
+   822→            'model Example {\n  id        Int      @id @default(autoincrement())\n'
+   823→            '  name      String\n  createdAt DateTime @default(now())\n}\n'
+   824→        )
+   825→        files[f"lib/db{ext}"] = (
+   826→            "import { PrismaClient } from '@prisma/client';\n\n"
+   827→            "const prisma = new PrismaClient();\nexport default prisma;\n"
+   828→        )
+   829→
+   830→    # Filtrar None values
+   831→    return {k: v for k, v in files.items() if v is not None}
+   832→
+   833→
+   834→def _generate_react_project(nombre, ext, extx, ts, tailwind):
+   835→    """Genera estructura de proyecto React (Vite)."""
+   836→    return {
+   837→        "package.json": json.dumps({
+   838→            "name": nombre, "version": "0.1.0", "type": "module",
+   839→            "scripts": {"dev": "vite", "build": "vite build", "preview": "vite preview"},
+   840→            "dependencies": {"react": "^19.0.0", "react-dom": "^19.0.0"},
+   841→            "devDependencies": {
+   842→                "@vitejs/plugin-react": "^4.0.0", "vite": "^6.0.0",
+   843→                **({"typescript": "^5.0.0"} if ts else {}),
+   844→                **({"tailwindcss": "^4.0.0"} if tailwind else {}),
+   845→            }
+   846→        }, indent=2),
+   847→        "index.html": (
+   848→            f'<!DOCTYPE html>\n<html lang="es">\n<head>\n'
+   849→            f'  <meta charset="UTF-8" />\n  <title>{nombre}</title>\n'
+   850→            f'</head>\n<body>\n  <div id="root"></div>\n'
+   851→            f'  <script type="module" src="/src/main{extx}"></script>\n'
+   852→            f'</body>\n</html>\n'
+   853→        ),
+   854→        f"src/main{extx}": (
+   855→            f"import React from 'react';\nimport ReactDOM from 'react-dom/client';\n"
+   856→            f"import App from './App{extx}';\nimport './index.css';\n\n"
+   857→            f"ReactDOM.createRoot(document.getElementById('root')!).render(\n"
+   858→            f"  <React.StrictMode><App /></React.StrictMode>\n);\n"
+   859→        ),
+   860→        f"src/App{extx}": (
+   861→            f"export default function App() {{\n"
+   862→            f"  return (\n    <div{' className=\"min-h-screen p-8\"' if tailwind else ''}>\n"
+   863→            f"      <h1{' className=\"text-4xl font-bold\"' if tailwind else ''}>"
+   864→            f"{nombre}</h1>\n"
+   865→            f"      <p>Aplicacion React creada con Agente Local</p>\n"
+   866→            f"    </div>\n  );\n}}\n"
+   867→        ),
+   868→        "src/index.css": "@tailwind base;\n@tailwind components;\n@tailwind utilities;\n" if tailwind else "body { font-family: system-ui; }\n",
+   869→        "vite.config.ts": (
+   870→            "import { defineConfig } from 'vite';\nimport react from '@vitejs/plugin-react';\n\n"
+   871→            "export default defineConfig({ plugins: [react()] });\n"
+   872→        ),
+   873→        ".gitignore": "node_modules/\ndist/\n.env*\n",
+   874→        "README.md": f"# {nombre}\n\nProyecto React creado con Agente Local.\n\n```bash\nnpm install\nnpm run dev\n```\n",
+   875→    }
+   876→
+   877→
+   878→def _generate_vue_project(nombre, ts, tailwind):
+   879→    """Genera estructura de proyecto Vue."""
+   880→    return {
+   881→        "package.json": json.dumps({
+   882→            "name": nombre, "version": "0.1.0", "type": "module",
+   883→            "scripts": {"dev": "vite", "build": "vite build"},
+   884→            "dependencies": {"vue": "^3.5.0"},
+   885→            "devDependencies": {
+   886→                "@vitejs/plugin-vue": "^5.0.0", "vite": "^6.0.0",
+   887→                **({"typescript": "^5.0.0"} if ts else {}),
+   888→            }
+   889→        }, indent=2),
+   890→        "index.html": (
+   891→            f'<!DOCTYPE html>\n<html lang="es">\n<head>\n'
+   892→            f'  <meta charset="UTF-8" />\n  <title>{nombre}</title>\n'
+   893→            f'</head>\n<body>\n  <div id="app"></div>\n'
+   894→            f'  <script type="module" src="/src/main.{"ts" if ts else "js"}"></script>\n'
+   895→            f'</body>\n</html>\n'
+   896→        ),
+   897→        "src/main.ts" if ts else "src/main.js": (
+   898→            "import { createApp } from 'vue';\nimport App from './App.vue';\n"
+   899→            "createApp(App).mount('#app');\n"
+   900→        ),
+   901→        "src/App.vue": (
+   902→            '<template>\n  <div class="app">\n'
+   903→            f'    <h1>{nombre}</h1>\n'
+   904→            '    <p>Aplicacion Vue creada con Agente Local</p>\n'
+   905→            '  </div>\n</template>\n\n'
+   906→            '<style scoped>\n.app { padding: 2rem; }\n</style>\n'
+   907→        ),
+   908→        "vite.config.ts": (
+   909→            "import { defineConfig } from 'vite';\nimport vue from '@vitejs/plugin-vue';\n\n"
+   910→            "export default defineConfig({ plugins: [vue()] });\n"
+   911→        ),
+   912→        ".gitignore": "node_modules/\ndist/\n.env*\n",
+   913→        "README.md": f"# {nombre}\n\nProyecto Vue creado con Agente Local.\n\n```bash\nnpm install\nnpm run dev\n```\n",
+   914→    }
+   915→
+   916→
+   917→def _generate_express_project(nombre, ext, ts):
+   918→    """Genera estructura de proyecto Express API."""
+   919→    return {
+   920→        "package.json": json.dumps({
+   921→            "name": nombre, "version": "0.1.0",
+   922→            "scripts": {"dev": "tsx watch src/index.ts" if ts else "node --watch src/index.js", "start": "node dist/index.js"},
+   923→            "dependencies": {"express": "^4.21.0", "cors": "^2.8.5"},
+   924→            "devDependencies": {"@types/express": "^5.0.0", "@types/cors": "^2.8.0", "tsx": "^4.0.0"} if ts else {},
+   925→        }, indent=2),
+   926→        f"src/index{ext}": (
+   927→            "import express from 'express';\nimport cors from 'cors';\n\n"
+   928→            "const app = express();\nconst PORT = process.env.PORT || 3001;\n\n"
+   929→            "app.use(cors());\napp.use(express.json());\n\n"
+   930→            "// Routes\napp.get('/api/health', (req, res) => {\n"
+   931→            "  res.json({ status: 'ok', timestamp: new Date().toISOString() });\n"
+   932→            "});\n\n"
+   933→            "app.listen(PORT, () => {\n  console.log(`Server running on port ${PORT}`);\n"
+   934→            "});\n"
+   935→        ),
+   936→        ".env.example": "PORT=3001\n",
+   937→        ".gitignore": "node_modules/\ndist/\n.env\n",
+   938→        "README.md": f"# {nombre}\n\nAPI Express creada con Agente Local.\n\n```bash\nnpm install\nnpm run dev\n```\n",
+   939→    }
+   940→
+   941→
+   942→def _generate_static_project(nombre, tailwind):
+   943→    """Genera estructura de sitio estatico."""
+   944→    return {
+   945→        "index.html": (
+   946→            f'<!DOCTYPE html>\n<html lang="es">\n<head>\n'
+   947→            f'  <meta charset="UTF-8" />\n  <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n'
+   948→            f'  <title>{nombre}</title>\n'
+   949→            f'  <link rel="stylesheet" href="styles.css" />\n'
+   950→            f'</head>\n<body>\n'
+   951→            f'  <h1>{nombre}</h1>\n'
+   952→            f'  <p>Sitio creado con Agente Local</p>\n'
+   953→            f'  <script src="script.js"></script>\n'
+   954→            f'</body>\n</html>\n'
+   955→        ),
+   956→        "styles.css": (
+   957→            "* { margin: 0; padding: 0; box-sizing: border-box; }\n"
+   958→            "body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 800px; margin: 0 auto; }\n"
+   959→            "h1 { font-size: 2rem; margin-bottom: 1rem; }\n"
+   960→        ),
+   961→        "script.js": "// JavaScript principal\nconsole.log('App loaded');\n",
+   962→        "README.md": f"# {nombre}\n\nSitio estatico creado con Agente Local.\n",
+   963→    }
+   964→
+   965→
+   966→# ============================================================
+   967→# RESUMEN DE URL (WEB READER)
+   968→# ============================================================
+   969→
+   970→def resumir_url(
+   971→    url: str,
+   972→    max_caracteres: int = 5000,
+   973→    extraer: str = "texto",
+   974→) -> str:
+   975→    """Lee y extrae contenido de una URL web. Puede extraer texto limpio,
+   976→    metadatos (titulo, descripcion, fecha) o el HTML crudo.
+   977→
+   978→    Args:
+   979→        url: URL de la pagina web a leer
+   980→        max_caracteres: Maximo de caracteres a extraer (default 5000)
+   981→        extraer: Que extraer: texto, metadatos, html, links, imagenes
+   982→    """
+   983→    try:
+   984→        validate_url(url)
+   985→    except Exception as e:
+   986→        return f"ERROR: URL invalida: {e}"
+   987→
+   988→    # Obtener HTML
+   989→    html = None
+   990→    try:
+   991→        import urllib.request
+   992→        req = urllib.request.Request(url, headers={
+   993→            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+   994→        })
+   995→        with urllib.request.urlopen(req, timeout=15) as resp:
+   996→            html = resp.read().decode("utf-8", errors="replace")
+   997→    except Exception as e:
+   998→        return f"ERROR: No se pudo acceder a {url}: {e}"
+   999→
+  1000→    if not html:
+  1001→        return f"ERROR: Respuesta vacia de {url}"
+  1002→
+  1003→    # Procesar segun tipo
+  1004→    if extraer == "html":
+  1005→        if len(html) > max_caracteres:
+  1006→            html = html[:max_caracteres] + "... [truncado]"
+  1007→        return f"HTML de {url}:\n{html}"
+  1008→
+  1009→    if extraer == "links":
+  1010→        return _extract_links(html, url)
+  1011→
+  1012→    if extraer == "imagenes" or extraer == "images":
+  1013→        return _extract_images(html, url)
+  1014→
+  1015→    if extraer == "metadatos" or extraer == "metadata":
+  1016→        return _extract_metadata(html, url)
+  1017→
+  1018→    # Default: extraer texto
+  1019→    return _extract_text(html, url, max_caracteres)
+  1020→
+  1021→
+  1022→def _extract_text(html, url, max_chars):
+  1023→    """Extrae texto limpio del HTML."""
+  1024→    try:
+  1025→        from bs4 import BeautifulSoup
+  1026→        soup = BeautifulSoup(html, 'html.parser')
+  1027→
+  1028→        for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside', 'iframe']):
+  1029→            tag.decompose()
+  1030→
+  1031→        title = soup.find('title')
+  1032→        title_text = title.get_text(strip=True) if title else ""
+  1033→
+  1034→        main = soup.find('main') or soup.find('article') or soup.find(class_='content')
+  1035→        if main:
+  1036→            text = main.get_text(separator="\n", strip=True)
+  1037→        else:
+  1038→            text = soup.get_text(separator="\n", strip=True)
+  1039→
+  1040→        lines = [l for l in text.split('\n') if l.strip()]
+  1041→        text = '\n'.join(lines)
+  1042→
+  1043→        header = f"URL: {url}"
+  1044→        if title_text:
+  1045→            header += f"\nTitulo: {title_text}"
+  1046→        header += "\n"
+  1047→
+  1048→        full = header + "\n" + text
+  1049→        if len(full) > max_chars:
+  1050→            full = full[:max_chars] + "\n... [truncado]"
+  1051→
+  1052→        return full
+  1053→
+  1054→    except ImportError:
+  1055→        # Fallback basico
+  1056→        text = re.sub(r'<[^>]+>', ' ', html)
+  1057→        text = re.sub(r'\s+', ' ', text).strip()
+  1058→        if len(text) > max_chars:
+  1059→            text = text[:max_chars] + "... [truncado]"
+  1060→        return f"URL: {url}\n\n{text}"
+  1061→
+  1062→
+  1063→def _extract_metadata(html, url):
+  1064→    """Extrae metadatos de la pagina."""
+  1065→    try:
+  1066→        from bs4 import BeautifulSoup
+  1067→        soup = BeautifulSoup(html, 'html.parser')
+  1068→    except ImportError:
+  1069→        soup = None
+  1070→
+  1071→    meta = {"url": url}
+  1072→
+  1073→    # Titulo
+  1074→    if soup:
+  1075→        title = soup.find('title')
+  1076→        if title:
+  1077→            meta["titulo"] = title.get_text(strip=True)
+  1078→
+  1079→        # Meta tags
+  1080→        for tag in soup.find_all('meta'):
+  1081→            name = tag.get('name', tag.get('property', ''))
+  1082→            content = tag.get('content', '')
+  1083→            if name and content:
+  1084→                meta[name] = content
+  1085→
+  1086→        # Links
+  1087→        links = [a.get('href') for a in soup.find_all('a', href=True)]
+  1088→        meta["total_links"] = len(links)
+  1089→
+  1090→        # Imagenes
+  1091→        images = [img.get('src') for img in soup.find_all('img', src=True)]
+  1092→        meta["total_imagenes"] = len(images)
+  1093→
+  1094→        # Headings
+  1095→        headings = []
+  1096→        for h in soup.find_all(['h1', 'h2', 'h3']):
+  1097→            headings.append(f"  {h.name}: {h.get_text(strip=True)[:80]}")
+  1098→        meta["encabezados"] = headings[:10]
+  1099→
+  1100→    return json.dumps(meta, ensure_ascii=False, indent=2)
+  1101→
+  1102→
+  1103→def _extract_links(html, url):
+  1104→    """Extrae todos los links de la pagina."""
+  1105→    try:
+  1106→        from bs4 import BeautifulSoup
+  1107→        soup = BeautifulSoup(html, 'html.parser')
+  1108→        links = []
+  1109→
+  1110→        for a in soup.find_all('a', href=True):
+  1111→            href = a['href']
+  1112→            text = a.get_text(strip=True)[:80]
+  1113→            links.append({"texto": text, "url": href})
+  1114→
+  1115→        result = f"Links en {url} ({len(links)} encontrados):\n"
+  1116→        for i, link in enumerate(links[:50], 1):
+  1117→            result += f"  {i}. {link['texto']}\n     {link['url']}\n"
+  1118→
+  1119→        return result
+  1120→
+  1121→    except ImportError:
+  1122→        # Fallback regex
+  1123→        hrefs = re.findall(r'href=["\']([^"\']+)["\']', html)
+  1124→        result = f"Links en {url} ({len(hrefs)} encontrados):\n"
+  1125→        for i, href in enumerate(hrefs[:50], 1):
+  1126→            result += f"  {i}. {href}\n"
+  1127→        return result
+  1128→
+  1129→
+  1130→def _extract_images(html, url):
+  1131→    """Extrae todas las imagenes de la pagina."""
+  1132→    try:
+  1133→        from bs4 import BeautifulSoup
+  1134→        soup = BeautifulSoup(html, 'html.parser')
+  1135→        images = []
+  1136→
+  1137→        for img in soup.find_all('img'):
+  1138→            images.append({
+  1139→                "src": img.get('src', ''),
+  1140→                "alt": img.get('alt', ''),
+  1141→                "width": img.get('width', ''),
+  1142→                "height": img.get('height', ''),
+  1143→            })
+  1144→
+  1145→        result = f"Imagenes en {url} ({len(images)} encontradas):\n"
+  1146→        for i, img in enumerate(images[:30], 1):
+  1147→            result += f"  {i}. {img.get('alt', 'Sin alt text')}\n     {img.get('src', '')}\n"
+  1148→
+  1149→        return result
+  1150→
+  1151→    except ImportError:
+  1152→        srcs = re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', html)
+  1153→        alts = re.findall(r'<img[^>]+alt=["\']([^"\']*)["\']', html)
+  1154→        result = f"Imagenes en {url} ({len(srcs)} encontradas):\n"
+  1155→        for i, src in enumerate(srcs[:30], 1):
+  1156→            alt = alts[i-1] if i-1 < len(alts) else ""
+  1157→            result += f"  {i}. {alt or 'Sin alt'}\n     {src}\n"
+  1158→        return result
+  1159→

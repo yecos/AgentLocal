@@ -1,0 +1,813 @@
+     1→     1→"""
+     2→     2→=============================================================
+     3→     3→AGENTE v15 - Herramientas Multimedia
+     4→     4→=============================================================
+     5→     5→Text-to-Speech (TTS):
+     6→     6→- Sintesis de voz desde texto usando modelos locales o APIs
+     7→     7→
+     8→     8→Generacion de imagenes:
+     9→     9→- Generacion de imagenes desde texto (Stable Diffusion via Ollama,
+    10→    10→  DALL-E via API, etc.)
+    11→    11→
+    12→    12→Edicion de imagenes:
+    13→    13→- Redimensionar, recortar, convertir formatos, ajustes basicos
+    14→    14→
+    15→    15→Comprension de video:
+    16→    16→- Extraccion de frames, analisis de video con VLM
+    17→    17→
+    18→    18→Busqueda de imagenes:
+    19→    19→- Busqueda de imagenes en la web (DuckDuckGo, Unsplash)
+    20→    20→
+    21→    21→Dependencias opcionales: Pillow, edge-tts, stable-diffusion
+    22→    22→=============================================================
+    23→    23→"""
+    24→    24→
+    25→    25→import os
+    26→    26→import json
+    27→    27→import logging
+    28→    28→import subprocess
+    29→    29→import tempfile
+    30→    30→from config import REPOS_DIR, LEARN_DIR, MAX_TOOL_OUTPUT, logger
+    31→    31→from utils.security import validate_path, sanitize_input
+    32→    32→
+    33→    33→
+    34→    34→# ============================================================
+    35→    35→# TEXT-TO-SPEECH (TTS)
+    36→    36→# ============================================================
+    37→    37→
+    38→    38→def texto_a_voz(texto: str, ruta: str = "", voz: str = "es",
+    39→    39→                velocidad: float = 1.0, formato: str = "mp3") -> str:
+    40→    40→    """Convierte texto a voz (TTS). Genera un archivo de audio con el texto hablado.
+    41→    41→
+    42→    42→    Args:
+    43→    43→        texto: Texto a convertir a voz
+    44→    44→        ruta: Ruta donde guardar el audio (si vacio, genera automatica)
+    45→    45→        voz: Idioma/voz: es, en, fr, de, pt, it, ja, ko, zh o nombre especifico
+    46→    46→        velocidad: Velocidad de habla (0.5=lenta, 1.0=normal, 2.0=rapida)
+    47→    47→        formato: Formato de salida: mp3, wav
+    48→    48→    """
+    49→    49→    if not texto:
+    50→    50→        return "ERROR: No se proporciono texto para convertir a voz."
+    51→    51→
+    52→    52→    # Generar ruta si no se especifica
+    53→    53→    if not ruta:
+    54→    54→        import time
+    55→    55→        ext = f".{formato}" if formato in ("mp3", "wav") else ".mp3"
+    56→    56→        ruta = os.path.join(LEARN_DIR, f"tts_{int(time.time())}{ext}")
+    57→    57→
+    58→    58→    validation = validate_path(ruta)
+    59→    59→    if validation != ruta:
+    60→    60→        return validation
+    61→    61→
+    62→    62→    dir_name = os.path.dirname(ruta)
+    63→    63→    if dir_name:
+    64→    64→        os.makedirs(dir_name, exist_ok=True)
+    65→    65→
+    66→    66→    # Intentar edge-tts (Microsoft Edge TTS, gratis, alta calidad)
+    67→    67→    result = _tts_edge(texto, ruta, voz, velocidad)
+    68→    68→    if result is not None:
+    69→    69→        return result
+    70→    70→
+    71→    71→    # Intentar pyttsx3 (offline, usa voces del sistema)
+    72→    72→    result = _tts_pyttsx3(texto, ruta, voz, velocidad)
+    73→    73→    if result is not None:
+    74→    74→        return result
+    75→    75→
+    76→    76→    # Intentar gTTS (Google TTS, requiere internet)
+    77→    77→    result = _tts_gtts(texto, ruta, voz)
+    78→    78→    if result is not None:
+    79→    79→        return result
+    80→    80→
+    81→    81→    # Intentar espeak (comando del sistema Linux)
+    82→    82→    result = _tts_espeak(texto, ruta, voz, velocidad)
+    83→    83→    if result is not None:
+    84→    84→        return result
+    85→    85→
+    86→    86→    return ("ERROR: No se pudo generar audio TTS. Instala una opcion:\n"
+    87→    87→            "  pip install edge-tts    (recomendado, alta calidad, gratis)\n"
+    88→    88→            "  pip install pyttsx3     (offline, usa voces del sistema)\n"
+    89→    89→            "  pip install gTTS        (Google TTS, requiere internet)\n"
+    90→    90→            "  sudo apt install espeak (Linux, comando del sistema)")
+    91→    91→
+    92→    92→
+    93→    93→def _tts_edge(texto, ruta, voz, velocidad):
+    94→    94→    """TTS con edge-tts (Microsoft Edge, gratis, alta calidad)."""
+    95→    95→    try:
+    96→    96→        import asyncio
+    97→    97→
+    98→    98→        # Mapear idioma a voz de Edge
+    99→    99→        voice_map = {
+   100→   100→            "es": "es-ES-ElviraNeural",
+   101→   101→            "es-MX": "es-MX-DaliaNeural",
+   102→   102→            "en": "en-US-AriaNeural",
+   103→   103→            "en-GB": "en-GB-SoniaNeural",
+   104→   104→            "fr": "fr-FR-DeniseNeural",
+   105→   105→            "de": "de-DE-KatjaNeural",
+   106→   106→            "pt": "pt-BR-FranciscaNeural",
+   107→   107→            "it": "it-IT-ElsaNeural",
+   108→   108→            "ja": "ja-JP-NanamiNeural",
+   109→   109→            "ko": "ko-KR-SunHiNeural",
+   110→   110→            "zh": "zh-CN-XiaoxiaoNeural",
+   111→   111→            "ru": "ru-RU-SvetlanaNeural",
+   112→   112→        }
+   113→   113→
+   114→   114→        voice_name = voice_map.get(voz, voz)
+   115→   115→        # Si es solo un codigo de 2 letras, usar el mapeo
+   116→   116→        if len(voz) == 2 and voz in voice_map:
+   117→   117→            voice_name = voice_map[voz]
+   118→   118→
+   119→   119→        rate = f"{'+'
+   120→   120→                       if velocidad >= 1.0 else ''}{int((velocidad - 1.0) * 100)}%"
+   121→   121→
+   122→   122→        try:
+   123→   123→            import edge_tts
+   124→   124→        except ImportError:
+   125→   125→            return None
+   126→   126→
+   127→   127→        async def _generate():
+   128→   128→            communicate = edge_tts.Communicate(texto, voice_name, rate=rate)
+   129→   129→            await communicate.save(ruta)
+   130→   130→
+   131→   131→        # Ejecutar async
+   132→   132→        try:
+   133→   133→            loop = asyncio.get_event_loop()
+   134→   134→            if loop.is_running():
+   135→   135→                import concurrent.futures
+   136→   136→                with concurrent.futures.ThreadPoolExecutor() as pool:
+   137→   137→                    pool.submit(lambda: asyncio.run(_generate())).result()
+   138→   138→            else:
+   139→   139→                loop.run_until_complete(_generate())
+   140→   140→        except RuntimeError:
+   141→   141→            asyncio.run(_generate())
+   142→   142→
+   143→   143→        if os.path.exists(ruta) and os.path.getsize(ruta) > 0:
+   144→   144→            size_kb = os.path.getsize(ruta) / 1024
+   145→   145→            return f"Audio TTS creado: {ruta} ({size_kb:.0f} KB, voz: {voice_name})"
+   146→   146→
+   147→   147→    except ImportError:
+   148→   148→        return None
+   149→   149→    except Exception as e:
+   150→   150→        logger.debug(f"edge-tts fallo: {e}")
+   151→   151→        return f"ERROR TTS con edge-tts: {e}"
+   152→   152→
+   153→   153→
+   154→   154→def _tts_pyttsx3(texto, ruta, voz, velocidad):
+   155→   155→    """TTS con pyttsx3 (offline, voces del sistema)."""
+   156→   156→    try:
+   157→   157→        import pyttsx3
+   158→   158→
+   159→   159→        engine = pyttsx3.init()
+   160→   160→
+   161→   161→        # Configurar velocidad
+   162→   162→        rate = engine.getProperty('rate')
+   163→   163→        engine.setProperty('rate', int(rate * velocidad))
+   164→   164→
+   165→   165→        # Buscar voz en el idioma deseado
+   166→   166→        voices = engine.getProperty('voices')
+   167→   167→        for v in voices:
+   168→   168→            if voz.lower() in v.id.lower() or voz.lower() in v.name.lower():
+   169→   169→                engine.setProperty('voice', v.id)
+   170→   170→                break
+   171→   171→
+   172→   172→        # Guardar
+   173→   173→        engine.save_to_file(texto, ruta)
+   174→   174→        engine.runAndWait()
+   175→   175→
+   176→   176→        if os.path.exists(ruta) and os.path.getsize(ruta) > 0:
+   177→   177→            size_kb = os.path.getsize(ruta) / 1024
+   178→   178→            return f"Audio TTS creado: {ruta} ({size_kb:.0f} KB, pyttsx3)"
+   179→   179→
+   180→   180→    except ImportError:
+   181→   181→        return None
+   182→   182→    except Exception as e:
+   183→   183→        logger.debug(f"pyttsx3 fallo: {e}")
+   184→   184→        return f"ERROR TTS con pyttsx3: {e}"
+   185→   185→
+   186→   186→
+   187→   187→def _tts_gtts(texto, ruta, voz):
+   188→   188→    """TTS con gTTS (Google Text-to-Speech, requiere internet)."""
+   189→   189→    try:
+   190→   190→        from gtts import gTTS
+   191→   191→
+   192→   192→        # Mapear idioma
+   193→   193→        lang_map = {
+   194→   194→            "es": "es", "en": "en", "fr": "fr", "de": "de",
+   195→   195→            "pt": "pt", "it": "it", "ja": "ja", "ko": "ko",
+   196→   196→            "zh": "zh-CN", "ru": "ru",
+   197→   197→        }
+   198→   198→        lang = lang_map.get(voz, voz if len(voz) == 2 else "es")
+   199→   199→
+   200→   200→        tts = gTTS(text=texto, lang=lang)
+   201→   201→        tts.save(ruta)
+   202→   202→
+   203→   203→        if os.path.exists(ruta) and os.path.getsize(ruta) > 0:
+   204→   204→            size_kb = os.path.getsize(ruta) / 1024
+   205→   205→            return f"Audio TTS creado: {ruta} ({size_kb:.0f} KB, gTTS, idioma: {lang})"
+   206→   206→
+   207→   207→    except ImportError:
+   208→   208→        return None
+   209→   209→    except Exception as e:
+   210→   210→        logger.debug(f"gTTS fallo: {e}")
+   211→   211→        return f"ERROR TTS con gTTS: {e}"
+   212→   212→
+   213→   213→
+   214→   214→def _tts_espeak(texto, ruta, voz, velocidad):
+   215→   215→    """TTS con espeak (comando del sistema Linux)."""
+   216→   216→    try:
+   217→   217→        speed = int(160 * velocidad)
+   218→   218→        cmd = f'espeak -v {voz} -s {speed} -w "{ruta}" "{texto[:500]}"'
+   219→   219→        result = subprocess.run(cmd, shell=True, capture_output=True, timeout=30)
+   220→   220→
+   221→   221→        if result.returncode == 0 and os.path.exists(ruta):
+   222→   222→            size_kb = os.path.getsize(ruta) / 1024
+   223→   223→            return f"Audio TTS creado: {ruta} ({size_kb:.0f} KB, espeak)"
+   224→   224→
+   225→   225→    except (FileNotFoundError, subprocess.TimeoutExpired):
+   226→   226→        pass
+   227→   227→    except Exception as e:
+   228→   228→        logger.debug(f"espeak fallo: {e}")
+   229→   229→
+   230→   230→    return None
+   231→   231→
+   232→   232→
+   233→   233→# ============================================================
+   234→   234→# GENERACION DE IMAGENES
+   235→   235→# ============================================================
+   236→   236→
+   237→   237→def generar_imagen(descripcion: str, ruta: str = "", tamano: str = "512x512",
+   238→   238→                   estilo: str = "", negativo: str = "") -> str:
+   239→   239→    """Genera una imagen a partir de una descripcion de texto usando IA.
+   240→   240→    Usa modelos locales de Ollama (stable-diffusion, etc.) o APIs.
+   241→   241→
+   242→   242→    Args:
+   243→   243→        descripcion: Descripcion de la imagen a generar (prompt)
+   244→   244→        ruta: Ruta donde guardar la imagen (si vacio, genera automatica)
+   245→   245→        tamano: Tamano de la imagen: 256x256, 512x512, 768x768
+   246→   246→        estilo: Estilo adicional (ej: "realista", "anime", "pintura")
+   247→   247→        negativo: Prompt negativo (que NO incluir)
+   248→   248→    """
+   249→   249→    if not descripcion:
+   250→   250→        return "ERROR: No se proporciono descripcion para generar imagen."
+   251→   251→
+   252→   252→    # Generar ruta si no se especifica
+   253→   253→    if not ruta:
+   254→   254→        import time
+   255→   255→        ruta = os.path.join(LEARN_DIR, f"generated_{int(time.time())}.png")
+   256→   256→
+   257→   257→    validation = validate_path(ruta)
+   258→   258→    if validation != ruta:
+   259→   259→        return validation
+   260→   260→
+   261→   261→    dir_name = os.path.dirname(ruta)
+   262→   262→    if dir_name:
+   263→   263→        os.makedirs(dir_name, exist_ok=True)
+   264→   264→
+   265→   265→    # Construir prompt completo
+   266→   266→    full_prompt = descripcion
+   267→   267→    if estilo:
+   268→   268→        full_prompt += f", {estilo} style"
+   269→   269→
+   270→   270→    # Intentar con Ollama (stable-diffusion)
+   271→   271→    result = _gen_ollama_sd(full_prompt, ruta, tamano, negativo)
+   272→   272→    if result is not None:
+   273→   273→        return result
+   274→   274→
+   275→   275→    # Intentar con Stable Diffusion WebUI API
+   276→   276→    result = _gen_sd_webui(full_prompt, ruta, tamano, negativo)
+   277→   277→    if result is not None:
+   278→   278→        return result
+   279→   279→
+   280→   280→    # Intentar con ComfyUI API
+   281→   281→    result = _gen_comfyui(full_prompt, ruta, tamano, negativo)
+   282→   282→    if result is not None:
+   283→   283→        return result
+   284→   284→
+   285→   285→    return ("ERROR: No se pudo generar imagen. Instala una opcion:\n"
+   286→   286→            "  Ollama + modelo stable-diffusion: ollama pull stable-diffusion\n"
+   287→   287→            "  Automatic1111 WebUI: https://github.com/AUTOMATIC1111/stable-diffusion-webui\n"
+   288→   288→            "  ComfyUI: https://github.com/comfyanonymous/ComfyUI")
+   289→   289→
+   290→   290→
+   291→   291→def _gen_ollama_sd(prompt, ruta, tamano, negativo):
+   292→   292→    """Genera imagen con modelo de Ollama (si hay modelo de imagen instalado)."""
+   293→   293→    try:
+   294→   294→        import urllib.request
+   295→   295→        import json
+   296→   296→
+   297→   297→        # Verificar modelos disponibles
+   298→   298→        try:
+   299→   299→            with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=3) as resp:
+   300→   300→                models = json.loads(resp.read()).get("models", [])
+   301→   301→                image_models = [m["name"] for m in models
+   302→   302→                                if any(kw in m["name"].lower()
+   303→   303→                                       for kw in ["stable", "diffusion", "flux", "image"])]
+   304→   304→        except Exception:
+   305→   305→            image_models = []
+   306→   306→
+   307→   307→        if not image_models:
+   308→   308→            return None
+   309→   309→
+   310→   310→        model = image_models[0]
+   311→   311→        logger.info(f"Generando imagen con Ollama modelo: {model}")
+   312→   312→
+   313→   313→        # Generar via API
+   314→   314→        payload = json.dumps({
+   315→   315→            "model": model,
+   316→   316→            "prompt": prompt,
+   317→   317→            "negative_prompt": negativo,
+   318→   318→        }).encode('utf-8')
+   319→   319→
+   320→   320→        req = urllib.request.Request(
+   321→   321→            "http://localhost:11434/api/generate",
+   322→   322→            data=payload,
+   323→   323→            headers={"Content-Type": "application/json"}
+   324→   324→        )
+   325→   325→
+   326→   326→        with urllib.request.urlopen(req, timeout=120) as resp:
+   327→   327→            response = json.loads(resp.read())
+   328→   328→
+   329→   329→        # Las imagenes de Ollama vienen en base64
+   330→   330→        import base64
+   331→   331→        img_data = response.get("images", [])
+   332→   332→        if img_data:
+   333→   333→            with open(ruta, 'wb') as f:
+   334→   334→                f.write(base64.b64decode(img_data[0]))
+   335→   335→
+   336→   336→            if os.path.exists(ruta):
+   337→   337→                size_kb = os.path.getsize(ruta) / 1024
+   338→   338→                return f"Imagen generada: {ruta} ({size_kb:.0f} KB, modelo: {model})"
+   339→   339→
+   340→   340→    except Exception as e:
+   341→   341→        logger.debug(f"Ollama SD fallo: {e}")
+   342→   342→
+   343→   343→    return None
+   344→   344→
+   345→   345→
+   346→   346→def _gen_sd_webui(prompt, ruta, tamano, negativo):
+   347→   347→    """Genera imagen con Automatic1111 Stable Diffusion WebUI API."""
+   348→   348→    try:
+   349→   349→        import urllib.request
+   350→   350→        import base64
+   351→   351→
+   352→   352→        width, height = tamano.split("x")
+   353→   353→        width, height = int(width), int(height)
+   354→   354→
+   355→   355→        payload = json.dumps({
+   356→   356→            "prompt": prompt,
+   357→   357→            "negative_prompt": negativo,
+   358→   358→            "width": width,
+   359→   359→            "height": height,
+   360→   360→            "steps": 20,
+   361→   361→            "cfg_scale": 7,
+   362→   362→        }).encode('utf-8')
+   363→   363→
+   364→   364→        req = urllib.request.Request(
+   365→   365→            "http://127.0.0.1:7860/sdapi/v1/txt2img",
+   366→   366→            data=payload,
+   367→   367→            headers={"Content-Type": "application/json"}
+   368→   368→        )
+   369→   369→
+   370→   370→        with urllib.request.urlopen(req, timeout=120) as resp:
+   371→   371→            response = json.loads(resp.read())
+   372→   372→
+   373→   373→        images = response.get("images", [])
+   374→   374→        if images:
+   375→   375→            with open(ruta, 'wb') as f:
+   376→   376→                f.write(base64.b64decode(images[0]))
+   377→   377→
+   378→   378→            if os.path.exists(ruta):
+   379→   379→                size_kb = os.path.getsize(ruta) / 1024
+   380→   380→                return f"Imagen generada: {ruta} ({size_kb:.0f} KB, SD WebUI)"
+   381→   381→
+   382→   382→    except Exception as e:
+   383→   383→        logger.debug(f"SD WebUI fallo: {e}")
+   384→   384→
+   385→   385→    return None
+   386→   386→
+   387→   387→
+   388→   388→def _gen_comfyui(prompt, ruta, tamano, negativo):
+   389→   389→    """Genera imagen con ComfyUI API (placeholder)."""
+   390→   390→    # ComfyUI requiere un workflow JSON complejo, se implementa como placeholder
+   391→   391→    return None
+   392→   392→
+   393→   393→
+   394→   394→# ============================================================
+   395→   395→# EDICION DE IMAGENES
+   396→   396→# ============================================================
+   397→   397→
+   398→   398→def editar_imagen(ruta_entrada: str, accion: str = "info",
+   399→   399→                  parametros: str = "{}", ruta_salida: str = "") -> str:
+   400→   400→    """Edita una imagen: redimensionar, recortar, convertir formato, rotar, ajustes.
+   401→   401→
+   402→   402→    Args:
+   403→   403→        ruta_entrada: Ruta de la imagen de entrada
+   404→   404→        accion: Accion: info, redimensionar, recortar, rotar, convertir, espejo, grayscale, ajustar
+   405→   405→        parametros: Parametros en JSON segun la accion
+   406→   406→        ruta_salida: Ruta de salida (si vacio, sobreescribe)
+   407→   407→    """
+   408→   408→    validation = validate_path(ruta_entrada)
+   409→   409→    if validation != ruta_entrada:
+   410→   410→        return validation
+   411→   411→
+   412→   412→    if not os.path.exists(ruta_entrada):
+   413→   413→        return f"ERROR: Archivo no encontrado: {ruta_entrada}"
+   414→   414→
+   415→   415→    try:
+   416→   416→        from PIL import Image, ImageEnhance, ImageFilter
+   417→   417→
+   418→   418→        img = Image.open(ruta_entrada)
+   419→   419→        params = _parse_json(parametros, {})
+   420→   420→        salida = ruta_salida or ruta_entrada
+   421→   421→
+   422→   422→        if accion == "info":
+   423→   423→            return (f"Imagen: {ruta_entrada}\n"
+   424→   424→                    f"  Formato: {img.format}\n"
+   425→   425→                    f"  Tamano: {img.size[0]}x{img.size[1]}\n"
+   426→   426→                    f"  Modo: {img.mode}\n"
+   427→   427→                    f"  Archivo: {os.path.getsize(ruta_entrada)/1024:.0f} KB")
+   428→   428→
+   429→   429→        elif accion == "redimensionar" or accion == "resize":
+   430→   430→            ancho = params.get("ancho", params.get("width"))
+   431→   431→            alto = params.get("alto", params.get("height"))
+   432→   432→            mantener = params.get("mantener_proporcion", params.get("keep_aspect", True))
+   433→   433→
+   434→   434→            if not ancho and not alto:
+   435→   435→                return "ERROR: Especifica ancho y/o alto."
+   436→   436→
+   437→   437→            if mantener and ancho and alto:
+   438→   438→                img.thumbnail((ancho, alto), Image.Resampling.LANCZOS)
+   439→   439→            else:
+   440→   440→                if ancho and alto:
+   441→   441→                    img = img.resize((ancho, alto), Image.Resampling.LANCZOS)
+   442→   442→                elif ancho:
+   443→   443→                    ratio = ancho / img.width
+   444→   444→                    img = img.resize((ancho, int(img.height * ratio)), Image.Resampling.LANCZOS)
+   445→   445→                elif alto:
+   446→   446→                    ratio = alto / img.height
+   447→   447→                    img = img.resize((int(img.width * ratio), alto), Image.Resampling.LANCZOS)
+   448→   448→
+   449→   449→        elif accion == "recortar" or accion == "crop":
+   450→   450→            left = params.get("left", params.get("izquierda", 0))
+   451→   451→            top = params.get("top", params.get("arriba", 0))
+   452→   452→            right = params.get("right", params.get("derecha", img.width))
+   453→   453→            bottom = params.get("bottom", params.get("abajo", img.height))
+   454→   454→            img = img.crop((left, top, right, bottom))
+   455→   455→
+   456→   456→        elif accion == "rotar" or accion == "rotate":
+   457→   457→            angulo = params.get("angulo", params.get("angle", 90))
+   458→   458→            expand = params.get("expand", True)
+   459→   459→            img = img.rotate(angulo, expand=expand)
+   460→   460→
+   461→   461→        elif accion == "convertir" or accion == "convert":
+   462→   462→            fmt = params.get("formato", params.get("format", "PNG")).upper()
+   463→   463→            if not salida.endswith(f".{fmt.lower()}"):
+   464→   464→                salida = salida.rsplit('.', 1)[0] + f".{fmt.lower()}"
+   465→   465→            img.save(salida, format=fmt)
+   466→   466→            size_kb = os.path.getsize(salida) / 1024
+   467→   467→            return f"Imagen convertida: {salida} ({size_kb:.0f} KB, formato: {fmt})"
+   468→   468→
+   469→   469→        elif accion == "espejo" or accion == "flip":
+   470→   470→            direccion = params.get("direccion", params.get("direction", "horizontal"))
+   471→   471→            if direccion == "vertical":
+   472→   472→                img = img.transpose(Image.FLIP_TOP_BOTTOM)
+   473→   473→            else:
+   474→   474→                img = img.transpose(Image.FLIP_LEFT_RIGHT)
+   475→   475→
+   476→   476→        elif accion == "grayscale" or accion == "grises":
+   477→   477→            img = img.convert('L')
+   478→   478→
+   479→   479→        elif accion == "ajustar":
+   480→   480→            brillo = params.get("brillo", params.get("brightness", 1.0))
+   481→   481→            contraste = params.get("contraste", params.get("contrast", 1.0))
+   482→   482→            saturacion = params.get("saturacion", params.get("saturation", 1.0))
+   483→   483→            nitidez = params.get("nitidez", params.get("sharpness", 1.0))
+   484→   484→
+   485→   485→            if brillo != 1.0:
+   486→   486→                img = ImageEnhance.Brightness(img).enhance(brillo)
+   487→   487→            if contraste != 1.0:
+   488→   488→                img = ImageEnhance.Contrast(img).enhance(contraste)
+   489→   489→            if saturacion != 1.0:
+   490→   490→                img = ImageEnhance.Color(img).enhance(saturacion)
+   491→   491→            if nitidez != 1.0:
+   492→   492→                img = ImageEnhance.Sharpness(img).enhance(nitidez)
+   493→   493→
+   494→   494→        else:
+   495→   495→            return (f"ERROR: Accion '{accion}' no reconocida.\n"
+   496→   496→                    "Usar: info, redimensionar, recortar, rotar, convertir, espejo, grayscale, ajustar")
+   497→   497→
+   498→   498→        # Guardar
+   499→   499→        img.save(salida)
+   500→   500→        size_kb = os.path.getsize(salida) / 1024
+   501→   501→        return f"Imagen editada [{accion}]: {salida} ({size_kb:.0f} KB, {img.size[0]}x{img.size[1]})"
+   502→   502→
+   503→   503→    except ImportError:
+   504→   504→        return "ERROR: Pillow no instalado. Instala: pip install Pillow"
+   505→   505→    except Exception as e:
+   506→   506→        return f"ERROR editando imagen: {e}"
+   507→   507→
+   508→   508→
+   509→   509→# ============================================================
+   510→   510→# BUSQUEDA DE IMAGENES
+   511→   511→# ============================================================
+   512→   512→
+   513→   513→def buscar_imagenes(consulta: str, cantidad: int = 5) -> str:
+   514→   514→    """Busca imagenes en internet a partir de una consulta de texto.
+   515→   515→
+   516→   516→    Args:
+   517→   517→        consulta: Texto de busqueda
+   518→   518→        cantidad: Cantidad de imagenes a buscar (max 10)
+   519→   519→    """
+   520→   520→    consulta = sanitize_input(consulta)
+   521→   521→    cantidad = min(max(cantidad, 1), 10)
+   522→   522→
+   523→   523→    # Intentar con DuckDuckGo
+   524→   524→    result = _search_images_ddg(consulta, cantidad)
+   525→   525→    if result:
+   526→   526→        return result
+   527→   527→
+   528→   528→    return "ERROR: No se pudieron buscar imagenes. Verifica la conexion a internet."
+   529→   529→
+   530→   530→
+   531→   531→def _search_images_ddg(consulta, cantidad):
+   532→   532→    """Busca imagenes via DuckDuckGo."""
+   533→   533→    try:
+   534→   534→        from duckduckgo_search import DDGS
+   535→   535→
+   536→   536→        with DDGS() as ddgs:
+   537→   537→            results = list(ddgs.images(consulta, max_results=cantidad))
+   538→   538→
+   539→   539→        if not results:
+   540→   540→            return "No se encontraron imagenes."
+   541→   541→
+   542→   542→        parts = [f"Imagenes para: {consulta} ({len(results)} resultados)\n"]
+   543→   543→        for i, r in enumerate(results):
+   544→   544→            title = r.get("title", "")
+   545→   545→            url = r.get("image", r.get("url", ""))
+   546→   546→            source = r.get("source", "")
+   547→   547→            size = r.get("width", "?")
+   548→   548→            height = r.get("height", "?")
+   549→   549→
+   550→   550→            parts.append(f"{i+1}. {title}")
+   551→   551→            parts.append(f"   URL: {url}")
+   552→   552→            parts.append(f"   Fuente: {source} | Tamano: {size}x{height}")
+   553→   553→
+   554→   554→        return "\n".join(parts)
+   555→   555→
+   556→   556→    except ImportError:
+   557→   557→        # Fallback: scraping basico
+   558→   558→        return _search_images_fallback(consulta, cantidad)
+   559→   559→    except Exception as e:
+   560→   560→        logger.debug(f"DDG image search fallo: {e}")
+   561→   561→        return None
+   562→   562→
+   563→   563→
+   564→   564→def _search_images_fallback(consulta, cantidad):
+   565→   565→    """Fallback: busca imagenes via Unsplash API (sin key)."""
+   566→   566→    try:
+   567→   567→        import urllib.request
+   568→   568→        import urllib.parse
+   569→   569→
+   570→   570→        encoded = urllib.parse.quote(consulta)
+   571→   571→        url = f"https://unsplash.com/napi/search/photos?query={encoded}&per_page={cantidad}"
+   572→   572→
+   573→   573→        req = urllib.request.Request(url, headers={
+   574→   574→            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+   575→   575→        })
+   576→   576→
+   577→   577→        with urllib.request.urlopen(req, timeout=10) as resp:
+   578→   578→            data = json.loads(resp.read())
+   579→   579→
+   580→   580→        results = data.get("results", [])
+   581→   581→        if not results:
+   582→   582→            return "No se encontraron imagenes."
+   583→   583→
+   584→   584→        parts = [f"Imagenes para: {consulta} ({len(results)} resultados)\n"]
+   585→   585→        for i, r in enumerate(results):
+   586→   586→            desc = r.get("description") or r.get("alt_description") or "Sin descripcion"
+   587→   587→            img_url = r.get("urls", {}).get("regular", "")
+   588→   588→            user = r.get("user", {}).get("name", "Unknown")
+   589→   589→
+   590→   590→            parts.append(f"{i+1}. {desc[:80]}")
+   591→   591→            parts.append(f"   URL: {img_url}")
+   592→   592→            parts.append(f"   Autor: {user}")
+   593→   593→
+   594→   594→        return "\n".join(parts)
+   595→   595→
+   596→   596→    except Exception as e:
+   597→   597→        logger.debug(f"Unsplash search fallo: {e}")
+   598→   598→        return None
+   599→   599→
+   600→   600→
+   601→   601→# ============================================================
+   602→   602→# COMPrension DE VIDEO
+   603→   603→# ============================================================
+   604→   604→
+   605→   605→def analizar_video(ruta: str, accion: str = "info",
+   606→   606→                   parametros: str = "{}") -> str:
+   607→   607→    """Analiza un archivo de video: extraer informacion, frames, o analizar con VLM.
+   608→   608→
+   609→   609→    Args:
+   610→   610→        ruta: Ruta del archivo de video
+   611→   611→        accion: Accion: info, frames, analizar, transcribir
+   612→   612→        parametros: Parametros extra en JSON
+   613→   613→    """
+   614→   614→    validation = validate_path(ruta)
+   615→   615→    if validation != ruta:
+   616→   616→        return validation
+   617→   617→
+   618→   618→    if not os.path.exists(ruta):
+   619→   619→        return f"ERROR: Archivo no encontrado: {ruta}"
+   620→   620→
+   621→   621→    params = _parse_json(parametros, {})
+   622→   622→
+   623→   623→    if accion == "info":
+   624→   624→        return _video_info(ruta)
+   625→   625→    elif accion == "frames":
+   626→   626→        return _video_extract_frames(ruta, params)
+   627→   627→    elif accion == "analizar":
+   628→   628→        return _video_analyze_with_vlm(ruta, params)
+   629→   629→    elif accion == "transcribir":
+   630→   630→        return _video_transcribe(ruta, params)
+   631→   631→    else:
+   632→   632→        return (f"ERROR: Accion '{accion}' no reconocida.\n"
+   633→   633→                "Usar: info, frames, analizar, transcribir")
+   634→   634→
+   635→   635→
+   636→   636→def _video_info(ruta):
+   637→   637→    """Extrae informacion del video usando ffprobe."""
+   638→   638→    try:
+   639→   639→        result = subprocess.run(
+   640→   640→            ['ffprobe', '-v', 'quiet', '-print_format', 'json',
+   641→   641→             '-show_format', '-show_streams', ruta],
+   642→   642→            capture_output=True, text=True, timeout=15
+   643→   643→        )
+   644→   644→
+   645→   645→        if result.returncode != 0:
+   646→   646→            return f"ERROR: ffprobe fallo. Asegurate de tener ffmpeg instalado."
+   647→   647→
+   648→   648→        data = json.loads(result.stdout)
+   649→   649→        format_info = data.get("format", {})
+   650→   650→        streams = data.get("streams", [])
+   651→   651→
+   652→   652→        video_stream = next((s for s in streams if s.get("codec_type") == "video"), None)
+   653→   653→        audio_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
+   654→   654→
+   655→   655→        parts = [f"Video: {ruta}"]
+   656→   656→        parts.append(f"  Duracion: {float(format_info.get('duration', 0)):.1f}s")
+   657→   657→        parts.append(f"  Tamano: {int(format_info.get('size', 0))/1024/1024:.1f} MB")
+   658→   658→        parts.append(f"  Formato: {format_info.get('format_name', 'unknown')}")
+   659→   659→
+   660→   660→        if video_stream:
+   661→   661→            parts.append(f"  Video: {video_stream.get('codec_name', '?')} "
+   662→   662→                         f"{video_stream.get('width', '?')}x{video_stream.get('height', '?')} "
+   663→   663→                         f"@ {video_stream.get('r_frame_rate', '?')} fps")
+   664→   664→
+   665→   665→        if audio_stream:
+   666→   666→            parts.append(f"  Audio: {audio_stream.get('codec_name', '?')} "
+   667→   667→                         f"{audio_stream.get('sample_rate', '?')} Hz")
+   668→   668→
+   669→   669→        return "\n".join(parts)
+   670→   670→
+   671→   671→    except FileNotFoundError:
+   672→   672→        return "ERROR: ffmpeg/ffprobe no instalado. Instala: sudo apt install ffmpeg"
+   673→   673→    except Exception as e:
+   674→   674→        return f"ERROR obteniendo info del video: {e}"
+   675→   675→
+   676→   676→
+   677→   677→def _video_extract_frames(ruta, params):
+   678→   678→    """Extrae frames del video como imagenes PNG."""
+   679→   679→    try:
+   680→   680→        interval = params.get("intervalo", params.get("interval", 5))  # cada N segundos
+   681→   681→        max_frames = params.get("max", 10)
+   682→   682→        output_dir = params.get("output_dir", LEARN_DIR)
+   683→   683→
+   684→   684→        os.makedirs(output_dir, exist_ok=True)
+   685→   685→
+   686→   686→        base_name = os.path.splitext(os.path.basename(ruta))[0]
+   687→   687→        pattern = os.path.join(output_dir, f"{base_name}_frame_%03d.png")
+   688→   688→
+   689→   689→        cmd = [
+   690→   690→            'ffmpeg', '-i', ruta,
+   691→   691→            '-vf', f'fps=1/{interval}',
+   692→   692→            '-frames:v', str(max_frames),
+   693→   693→            '-q:v', '2',
+   694→   694→            pattern
+   695→   695→        ]
+   696→   696→
+   697→   697→        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+   698→   698→
+   699→   699→        # Contar frames generados
+   700→   700→        frames = [f for f in os.listdir(output_dir)
+   701→   701→                  if f.startswith(base_name) and f.endswith('.png')]
+   702→   702→
+   703→   703→        if frames:
+   704→   704→            return (f"Frames extraidos: {len(frames)} de {ruta}\n"
+   705→   705→                    f"  Intervalo: cada {interval}s\n"
+   706→   706→                    f"  Directorio: {output_dir}\n"
+   707→   707→                    f"  Archivos: {', '.join(sorted(frames)[:5])}"
+   708→   708→                    + (f" ... y {len(frames)-5} mas" if len(frames) > 5 else ""))
+   709→   709→
+   710→   710→        return "ERROR: No se pudieron extraer frames del video."
+   711→   711→
+   712→   712→    except FileNotFoundError:
+   713→   713→        return "ERROR: ffmpeg no instalado. Instala: sudo apt install ffmpeg"
+   714→   714→    except Exception as e:
+   715→   715→        return f"ERROR extrayendo frames: {e}"
+   716→   716→
+   717→   717→
+   718→   718→def _video_analyze_with_vlm(ruta, params):
+   719→   719→    """Analiza video extrayendo frames y usando VLM para describir."""
+   720→   720→    try:
+   721→   721→        # Extraer 3 frames clave (inicio, medio, final)
+   722→   722→        temp_dir = tempfile.mkdtemp()
+   723→   723→        base_name = "frame"
+   724→   724→
+   725→   725→        # Obtener duracion
+   726→   726→        probe = subprocess.run(
+   727→   727→            ['ffprobe', '-v', 'quiet', '-print_format', 'json',
+   728→   728→             '-show_format', ruta],
+   729→   729→            capture_output=True, text=True, timeout=10
+   730→   730→        )
+   731→   731→        duration = float(json.loads(probe.stdout).get("format", {}).get("duration", 0))
+   732→   732→
+   733→   733→        frames_info = []
+   734→   734→        positions = [0, duration * 0.5, duration * 0.9] if duration > 0 else [0]
+   735→   735→
+   736→   736→        for i, pos in enumerate(positions[:3]):
+   737→   737→            frame_path = os.path.join(temp_dir, f"{base_name}_{i}.png")
+   738→   738→            cmd = ['ffmpeg', '-ss', str(pos), '-i', ruta,
+   739→   739→                   '-frames:v', '1', '-q:v', '2', frame_path]
+   740→   740→            subprocess.run(cmd, capture_output=True, timeout=30)
+   741→   741→
+   742→   742→            if os.path.exists(frame_path):
+   743→   743→                frames_info.append((pos, frame_path))
+   744→   744→
+   745→   745→        if not frames_info:
+   746→   746→            return "ERROR: No se pudieron extraer frames para analizar."
+   747→   747→
+   748→   748→        # Analizar cada frame con VLM
+   749→   749→        results = [f"Analisis de video: {ruta}\nDuracion: {duration:.1f}s\n"]
+   750→   750→
+   751→   751→        for pos, frame_path in frames_info:
+   752→   752→            try:
+   753→   753→                from llm import ollama
+   754→   754→                desc = ollama.generate_with_image(
+   755→   755→                    f"Describe lo que ves en este frame de video. "
+   756→   756→                    f"Timestamp: {pos:.1f}s",
+   757→   757→                    frame_path
+   758→   758→                )
+   759→   759→                results.append(f"[{pos:.1f}s] {desc}")
+   760→   760→            except Exception as e:
+   761→   761→                results.append(f"[{pos:.1f}s] (VLM no disponible: {e})")
+   762→   762→
+   763→   763→        # Limpiar
+   764→   764→        import shutil
+   765→   765→        shutil.rmtree(temp_dir, ignore_errors=True)
+   766→   766→
+   767→   767→        return "\n".join(results)
+   768→   768→
+   769→   769→    except Exception as e:
+   770→   770→        return f"ERROR analizando video: {e}"
+   771→   771→
+   772→   772→
+   773→   773→def _video_transcribe(ruta, params):
+   774→   774→    """Extrae el audio de un video y lo transcribe."""
+   775→   775→    try:
+   776→   776→        # Extraer audio
+   777→   777→        temp_audio = tempfile.mktemp(suffix=".wav")
+   778→   778→        cmd = ['ffmpeg', '-i', ruta, '-vn', '-acodec', 'pcm_s16le',
+   779→   779→               '-ar', '16000', '-ac', '1', temp_audio]
+   780→   780→        subprocess.run(cmd, capture_output=True, timeout=120)
+   781→   781→
+   782→   782→        if not os.path.exists(temp_audio):
+   783→   783→            return "ERROR: No se pudo extraer el audio del video."
+   784→   784→
+   785→   785→        # Transcribir
+   786→   786→        from .percepcion import transcribir_audio
+   787→   787→        result = transcribir_audio(temp_audio, params.get("idioma", "es"))
+   788→   788→
+   789→   789→        # Limpiar
+   790→   790→        try:
+   791→   791→            os.remove(temp_audio)
+   792→   792→        except Exception:
+   793→   793→            pass
+   794→   794→
+   795→   795→        return f"Transcripcion de video: {ruta}\n\n{result}"
+   796→   796→
+   797→   797→    except Exception as e:
+   798→   798→        return f"ERROR transcribiendo video: {e}"
+   799→   799→
+   800→   800→
+   801→   801→# ============================================================
+   802→   802→# UTILIDADES
+   803→   803→# ============================================================
+   804→   804→
+   805→   805→def _parse_json(s, default=None):
+   806→   806→    """Parsea JSON de forma segura."""
+   807→   807→    if not s or s in ("{}", "[]", ""):
+   808→   808→        return default if default is not None else {}
+   809→   809→    try:
+   810→   810→        return json.loads(s)
+   811→   811→    except (json.JSONDecodeError, TypeError):
+   812→   812→        return default if default is not None else {}
+   813→   813→

@@ -1,0 +1,926 @@
+     1→     1→"""
+     2→     2→=============================================================
+     3→     3→AGENTE v15 - Herramientas de Visualizacion Avanzada
+     4→     4→=============================================================
+     5→     5→15+ tipos de graficos y dashboards:
+     6→     6→- Bar, Line, Pie, Scatter, Histogram, Area (existentes, mejorados)
+     7→     7→- Heatmap, Radar, Candlestick, Boxplot, Waterfall
+     8→     8→- Regression, Distribution, Violin, Stem
+     9→     9→- Dashboards multi-grafico
+    10→    10→- Exportacion PNG/SVG con calidad profesional
+    11→    11→
+    12→    12→Dependencias: matplotlib, numpy (opcionales pero recomendadas)
+    13→    13→=============================================================
+    14→    14→"""
+    15→    15→
+    16→    16→import os
+    17→    17→import json
+    18→    18→import logging
+    19→    19→from config import REPOS_DIR, logger
+    20→    20→from utils.security import validate_path
+    21→    21→
+    22→    22→
+    23→    23→# ============================================================
+    24→    24→# CONFIGURACION DE VISUALIZACION
+    25→    25→# ============================================================
+    26→    26→
+    27→    27→# Paleta de colores profesional
+    28→    28→PALETTE = {
+    29→    29→    "primary": "#4472C4",
+    30→    30→    "secondary": "#ED7D31",
+    31→    31→    "tertiary": "#A5A5A5",
+    32→    32→    "success": "#70AD47",
+    33→    33→    "warning": "#FFC000",
+    34→    34→    "danger": "#FF6B6B",
+    35→    35→    "info": "#5B9BD5",
+    36→    36→    "purple": "#9B59B6",
+    37→    37→    "dark_blue": "#264478",
+    38→    38→    "teal": "#1ABC9C",
+    39→    39→}
+    40→    40→
+    41→    41→CHART_COLORS = [
+    42→    42→    "#4472C4", "#ED7D31", "#A5A5A5", "#FFC000", "#5B9BD5",
+    43→    43→    "#70AD47", "#264478", "#9B59B6", "#1ABC9C", "#FF6B6B",
+    44→    44→    "#E74C3C", "#2ECC71", "#3498DB", "#F39C12", "#8E44AD",
+    45→    45→]
+    46→    46→
+    47→    47→# Tipos de grafico soportados
+    48→    48→SUPPORTED_CHART_TYPES = [
+    49→    49→    "bar", "line", "pie", "scatter", "histogram", "area",
+    50→    50→    "heatmap", "radar", "candlestick", "boxplot", "waterfall",
+    51→    51→    "regression", "distribution", "violin", "stem",
+    52→    52→]
+    53→    53→
+    54→    54→
+    55→    55→def crear_grafico_avanzado(
+    56→    56→    ruta: str,
+    57→    57→    tipo: str = "bar",
+    58→    58→    datos: str = "",
+    59→    59→    titulo: str = "",
+    60→    60→    xlabel: str = "",
+    61→    61→    ylabel: str = "",
+    62→    62→    opciones: str = "{}",
+    63→    63→) -> str:
+    64→    64→    """Crea un grafico avanzado y lo guarda como imagen PNG/SVG.
+    65→    65→    Soporta 15+ tipos: bar, line, pie, scatter, histogram, area,
+    66→    66→    heatmap, radar, candlestick, boxplot, waterfall, regression,
+    67→    67→    distribution, violin, stem.
+    68→    68→
+    69→    69→    Args:
+    70→    70→        ruta: Ruta donde guardar la imagen (PNG o SVG)
+    71→    71→        tipo: Tipo de grafico (ver lista arriba)
+    72→    72→        datos: Datos en formato JSON o CSV
+    73→    73→        titulo: Titulo del grafico
+    74→    74→        xlabel: Etiqueta del eje X
+    75→    75→        ylabel: Etiqueta del eje Y
+    76→    76→        opciones: Opciones extra en JSON (colores, leyenda, grid, etc.)
+    77→    77→    """
+    78→    78→    validation = validate_path(ruta)
+    79→    79→    if validation != ruta:
+    80→    80→        return validation
+    81→    81→
+    82→    82→    tipo = tipo.lower().strip()
+    83→    83→    if tipo not in SUPPORTED_CHART_TYPES:
+    84→    84→        return (f"ERROR: Tipo '{tipo}' no soportado. "
+    85→    85→                f"Usar: {', '.join(SUPPORTED_CHART_TYPES)}")
+    86→    86→
+    87→    87→    try:
+    88→    88→        import matplotlib
+    89→    89→        matplotlib.use('Agg')
+    90→    90→        import matplotlib.pyplot as plt
+    91→    91→        import matplotlib.font_manager as fm
+    92→    92→        import numpy as np
+    93→    93→
+    94→    94→        # Configurar fuentes
+    95→    95→        _setup_fonts()
+    96→    96→
+    97→    97→        # Parsear datos y opciones
+    98→    98→        parsed_data = _parse_chart_data(datos)
+    99→    99→        opts = _parse_options(opciones)
+   100→   100→
+   101→   101→        # Crear grafico
+   102→   102→        fig, ax = plt.subplots(figsize=opts.get("figsize", (10, 6)))
+   103→   103→        fig.patch.set_facecolor(opts.get("bg_color", "white"))
+   104→   104→
+   105→   105→        # Dispatch por tipo
+   106→   106→        handler = _CHART_HANDLERS.get(tipo)
+   107→   107→        if handler:
+   108→   108→            handler(ax, parsed_data, opts, title=titulo, xlabel=xlabel, ylabel=ylabel)
+   109→   109→        else:
+   110→   110→            plt.close()
+   111→   111→            return f"ERROR: Handler no implementado para tipo '{tipo}'"
+   112→   112→
+   113→   113→        # Aplicar estilo comun
+   114→   114→        _apply_common_style(ax, titulo, xlabel, ylabel, opts)
+   115→   115→
+   116→   116→        # Guardar
+   117→   117→        dir_name = os.path.dirname(ruta)
+   118→   118→        if dir_name:
+   119→   119→            os.makedirs(dir_name, exist_ok=True)
+   120→   120→
+   121→   121→        dpi = opts.get("dpi", 150)
+   122→   122→        bbox = opts.get("bbox_inches", "tight")
+   123→   123→        plt.tight_layout()
+   124→   124→        plt.savefig(ruta, dpi=dpi, bbox_inches=bbox,
+   125→   125→                    facecolor=fig.get_facecolor(), edgecolor='none')
+   126→   126→        plt.close()
+   127→   127→
+   128→   128→        size_kb = os.path.getsize(ruta) / 1024
+   129→   129→        return f"Grafico [{tipo}] creado: {ruta} ({size_kb:.0f} KB)"
+   130→   130→
+   131→   131→    except ImportError as e:
+   132→   132→        return (f"ERROR: Faltan dependencias para visualizacion: {e}\n"
+   133→   133→                "Instala: pip install matplotlib numpy")
+   134→   134→    except Exception as e:
+   135→   135→        logger.error(f"Error creando grafico: {e}")
+   136→   136→        return f"ERROR creando grafico: {e}"
+   137→   137→
+   138→   138→
+   139→   139→def crear_dashboard(
+   140→   140→    ruta: str,
+   141→   141→    graficos: str = "[]",
+   142→   142→    titulo: str = "Dashboard",
+   143→   143→    layout: str = "auto",
+   144→   144→    opciones: str = "{}",
+   145→   145→) -> str:
+   146→   146→    """Crea un dashboard con multiples graficos en una sola imagen.
+   147→   147→    Cada grafico se define como un objeto JSON con tipo, datos y opciones.
+   148→   148→
+   149→   149→    Args:
+   150→   150→        ruta: Ruta donde guardar el dashboard (PNG o SVG)
+   151→   151→        graficos: Lista JSON de graficos, cada uno con: tipo, datos, titulo, opciones
+   152→   152→        titulo: Titulo del dashboard
+   153→   153→        layout: Layout del grid: 'auto', '2x2', '3x2', '2x3', '1x3', '3x1'
+   154→   154→        opciones: Opciones globales en JSON
+   155→   155→    """
+   156→   156→    validation = validate_path(ruta)
+   157→   157→    if validation != ruta:
+   158→   158→        return validation
+   159→   159→
+   160→   160→    try:
+   161→   161→        import matplotlib
+   162→   162→        matplotlib.use('Agg')
+   163→   163→        import matplotlib.pyplot as plt
+   164→   164→        import matplotlib.font_manager as fm
+   165→   165→        import numpy as np
+   166→   166→
+   167→   167→        _setup_fonts()
+   168→   168→        opts = _parse_options(opciones)
+   169→   169→
+   170→   170→        # Parsear lista de graficos
+   171→   171→        charts = _parse_dashboard_charts(graficos)
+   172→   172→        if not charts:
+   173→   173→            return "ERROR: No se proporcionaron graficos. Formato: [{tipo, datos, titulo}, ...]"
+   174→   174→
+   175→   175→        n = len(charts)
+   176→   176→
+   177→   177→        # Calcular layout
+   178→   178→        rows, cols = _calc_layout(n, layout)
+   179→   179→
+   180→   180→        # Crear figura
+   181→   181→        fig_width = cols * 5
+   182→   182→        fig_height = rows * 4 + 1.5  # Extra para titulo
+   183→   183→        fig, axes = plt.subplots(rows, cols, figsize=(fig_width, fig_height))
+   184→   184→        fig.suptitle(titulo, fontsize=16, fontweight='bold', y=0.98)
+   185→   185→
+   186→   186→        # Aplanar axes para iteracion
+   187→   187→        if rows == 1 and cols == 1:
+   188→   188→            axes = [[axes]]
+   189→   189→        elif rows == 1:
+   190→   190→            axes = [axes]
+   191→   191→        elif cols == 1:
+   192→   192→            axes = [[ax] for ax in axes]
+   193→   193→
+   194→   194→        # Renderizar cada grafico
+   195→   195→        for idx, chart in enumerate(charts):
+   196→   196→            row = idx // cols
+   197→   197→            col = idx % cols
+   198→   198→            if row < rows and col < cols:
+   199→   199→                ax = axes[row][col]
+   200→   200→                chart_type = chart.get("tipo", "bar")
+   201→   201→                chart_data = _parse_chart_data(chart.get("datos", ""))
+   202→   202→                chart_opts = _parse_options(chart.get("opciones", "{}"))
+   203→   203→                chart_title = chart.get("titulo", "")
+   204→   204→
+   205→   205→                handler = _CHART_HANDLERS.get(chart_type)
+   206→   206→                if handler:
+   207→   207→                    handler(ax, chart_data, chart_opts)
+   208→   208→                    _apply_common_style(ax, chart_title, "", "", chart_opts)
+   209→   209→                else:
+   210→   210→                    ax.text(0.5, 0.5, f"Tipo '{chart_type}' no soportado",
+   211→   211→                            ha='center', va='center', transform=ax.transAxes)
+   212→   212→                    ax.set_title(chart_title)
+   213→   213→
+   214→   214→        # Ocultar axes vacios
+   215→   215→        for idx in range(n, rows * cols):
+   216→   216→            row = idx // cols
+   217→   217→            col = idx % cols
+   218→   218→            if row < rows and col < cols:
+   219→   219→                axes[row][col].set_visible(False)
+   220→   220→
+   221→   221→        # Guardar
+   222→   222→        dir_name = os.path.dirname(ruta)
+   223→   223→        if dir_name:
+   224→   224→            os.makedirs(dir_name, exist_ok=True)
+   225→   225→
+   226→   226→        plt.tight_layout(rect=[0, 0, 1, 0.95])
+   227→   227→        plt.savefig(ruta, dpi=150, bbox_inches="tight",
+   228→   228→                    facecolor='white', edgecolor='none')
+   229→   229→        plt.close()
+   230→   230→
+   231→   231→        size_kb = os.path.getsize(ruta) / 1024
+   232→   232→        return f"Dashboard creado: {ruta} ({size_kb:.0f} KB, {n} graficos, layout {rows}x{cols})"
+   233→   233→
+   234→   234→    except ImportError:
+   235→   235→        return "ERROR: Instala matplotlib y numpy: pip install matplotlib numpy"
+   236→   236→    except Exception as e:
+   237→   237→        logger.error(f"Error creando dashboard: {e}")
+   238→   238→        return f"ERROR creando dashboard: {e}"
+   239→   239→
+   240→   240→
+   241→   241→# ============================================================
+   242→   242→# HANDLERS DE GRAFICOS
+   243→   243→# ============================================================
+   244→   244→
+   245→   245→def _chart_bar(ax, data, opts, **kwargs):
+   246→   246→    """Grafico de barras (horizontal/vertical, agrupado, apilado)."""
+   247→   247→    labels = data.get("labels", [])
+   248→   248→    values = data.get("values", [])
+   249→   249→    if not values:
+   250→   250→        return
+   251→   251→
+   252→   252→    horizontal = opts.get("horizontal", False)
+   253→   253→    stacked = opts.get("stacked", False)
+   254→   254→
+   255→   255→    # Multiple series?
+   256→   256→    if isinstance(values[0], list):
+   257→   257→        # Datos multi-serie
+   258→   258→        x = np.arange(len(labels))
+   259→   259→        width = 0.8 / len(values)
+   260→   260→        colors = opts.get("colors", CHART_COLORS)
+   261→   261→        series_names = opts.get("series_names", [f"Serie {i+1}" for i in range(len(values))])
+   262→   262→
+   263→   263→        for i, serie in enumerate(values):
+   264→   264→            offset = (i - len(values)/2 + 0.5) * width
+   265→   265→            if stacked:
+   266→   266→                if i == 0:
+   267→   267→                    bottom = np.zeros(len(labels))
+   268→   268→                else:
+   269→   269→                    bottom = np.array(values[i-1]) if i == 1 else np.add.reduce(values[:i])
+   270→   270→                ax.bar(x, serie, width, label=series_names[i],
+   271→   271→                       color=colors[i % len(colors)], bottom=bottom)
+   272→   272→            else:
+   273→   273→                if horizontal:
+   274→   274→                    ax.barh(x + offset, serie, width, label=series_names[i],
+   275→   275→                            color=colors[i % len(colors)])
+   276→   276→                else:
+   277→   277→                    ax.bar(x + offset, serie, width, label=series_names[i],
+   278→   278→                           color=colors[i % len(colors)])
+   279→   279→        ax.set_xticks(x)
+   280→   280→        ax.set_xticklabels(labels, rotation=45, ha='right')
+   281→   281→        ax.legend(loc='best', fontsize=8)
+   282→   282→    else:
+   283→   283→        color = opts.get("color", PALETTE["primary"])
+   284→   284→        if horizontal:
+   285→   285→            ax.barh(labels, values, color=color)
+   286→   286→        else:
+   287→   287→            ax.bar(labels, values, color=color)
+   288→   288→            plt.xticks(rotation=45, ha='right')
+   289→   289→
+   290→   290→
+   291→   291→def _chart_line(ax, data, opts, **kwargs):
+   292→   292→    """Grafico de lineas (simple, multi-serie, con marcadores)."""
+   293→   293→    labels = data.get("labels", [])
+   294→   294→    values = data.get("values", [])
+   295→   295→
+   296→   296→    if isinstance(values[0], list):
+   297→   297→        # Multi-serie
+   298→   298→        colors = opts.get("colors", CHART_COLORS)
+   299→   299→        series_names = opts.get("series_names", [f"Serie {i+1}" for i in range(len(values))])
+   300→   300→        markers = opts.get("markers", ['o', 's', '^', 'D', 'v', '<', '>'])
+   301→   301→
+   302→   302→        for i, serie in enumerate(values):
+   303→   303→            marker = markers[i % len(markers)] if opts.get("show_markers", True) else None
+   304→   304→            ax.plot(labels, serie, marker=marker, color=colors[i % len(colors)],
+   305→   305→                    linewidth=2, label=series_names[i], markersize=5)
+   306→   306→            if opts.get("fill", False):
+   307→   307→                ax.fill_between(range(len(labels)), serie, alpha=0.1,
+   308→   308→                                color=colors[i % len(colors)])
+   309→   309→        ax.legend(loc='best', fontsize=8)
+   310→   310→    else:
+   311→   311→        color = opts.get("color", PALETTE["primary"])
+   312→   312→        marker = 'o' if opts.get("show_markers", True) else None
+   313→   313→        ax.plot(labels, values, marker=marker, color=color, linewidth=2, markersize=5)
+   314→   314→        if opts.get("fill", False):
+   315→   315→            ax.fill_between(range(len(labels)), values, alpha=0.1, color=color)
+   316→   316→
+   317→   317→    plt.xticks(rotation=45, ha='right')
+   318→   318→
+   319→   319→
+   320→   320→def _chart_pie(ax, data, opts, **kwargs):
+   321→   321→    """Grafico de pie/donut."""
+   322→   322→    labels = data.get("labels", [])
+   323→   323→    values = data.get("values", [])
+   324→   324→
+   325→   325→    colors = opts.get("colors", CHART_COLORS)
+   326→   326→    explode = opts.get("explode", None)
+   327→   327→    donut = opts.get("donut", False)
+   328→   328→
+   329→   329→    if donut:
+   330→   330→        # Crear donut
+   331→   331→        wedges, texts, autotexts = ax.pie(
+   332→   332→            values, labels=labels, autopct='%1.1f%%',
+   333→   333→            colors=colors[:len(labels)], pctdistance=0.75,
+   334→   334→            explode=explode, startangle=90
+   335→   335→        )
+   336→   336→        # Agujero central
+   337→   337→        centre_circle = plt.Circle((0, 0), 0.50, fc='white')
+   338→   338→        ax.add_artist(centre_circle)
+   339→   339→    else:
+   340→   340→        ax.pie(values, labels=labels, autopct='%1.1f%%',
+   341→   341→               colors=colors[:len(labels)], explode=explode,
+   342→   342→               startangle=90, shadow=opts.get("shadow", False))
+   343→   343→
+   344→   344→    ax.axis('equal')
+   345→   345→
+   346→   346→
+   347→   347→def _chart_scatter(ax, data, opts, **kwargs):
+   348→   348→    """Grafico de dispersion con opcion de burbujas."""
+   349→   349→    x_data = data.get("x", data.get("values", []))
+   350→   350→    y_data = data.get("y", [])
+   351→   351→    sizes = data.get("sizes", None)
+   352→   352→    colors_data = data.get("colors", None)
+   353→   353→
+   354→   354→    if not y_data and isinstance(x_data, list) and len(x_data) > 0:
+   355→   355→        if isinstance(x_data[0], list) and len(x_data) >= 2:
+   356→   356→            y_data = x_data[1]
+   357→   357→            x_data = x_data[0]
+   358→   358→
+   359→   359→    if not y_data:
+   360→   360→        # Fallback: usar indices como X
+   361→   361→        y_data = x_data
+   362→   362→        x_data = list(range(len(y_data)))
+   363→   363→
+   364→   364→    color = opts.get("color", PALETTE["primary"])
+   365→   365→    size = opts.get("size", 50)
+   366→   366→
+   367→   367→    if sizes:
+   368→   368→        scatter = ax.scatter(x_data, y_data, s=sizes, c=colors_data or color,
+   369→   369→                             alpha=0.6, edgecolors='white', linewidth=0.5)
+   370→   370→    else:
+   371→   371→        ax.scatter(x_data, y_data, s=size, c=color, alpha=0.7, edgecolors='white')
+   372→   372→
+   373→   373→    if opts.get("trendline", False):
+   374→   374→        _add_trendline(ax, x_data, y_data)
+   375→   375→
+   376→   376→
+   377→   377→def _chart_histogram(ax, data, opts, **kwargs):
+   378→   378→    """Histograma con opciones de bins y KDE."""
+   379→   379→    values = data.get("values", [])
+   380→   380→
+   381→   381→    bins = opts.get("bins", min(30, max(5, len(values) // 5)))
+   382→   382→    color = opts.get("color", PALETTE["primary"])
+   383→   383→    edgecolor = opts.get("edgecolor", "white")
+   384→   384→
+   385→   385→    ax.hist(values, bins=bins, color=color, edgecolor=edgecolor, alpha=0.8)
+   386→   386→
+   387→   387→    if opts.get("kde", False):
+   388→   388→        try:
+   389→   389→            from scipy.stats import gaussian_kde
+   390→   390→            import numpy as np
+   391→   391→            kde = gaussian_kde(values)
+   392→   392→            x_range = np.linspace(min(values), max(values), 200)
+   393→   393→            ax.plot(x_range, kde(x_range) * len(values) * (max(values) - min(values)) / bins,
+   394→   394→                    color='red', linewidth=2, label='KDE')
+   395→   395→            ax.legend(loc='best')
+   396→   396→        except ImportError:
+   397→   397→            pass
+   398→   398→
+   399→   399→
+   400→   400→def _chart_area(ax, data, opts, **kwargs):
+   401→   401→    """Grafico de area (simple o apilado)."""
+   402→   402→    labels = data.get("labels", [])
+   403→   403→    values = data.get("values", [])
+   404→   404→    colors = opts.get("colors", CHART_COLORS)
+   405→   405→
+   406→   406→    if isinstance(values[0], list):
+   407→   407→        # Multi-serie apilada
+   408→   408→        series_names = opts.get("series_names", [f"Serie {i+1}" for i in range(len(values))])
+   409→   409→        ax.stackplot(range(len(labels)), *values, labels=series_names,
+   410→   410→                     colors=colors[:len(values)], alpha=0.8)
+   411→   411→        ax.legend(loc='best', fontsize=8)
+   412→   412→    else:
+   413→   413→        ax.fill_between(range(len(labels)), values, alpha=0.3, color=colors[0])
+   414→   414→        ax.plot(range(len(labels)), values, color=colors[0], linewidth=2)
+   415→   415→
+   416→   416→    ax.set_xticks(range(len(labels)))
+   417→   417→    ax.set_xticklabels(labels, rotation=45, ha='right')
+   418→   418→
+   419→   419→
+   420→   420→def _chart_heatmap(ax, data, opts, **kwargs):
+   421→   421→    """Mapa de calor (heatmap) con anotaciones."""
+   422→   422→    matrix = data.get("matrix", data.get("values", []))
+   423→   423→    row_labels = data.get("row_labels", data.get("labels", []))
+   424→   424→    col_labels = data.get("col_labels", [])
+   425→   425→
+   426→   426→    if not matrix:
+   427→   427→        return
+   428→   428→
+   429→   429→    import numpy as np
+   430→   430→    mat = np.array(matrix, dtype=float)
+   431→   431→
+   432→   432→    cmap = opts.get("cmap", "YlOrRd")
+   433→   433→    annot = opts.get("annot", True)
+   434→   434→    fmt = opts.get("fmt", ".1f")
+   435→   435→
+   436→   436→    im = ax.imshow(mat, cmap=cmap, aspect='auto')
+   437→   437→
+   438→   438→    if annot:
+   439→   439→        for i in range(mat.shape[0]):
+   440→   440→            for j in range(mat.shape[1]):
+   441→   441→                val = mat[i, j]
+   442→   442→                text_color = "white" if val > np.max(mat) * 0.7 else "black"
+   443→   443→                ax.text(j, i, f"{val:{fmt}}", ha="center", va="center",
+   444→   444→                        color=text_color, fontsize=8)
+   445→   445→
+   446→   446→    if col_labels:
+   447→   447→        ax.set_xticks(range(len(col_labels)))
+   448→   448→        ax.set_xticklabels(col_labels, rotation=45, ha='right')
+   449→   449→    if row_labels:
+   450→   450→        ax.set_yticks(range(len(row_labels)))
+   451→   451→        ax.set_yticklabels(row_labels)
+   452→   452→
+   453→   453→    plt.colorbar(im, ax=ax, shrink=0.8)
+   454→   454→
+   455→   455→
+   456→   456→def _chart_radar(ax, data, opts, **kwargs):
+   457→   457→    """Grafico radar/spider."""
+   458→   458→    labels = data.get("labels", [])
+   459→   459→    values = data.get("values", [])
+   460→   460→
+   461→   461→    if not labels or not values:
+   462→   462→        return
+   463→   463→
+   464→   464→    import numpy as np
+   465→   465→
+   466→   466→    # Multi-serie?
+   467→   467→    if isinstance(values[0], list):
+   468→   468→        series = values
+   469→   469→        series_names = opts.get("series_names", [f"Serie {i+1}" for i in range(len(series))])
+   470→   470→        colors = opts.get("colors", CHART_COLORS)
+   471→   471→    else:
+   472→   472→        series = [values]
+   473→   473→        series_names = ["Valores"]
+   474→   474→        colors = [opts.get("color", PALETTE["primary"])]
+   475→   475→
+   476→   476→    N = len(labels)
+   477→   477→    angles = np.linspace(0, 2 * np.pi, N, endpoint=False).tolist()
+   478→   478→    angles += angles[:1]  # Cerrar
+   479→   479→
+   480→   480→    ax.set_theta_offset(np.pi / 2)
+   481→   481→    ax.set_theta_direction(-1)
+   482→   482→    ax.set_rlabel_position(0)
+   483→   483→
+   484→   484→    ax.set_xticks(angles[:-1])
+   485→   485→    ax.set_xticklabels(labels)
+   486→   486→
+   487→   487→    for i, serie in enumerate(series):
+   488→   488→        values_closed = serie + serie[:1]
+   489→   489→        ax.plot(angles, values_closed, 'o-', linewidth=2,
+   490→   490→                color=colors[i % len(colors)], label=series_names[i], markersize=5)
+   491→   491→        ax.fill(angles, values_closed, alpha=0.15, color=colors[i % len(colors)])
+   492→   492→
+   493→   493→    ax.legend(loc='upper right', bbox_to_anchor=(0.1, 0.1), fontsize=8)
+   494→   494→
+   495→   495→
+   496→   496→def _chart_candlestick(ax, data, opts, **kwargs):
+   497→   497→    """Grafico de velas (candlestick) para datos financieros."""
+   498→   498→    import numpy as np
+   499→   499→
+   500→   500→    candles = data.get("candles", data.get("values", []))
+   501→   501→    labels = data.get("labels", [])
+   502→   502→
+   503→   503→    if not candles:
+   504→   504→        return
+   505→   505→
+   506→   506→    # Parsear: cada vela = [open, high, low, close] o dict
+   507→   507→    parsed = []
+   508→   508→    for c in candles:
+   509→   509→        if isinstance(c, dict):
+   510→   510→            parsed.append([c.get("open", 0), c.get("high", 0),
+   511→   511→                           c.get("low", 0), c.get("close", 0)])
+   512→   512→        elif isinstance(c, (list, tuple)) and len(c) >= 4:
+   513→   513→            parsed.append(list(c[:4]))
+   514→   514→
+   515→   515→    if not parsed:
+   516→   516→        return
+   517→   517→
+   518→   518→    width = opts.get("width", 0.6)
+   519→   519→    x_range = range(len(parsed))
+   520→   520→
+   521→   521→    for i, (o, h, l, cl) in enumerate(parsed):
+   522→   522→        # Color: verde si cierra por encima de apertura, rojo si no
+   523→   523→        color = PALETTE["success"] if cl >= o else PALETTE["danger"]
+   524→   524→        # Sombra (mecha)
+   525→   525→        ax.plot([i, i], [l, h], color=color, linewidth=1)
+   526→   526→        # Cuerpo
+   527→   527→        body_bottom = min(o, cl)
+   528→   528→        body_height = abs(cl - o) or 0.01  # Minimo para velas doji
+   529→   529→        ax.bar(i, body_height, bottom=body_bottom, width=width,
+   530→   530→               color=color, edgecolor=color)
+   531→   531→
+   532→   532→    if labels:
+   533→   533→        ax.set_xticks(list(x_range))
+   534→   534→        ax.set_xticklabels(labels, rotation=45, ha='right')
+   535→   535→
+   536→   536→
+   537→   537→def _chart_boxplot(ax, data, opts, **kwargs):
+   538→   538→    """Diagrama de caja (boxplot) para distribucion de datos."""
+   539→   539→    import numpy as np
+   540→   540→
+   541→   541→    values = data.get("values", [])
+   542→   542→    labels = data.get("labels", [])
+   543→   543→
+   544→   544→    if isinstance(values[0], list):
+   545→   545→        # Multi-serie
+   546→   546→        ax.boxplot(values, labels=labels if labels else
+   547→   547→                   [f"Grupo {i+1}" for i in range(len(values))],
+   548→   548→                   patch_artist=True,
+   549→   549→                   boxprops=dict(facecolor=PALETTE["primary"], alpha=0.7),
+   550→   550→                   medianprops=dict(color='red', linewidth=2))
+   551→   551→    else:
+   552→   552→        ax.boxplot([values], labels=labels if labels else ["Datos"],
+   553→   553→                   patch_artist=True,
+   554→   554→                   boxprops=dict(facecolor=PALETTE["primary"], alpha=0.7),
+   555→   555→                   medianprops=dict(color='red', linewidth=2))
+   556→   556→
+   557→   557→    if opts.get("showfliers", True) is False:
+   558→   558→        ax.boxplot(values if isinstance(values[0], list) else [values],
+   559→   559→                   showfliers=False)
+   560→   560→
+   561→   561→
+   562→   562→def _chart_waterfall(ax, data, opts, **kwargs):
+   563→   563→    """Grafico de cascada (waterfall) para analisis incremental."""
+   564→   564→    import numpy as np
+   565→   565→
+   566→   566→    labels = data.get("labels", [])
+   567→   567→    values = data.get("values", [])
+   568→   568→
+   569→   569→    if not labels or not values:
+   570→   570→        return
+   571→   571→
+   572→   572→    cumulative = [0]
+   573→   573→    for v in values[:-1] if len(values) > 1 else values:
+   574→   574→        cumulative.append(cumulative[-1] + v)
+   575→   575→
+   576→   576→    # Agregar total al final si no existe
+   577→   577→    has_total = opts.get("show_total", True)
+   578→   578→    if has_total and len(values) > 1:
+   579→   579→        labels.append("Total")
+   580→   580→        values.append(cumulative[-1] + values[-1] if len(values) > 1 else values[0])
+   581→   581→        cumulative.append(0)
+   582→   582→
+   583→   583→    bottoms = []
+   584→   584→    heights = []
+   585→   585→    colors = []
+   586→   586→
+   587→   587→    for i, v in enumerate(values):
+   588→   588→        if labels[i] == "Total":
+   589→   589→            bottoms.append(0)
+   590→   590→            heights.append(v)
+   591→   591→            colors.append(PALETTE["primary"])
+   592→   592→        elif v >= 0:
+   593→   593→            bottoms.append(cumulative[i])
+   594→   594→            heights.append(v)
+   595→   595→            colors.append(PALETTE["success"])
+   596→   596→        else:
+   597→   597→            bottoms.append(cumulative[i] + v)
+   598→   598→            heights.append(abs(v))
+   599→   599→            colors.append(PALETTE["danger"])
+   600→   600→
+   601→   601→    ax.bar(labels, heights, bottom=bottoms, color=colors)
+   602→   602→
+   603→   603→    # Anotaciones
+   604→   604→    for i, (b, h, v) in enumerate(zip(bottoms, heights, values)):
+   605→   605→        y_pos = b + h if v >= 0 or labels[i] == "Total" else b
+   606→   606→        prefix = "+" if v > 0 and labels[i] != "Total" else ""
+   607→   607→        ax.text(i, y_pos + 0.02 * max(abs(v) for v in values),
+   608→   608→                f"{prefix}{v:.1f}", ha='center', va='bottom', fontsize=9)
+   609→   609→
+   610→   610→    plt.xticks(rotation=45, ha='right')
+   611→   611→
+   612→   612→
+   613→   613→def _chart_regression(ax, data, opts, **kwargs):
+   614→   614→    """Grafico de dispersion con linea de regresion."""
+   615→   615→    import numpy as np
+   616→   616→
+   617→   617→    x_data = data.get("x", data.get("values", []))
+   618→   618→    y_data = data.get("y", [])
+   619→   619→
+   620→   620→    if not y_data:
+   621→   621→        if isinstance(x_data[0], (list, tuple)) and len(x_data[0]) >= 2:
+   622→   622→            y_data = [p[1] for p in x_data]
+   623→   623→            x_data = [p[0] for p in x_data]
+   624→   624→        else:
+   625→   625→            y_data = x_data
+   626→   626→            x_data = list(range(len(y_data)))
+   627→   627→
+   628→   628→    x = np.array(x_data, dtype=float)
+   629→   629→    y = np.array(y_data, dtype=float)
+   630→   630→
+   631→   631→    # Scatter
+   632→   632→    color = opts.get("color", PALETTE["primary"])
+   633→   633→    ax.scatter(x, y, s=40, c=color, alpha=0.6, edgecolors='white')
+   634→   634→
+   635→   635→    # Regresion lineal
+   636→   636→    if len(x) > 1:
+   637→   637→        z = np.polyfit(x, y, 1)
+   638→   638→        p = np.poly1d(z)
+   639→   639→        x_line = np.linspace(x.min(), x.max(), 100)
+   640→   640→        ax.plot(x_line, p(x_line), color=PALETTE["danger"], linewidth=2,
+   641→   641→                linestyle='--', label=f'y = {z[0]:.2f}x + {z[1]:.2f}')
+   642→   642→
+   643→   643→        # R-squared
+   644→   644→        y_pred = p(x)
+   645→   645→        ss_res = np.sum((y - y_pred) ** 2)
+   646→   646→        ss_tot = np.sum((y - np.mean(y)) ** 2)
+   647→   647→        r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+   648→   648→        ax.text(0.05, 0.95, f'R² = {r_squared:.3f}',
+   649→   649→                transform=ax.transAxes, fontsize=10, va='top',
+   650→   650→                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+   651→   651→
+   652→   652→        ax.legend(loc='best', fontsize=9)
+   653→   653→
+   654→   654→
+   655→   655→def _chart_distribution(ax, data, opts, **kwargs):
+   656→   656→    """Grafico de distribucion con histograma + curva normal."""
+   657→   657→    import numpy as np
+   658→   658→
+   659→   659→    values = data.get("values", [])
+   660→   660→    if not values:
+   661→   661→        return
+   662→   662→
+   663→   663→    values = np.array(values, dtype=float)
+   664→   664→    bins = opts.get("bins", min(30, max(5, len(values) // 5)))
+   665→   665→    color = opts.get("color", PALETTE["primary"])
+   666→   666→
+   667→   667→    # Histograma normalizado
+   668→   668→    n, bins_edges, patches = ax.hist(values, bins=bins, density=True,
+   669→   669→                                      color=color, alpha=0.6, edgecolor='white')
+   670→   670→
+   671→   671→    # Curva normal
+   672→   672→    mu = np.mean(values)
+   673→   673→    sigma = np.std(values)
+   674→   674→    x = np.linspace(mu - 4*sigma, mu + 4*sigma, 200)
+   675→   675→
+   676→   676→    try:
+   677→   677→        from scipy.stats import norm
+   678→   678→        ax.plot(x, norm.pdf(x, mu, sigma), 'r-', linewidth=2, label='Normal')
+   679→   679→    except ImportError:
+   680→   680→        # Aproximacion sin scipy
+   681→   681→        pdf = (1 / (sigma * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+   682→   682→        ax.plot(x, pdf, 'r-', linewidth=2, label='Normal')
+   683→   683→
+   684→   684→    # Estadisticas
+   685→   685→    stats_text = f'Media: {mu:.2f}\nDesv.Est: {sigma:.2f}\nN: {len(values)}'
+   686→   686→    ax.text(0.95, 0.95, stats_text, transform=ax.transAxes, fontsize=9,
+   687→   687→            va='top', ha='right', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+   688→   688→    ax.legend(loc='best')
+   689→   689→
+   690→   690→
+   691→   691→def _chart_violin(ax, data, opts, **kwargs):
+   692→   692→    """Grafico de violin para distribucion de datos."""
+   693→   693→    import numpy as np
+   694→   694→
+   695→   695→    values = data.get("values", [])
+   696→   696→    labels = data.get("labels", [])
+   697→   697→
+   698→   698→    if isinstance(values[0], list):
+   699→   699→        # Multi-serie
+   700→   700→        parts = ax.violinplot(values, showmeans=True, showmedians=True)
+   701→   701→        colors = opts.get("colors", CHART_COLORS)
+   702→   702→        for i, pc in enumerate(parts['bodies']):
+   703→   703→            pc.set_facecolor(colors[i % len(colors)])
+   704→   704→            pc.set_alpha(0.7)
+   705→   705→
+   706→   706→        if labels:
+   707→   707→            ax.set_xticks(range(1, len(values) + 1))
+   708→   708→            ax.set_xticklabels(labels)
+   709→   709→    else:
+   710→   710→        parts = ax.violinplot([values], showmeans=True, showmedians=True)
+   711→   711→        for pc in parts['bodies']:
+   712→   712→            pc.set_facecolor(PALETTE["primary"])
+   713→   713→            pc.set_alpha(0.7)
+   714→   714→
+   715→   715→        if labels:
+   716→   716→            ax.set_xticks([1])
+   717→   717→            ax.set_xticklabels(labels)
+   718→   718→
+   719→   719→
+   720→   720→def _chart_stem(ax, data, opts, **kwargs):
+   721→   721→    """Grafico de tallo (stem) para datos discretos."""
+   722→   722→    import numpy as np
+   723→   723→
+   724→   724→    labels = data.get("labels", [])
+   725→   725→    values = data.get("values", [])
+   726→   726→
+   727→   727→    if not values:
+   728→   728→        return
+   729→   729→
+   730→   730→    x = range(len(values)) if not labels else labels
+   731→   731→    color = opts.get("color", PALETTE["primary"])
+   732→   732→
+   733→   733→    markerline, stemlines, baseline = ax.stem(x, values, linefmt=color,
+   734→   734→                                               markerfmt='o', basefmt='grey')
+   735→   735→    markerline.set_markerfacecolor(color)
+   736→   736→    stemlines.set_linewidth(1.5)
+   737→   737→
+   738→   738→    if labels:
+   739→   739→        ax.set_xticks(list(range(len(labels))))
+   740→   740→        ax.set_xticklabels(labels, rotation=45, ha='right')
+   741→   741→
+   742→   742→
+   743→   743→# ============================================================
+   744→   744→# REGISTRO DE HANDLERS
+   745→   745→# ============================================================
+   746→   746→
+   747→   747→_CHART_HANDLERS = {
+   748→   748→    "bar": _chart_bar,
+   749→   749→    "line": _chart_line,
+   750→   750→    "pie": _chart_pie,
+   751→   751→    "scatter": _chart_scatter,
+   752→   752→    "histogram": _chart_histogram,
+   753→   753→    "area": _chart_area,
+   754→   754→    "heatmap": _chart_heatmap,
+   755→   755→    "radar": _chart_radar,
+   756→   756→    "candlestick": _chart_candlestick,
+   757→   757→    "boxplot": _chart_boxplot,
+   758→   758→    "waterfall": _chart_waterfall,
+   759→   759→    "regression": _chart_regression,
+   760→   760→    "distribution": _chart_distribution,
+   761→   761→    "violin": _chart_violin,
+   762→   762→    "stem": _chart_stem,
+   763→   763→}
+   764→   764→
+   765→   765→
+   766→   766→# ============================================================
+   767→   767→# UTILIDADES
+   768→   768→# ============================================================
+   769→   769→
+   770→   770→def _setup_fonts():
+   771→   771→    """Configura fuentes para soporte Unicode/espanol."""
+   772→   772→    import matplotlib.font_manager as fm
+   773→   773→    import matplotlib.pyplot as plt
+   774→   774→
+   775→   775→    try:
+   776→   776→        fm.fontManager.addfont('/usr/share/fonts/truetype/chinese/NotoSansSC[wght].ttf')
+   777→   777→    except Exception:
+   778→   778→        pass
+   779→   779→    try:
+   780→   780→        fm.fontManager.addfont('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf')
+   781→   781→    except Exception:
+   782→   782→        pass
+   783→   783→
+   784→   784→    plt.rcParams['font.sans-serif'] = ['Noto Sans SC', 'DejaVu Sans']
+   785→   785→    plt.rcParams['axes.unicode_minus'] = False
+   786→   786→
+   787→   787→
+   788→   788→def _parse_chart_data(datos_str: str) -> dict:
+   789→   789→    """Parsea datos de grafico desde JSON o CSV a estructura estandar.
+   790→   790→
+   791→   791→    Formatos soportados:
+   792→   792→    - JSON con keys: labels, values, x, y, matrix, candles, sizes, colors, row_labels, col_labels
+   793→   793→    - CSV simple: etiqueta,valor por linea
+   794→   794→    - Lista de puntos: x,y por linea
+   795→   795→    """
+   796→   796→    if not datos_str:
+   797→   797→        return {"labels": [], "values": []}
+   798→   798→
+   799→   799→    datos_str = datos_str.strip()
+   800→   800→
+   801→   801→    # Intentar JSON
+   802→   802→    if datos_str.startswith('{') or datos_str.startswith('['):
+   803→   803→        try:
+   804→   804→            parsed = json.loads(datos_str)
+   805→   805→            if isinstance(parsed, dict):
+   806→   806→                return parsed
+   807→   807→            elif isinstance(parsed, list):
+   808→   808→                if len(parsed) > 0 and isinstance(parsed[0], dict):
+   809→   809→                    # Lista de dicts -> extraer labels y values
+   810→   810→                    keys = list(parsed[0].keys())
+   811→   811→                    return {
+   812→   812→                        "labels": [str(d.get(keys[0], "")) for d in parsed],
+   813→   813→                        "values": [d.get(keys[1], 0) if len(keys) > 1 else 0 for d in parsed],
+   814→   814→                    }
+   815→   815→                elif len(parsed) > 0 and isinstance(parsed[0], (list, tuple)):
+   816→   816→                    return {"labels": [str(r[0]) for r in parsed],
+   817→   817→                            "values": [r[1] if len(r) > 1 else 0 for r in parsed]}
+   818→   818→                else:
+   819→   819→                    return {"labels": [str(i) for i in range(len(parsed))],
+   820→   820→                            "values": parsed}
+   821→   821→        except json.JSONDecodeError:
+   822→   822→            pass
+   823→   823→
+   824→   824→    # Fallback: CSV
+   825→   825→    result = {"labels": [], "values": []}
+   826→   826→    for line in datos_str.split("\n"):
+   827→   827→        line = line.strip()
+   828→   828→        if not line or line.startswith("#"):
+   829→   829→            continue
+   830→   830→
+   831→   831→        # Intentar punto x,y
+   832→   832→        if "," in line:
+   833→   833→            parts = line.rsplit(",", 1)
+   834→   834→            if len(parts) == 2:
+   835→   835→                result["labels"].append(parts[0].strip())
+   836→   836→                try:
+   837→   837→                    result["values"].append(float(parts[1].strip()))
+   838→   838→                except ValueError:
+   839→   839→                    result["values"].append(0)
+   840→   840→        else:
+   841→   841→            try:
+   842→   842→                result["values"].append(float(line))
+   843→   843→            except ValueError:
+   844→   844→                result["labels"].append(line)
+   845→   845→
+   846→   846→    return result
+   847→   847→
+   848→   848→
+   849→   849→def _parse_options(opts_str: str) -> dict:
+   850→   850→    """Parsea opciones JSON del grafico."""
+   851→   851→    if not opts_str or opts_str == "{}":
+   852→   852→        return {}
+   853→   853→    try:
+   854→   854→        return json.loads(opts_str)
+   855→   855→    except json.JSONDecodeError:
+   856→   856→        return {}
+   857→   857→
+   858→   858→
+   859→   859→def _parse_dashboard_charts(charts_str: str) -> list:
+   860→   860→    """Parsea la lista de graficos para un dashboard."""
+   861→   861→    if not charts_str or charts_str == "[]":
+   862→   862→        return []
+   863→   863→    try:
+   864→   864→        return json.loads(charts_str)
+   865→   865→    except json.JSONDecodeError:
+   866→   866→        return []
+   867→   867→
+   868→   868→
+   869→   869→def _calc_layout(n: int, layout: str = "auto") -> tuple:
+   870→   870→    """Calcula filas y columnas para el dashboard."""
+   871→   871→    if layout == "auto":
+   872→   872→        if n <= 1: return (1, 1)
+   873→   873→        if n <= 2: return (1, 2)
+   874→   874→        if n <= 4: return (2, 2)
+   875→   875→        if n <= 6: return (2, 3)
+   876→   876→        if n <= 9: return (3, 3)
+   877→   877→        return ((n + 3) // 4, 4)
+   878→   878→
+   879→   879→    parts = layout.lower().split('x')
+   880→   880→    if len(parts) == 2:
+   881→   881→        try:
+   882→   882→            return (int(parts[0]), int(parts[1]))
+   883→   883→        except ValueError:
+   884→   884→            pass
+   885→   885→
+   886→   886→    return (2, 2)
+   887→   887→
+   888→   888→
+   889→   889→def _apply_common_style(ax, title: str = "", xlabel: str = "", ylabel: str = "",
+   890→   890→                        opts: dict = None):
+   891→   891→    """Aplica estilo comun a todos los graficos."""
+   892→   892→    if title:
+   893→   893→        ax.set_title(title, fontsize=12, fontweight='bold', pad=10)
+   894→   894→    if xlabel:
+   895→   895→        ax.set_xlabel(xlabel, fontsize=10)
+   896→   896→    if ylabel:
+   897→   897→        ax.set_ylabel(ylabel, fontsize=10)
+   898→   898→
+   899→   899→    if opts:
+   900→   900→        if opts.get("grid", True):
+   901→   901→            ax.grid(True, alpha=0.3, linestyle='--')
+   902→   902→        if opts.get("legend") and not ax.get_legend():
+   903→   903→            ax.legend(loc='best')
+   904→   904→        if "xlim" in opts:
+   905→   905→            ax.set_xlim(opts["xlim"])
+   906→   906→        if "ylim" in opts:
+   907→   907→            ax.set_ylim(opts["ylim"])
+   908→   908→    else:
+   909→   909→        ax.grid(True, alpha=0.3, linestyle='--')
+   910→   910→
+   911→   911→
+   912→   912→def _add_trendline(ax, x_data, y_data):
+   913→   913→    """Agrega linea de tendencia a un scatter plot."""
+   914→   914→    import numpy as np
+   915→   915→    try:
+   916→   916→        x = np.array(x_data, dtype=float)
+   917→   917→        y = np.array(y_data, dtype=float)
+   918→   918→        z = np.polyfit(x, y, 1)
+   919→   919→        p = np.poly1d(z)
+   920→   920→        x_line = np.linspace(x.min(), x.max(), 100)
+   921→   921→        ax.plot(x_line, p(x_line), color='red', linewidth=1.5,
+   922→   922→                linestyle='--', label='Tendencia')
+   923→   923→        ax.legend(loc='best', fontsize=8)
+   924→   924→    except Exception:
+   925→   925→        pass
+   926→   926→
