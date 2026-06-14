@@ -1164,3 +1164,110 @@ Stage Summary:
 - z-ai availability detection for search tool selection
 - Full backward compatibility maintained
 - All 523 tests pass
+
+---
+Task ID: r2a
+Agent: Sub-agent (r2a)
+Task: Implement M2.1 (auto-busqueda transparente), M2.3 (historial de fallos), M2.4 (timeout global)
+
+Work Log:
+- Read react.py (1758 lines), config.py, test_react_agent.py, conftest.py
+- M2.1: Auto-busqueda transparente
+  - Added visible notification log "No tengo suficiente contexto, buscando en internet..." with "search" category before auto-search in run()
+  - Added _stream_callback emission {"type": "auto_search", "data": {"query": ...}} in run() for UI visibility
+  - Added yield {"type": "auto_search", "data": {"query": ..., "reason": "confidence baja"}} before auto-search in run_stream()
+  - Added auto_search notification for deep search (buscar_web_profundo) in run_stream()
+- M2.3: Historial de fallos por herramienta
+  - Created ToolFailureHistory inner class with record_failure(), has_failed_with_similar_params(), get_last_error(), clear(), _params_key()
+  - Added self._tool_failures = ToolFailureHistory() in ReactAgent.__init__()
+  - Added _tool_failures.clear() in both run() and run_stream() at conversation start
+  - In _execute_single_tool(): check has_failed_with_similar_params() before execution; if previously failed with same params, skip and return error with last error info
+  - In _execute_single_tool(): after ERROR result, call record_failure() to store in history
+- M2.4: Timeout global por iteracion
+  - Added TOOL_EXECUTION_TIMEOUT = 45 to config.py (TIMEOUTS section)
+  - Added TOOL_EXECUTION_TIMEOUT to validate_config() numeric_checks
+  - Added TOOL_EXECUTION_TIMEOUT to get_config_summary()
+  - In _execute_tool_calls(): wrapped as_completed() with timeout=TOOL_EXECUTION_TIMEOUT
+  - On TimeoutError: cancel remaining futures, log warning, fill None results with timeout error message
+- Added 21 new tests covering all 3 features:
+  - TestToolFailureHistory (10 tests): record, has_failed, get_last_error, clear, params_key
+  - TestReactAgentToolFailureIntegration (3 tests): init, records failure, skips repeated
+  - TestToolExecutionTimeoutConfig (4 tests): exists, value, summary, validation
+  - TestAutoSearchNotification (2 tests): event structure, stream callback support
+- All 544 tests pass (was 523, now 544 = +21 new tests)
+
+Stage Summary:
+- M2.1 COMPLETE: Auto-search now visible via log category "search" and stream events {"type": "auto_search"}
+- M2.3 COMPLETE: ToolFailureHistory prevents retrying same tool+params, records failures, clears on new conversation
+- M2.4 COMPLETE: Global 45s timeout on parallel tool execution via as_completed(timeout=TOOL_EXECUTION_TIMEOUT)
+- config.py: TOOL_EXECUTION_TIMEOUT = 45 added with validation and summary exposure
+- Zero regressions: all 544 tests pass
+
+---
+Task ID: r2b
+Agent: Sub-Agent (general-purpose)
+Task: Implement M3 (Metacognición granular) + M7 (Deep Thinking adaptativo)
+
+Work Log:
+- Read all 4 target files: metacognition.py, deep_thinking.py, react.py, config.py
+- Read existing tests and conftest.py to understand test patterns
+- Read prior worklog to understand context
+
+M3.1 — Señales de confianza granulares:
+- Updated record_iteration() to accept error_type and result_quality params
+- error_type: "critical" → -0.25, "recoverable" → -0.05, "partial" → -0.10, None → -0.15
+- result_quality: 0.0-1.0 scales the +0.05 gain (delta = 0.05 * result_quality)
+- Records now include error_type, result_quality, and confidence fields
+- Backward compatible: all new params have defaults
+
+M3.2 — Detección de progreso real:
+- Added _detect_progress() method returning: "progressing", "stuck_same_tool", "degrading", "declining"
+- stuck_same_tool: same tool called 3+ times consecutively
+- degrading: last 3 iterations all had errors
+- declining: confidence consistently dropping over last 4 iterations
+- Integrated into get_status() as "progress" field
+
+M3.3 — Estrategia de escalada:
+- Added get_escalation_strategy(iteration, max_iterations) → dict|None
+- stuck_same_tool → {"strategy": "change_tool", ...}
+- degrading + iteration >= 60% → {"strategy": "decompose", ...}
+- declining + iteration >= 80% → {"strategy": "ask_user", ...}
+- Integrated into get_metacognitive_prompt() which now accepts max_iterations param
+- Updated both call sites in react.py to pass max_iterations
+
+M7.1 — Deep Thinking activación basada en complejidad:
+- Added DEEP_THINK_TRIGGERS dict with 5 semantic categories (ethical_dilemma, multi_constraint, ambiguous, code_architecture, data_analysis)
+- Added DEEP_THINK_SKIP_PATTERNS for simple queries (greetings, single-step commands)
+- Added _should_deep_think() method that uses triggers/skips
+- Modified should_think_deep() to gate through _should_deep_think() first
+- When no triggers match, higher threshold (0.5) is used instead of 0.3
+
+M7.2 — Pensamiento nativo Qwen3:
+- Added _should_use_native_thinking(iteration, user_message) to ReactAgent
+- Only activates on iteration 0, Qwen3/Qwen2.5 models, max_iter >= 8
+- Integrated into run() and run_stream() before the ReAct loop
+- Makes a pre-thinking call without tools, captures native thinking via ollama._last_thinking
+- Injects thinking as context in messages
+
+M7.3 — Reflexión post-respuesta selectiva:
+- Added _needs_reflection(final_response, user_message) to ReactAgent
+- Skips reflection for simple interactions (greetings, short messages)
+- Only reflects when: response < 100 chars, not progressing, or had errors
+- Integrated into both run() and run_stream()
+- When skipped, sets _last_evaluation to {"assessment": "skipped"} (no LLM call)
+- Saves ~1 LLM call per simple interaction
+
+Tests added:
+- TestGranularConfidence (8 tests): critical/recoverable/partial/generic errors, result_quality, bounds
+- TestProgressDetection (5 tests): progressing, stuck_same_tool, degrading, declining
+- TestEscalationStrategy (7 tests): None when progressing, change_tool, decompose, ask_user, keys, thresholds, status
+
+Stage Summary:
+- M3.1 COMPLETE: Granular confidence with error_type differentiation
+- M3.2 COMPLETE: Progress detection (progressing/stuck/degrading/declining)
+- M3.3 COMPLETE: Escalation strategy with change_tool/decompose/ask_user
+- M7.1 COMPLETE: Adaptive deep thinking activation with semantic triggers and skip patterns
+- M7.2 COMPLETE: Qwen3 native thinking in first iteration of complex tasks
+- M7.3 COMPLETE: Selective post-response reflection (skips simple interactions)
+- All 566 tests pass (was 544, now 566 = +22 new tests)
+- Zero regressions

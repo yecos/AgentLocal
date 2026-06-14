@@ -178,6 +178,7 @@ LLM_TIMEOUT_SMALL = 90           # Timeout para modelos <=8b (reducido de 120)
 LLM_TIMEOUT_LARGE = 150          # Timeout para modelos >=14b (reducido de 180)
 EMBED_TIMEOUT = 10               # Timeout para embeddings (reducido de 15)
 WEB_TIMEOUT = 10                 # Timeout para busquedas web
+TOOL_EXECUTION_TIMEOUT = 45       # M2.4: Timeout global para ejecucion paralela de tools (segundos)
 
 # ============================================================
 # ARCHIVOS DE DATOS
@@ -339,6 +340,7 @@ def validate_config() -> dict:
         ("LLM_TIMEOUT_LARGE", LLM_TIMEOUT_LARGE, 1, 600),
         ("EMBED_TIMEOUT", EMBED_TIMEOUT, 1, 120),
         ("WEB_TIMEOUT", WEB_TIMEOUT, 1, 120),
+        ("TOOL_EXECUTION_TIMEOUT", TOOL_EXECUTION_TIMEOUT, 1, 300),
         ("CONTEXT_WINDOW_TOKENS", CONTEXT_WINDOW_TOKENS, 100, None),
         ("SUMMARIZATION_THRESHOLD", SUMMARIZATION_THRESHOLD, 0.1, 1.0),
         ("SUBAGENT_MAX_PARALLEL", SUBAGENT_MAX_PARALLEL, 1, 16),
@@ -436,6 +438,7 @@ def get_config_summary() -> dict:
         "LLM_TIMEOUT_LARGE": LLM_TIMEOUT_LARGE,
         "EMBED_TIMEOUT": EMBED_TIMEOUT,
         "WEB_TIMEOUT": WEB_TIMEOUT,
+        "TOOL_EXECUTION_TIMEOUT": TOOL_EXECUTION_TIMEOUT,
         # Multimedia
         "TTS_DEFAULT_VOICE": TTS_DEFAULT_VOICE,
         "TTS_DEFAULT_SPEED": TTS_DEFAULT_SPEED,

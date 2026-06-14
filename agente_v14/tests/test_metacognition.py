@@ -433,3 +433,185 @@ class TestEvaluateResult:
     def test_reflection_has_confidence_final(self, fresh_meta):
         reflection = fresh_meta.evaluate_result("test", "response", 3)
         assert "confidence_final" in reflection
+
+
+# ============================================================
+# M3.1: Granular Confidence Tests
+# ============================================================
+
+class TestGranularConfidence:
+    """Test M3.1: error_type parameter in record_iteration."""
+
+    def test_critical_error_reduces_confidence_more(self, fresh_meta):
+        """Critical errors should reduce confidence by -0.25."""
+        initial = fresh_meta.confidence
+        fresh_meta.record_iteration(0, "tool_call", "test_tool", had_error=True, error_type="critical")
+        assert fresh_meta.confidence == max(0.1, initial - 0.25)
+
+    def test_recoverable_error_reduces_confidence_less(self, fresh_meta):
+        """Recoverable errors should reduce confidence by -0.05."""
+        initial = fresh_meta.confidence
+        fresh_meta.record_iteration(0, "tool_call", "test_tool", had_error=True, error_type="recoverable")
+        assert fresh_meta.confidence == max(0.1, initial - 0.05)
+
+    def test_partial_error_reduces_confidence_medium(self, fresh_meta):
+        """Partial errors should reduce confidence by -0.10."""
+        initial = fresh_meta.confidence
+        fresh_meta.record_iteration(0, "tool_call", "test_tool", had_error=True, error_type="partial")
+        assert fresh_meta.confidence == max(0.1, initial - 0.10)
+
+    def test_generic_error_reduces_confidence_default(self, fresh_meta):
+        """Generic errors (no error_type) should reduce by -0.15."""
+        initial = fresh_meta.confidence
+        fresh_meta.record_iteration(0, "tool_call", "test_tool", had_error=True)
+        assert fresh_meta.confidence == max(0.1, initial - 0.15)
+
+    def test_result_quality_affects_confidence_gain(self, fresh_meta):
+        """Success with higher result_quality should increase confidence more."""
+        m1 = fresh_meta
+        # Record with quality 1.0
+        m1.record_iteration(0, "tool_call", "test_tool", had_error=False, result_quality=1.0)
+        conf_high = m1.confidence
+
+        # Reset and record with quality 0.5
+        m1.reset()
+        m1.record_iteration(0, "tool_call", "test_tool", had_error=False, result_quality=0.5)
+        conf_low = m1.confidence
+
+        assert conf_high > conf_low
+
+    def test_record_stores_error_type(self, fresh_meta):
+        """record_iteration should store error_type in the record."""
+        fresh_meta.record_iteration(0, "tool_call", "test_tool", had_error=True, error_type="critical")
+        record = fresh_meta.iteration_history[-1]
+        assert record["error_type"] == "critical"
+
+    def test_record_stores_result_quality(self, fresh_meta):
+        """record_iteration should store result_quality in the record."""
+        fresh_meta.record_iteration(0, "tool_call", "test_tool", had_error=False, result_quality=0.8)
+        record = fresh_meta.iteration_history[-1]
+        assert record["result_quality"] == 0.8
+
+    def test_confidence_never_below_minimum(self, fresh_meta):
+        """Confidence should never drop below 0.1 even with many critical errors."""
+        for i in range(10):
+            fresh_meta.record_iteration(i, "tool_call", "test_tool", had_error=True, error_type="critical")
+        assert fresh_meta.confidence >= 0.1
+
+    def test_confidence_never_above_maximum(self, fresh_meta):
+        """Confidence should never exceed 1.0 even with many successes."""
+        for i in range(20):
+            fresh_meta.record_iteration(i, "tool_call", "test_tool", had_error=False, result_quality=1.0)
+        assert fresh_meta.confidence <= 1.0
+
+
+# ============================================================
+# M3.2: Progress Detection Tests
+# ============================================================
+
+class TestProgressDetection:
+    """Test M3.2: _detect_progress() method."""
+
+    def test_progressing_initially(self, fresh_meta):
+        """Initially should be progressing."""
+        assert fresh_meta._detect_progress() == "progressing"
+
+    def test_stuck_same_tool(self, fresh_meta):
+        """Same tool called 3 times should be stuck_same_tool."""
+        for i in range(3):
+            fresh_meta.record_iteration(i, "tool_call", "leer_archivo")
+        assert fresh_meta._detect_progress() == "stuck_same_tool"
+
+    def test_not_stuck_different_tools(self, fresh_meta):
+        """Different tools should not be stuck."""
+        fresh_meta.record_iteration(0, "tool_call", "leer_archivo")
+        fresh_meta.record_iteration(1, "tool_call", "ejecutar_comando")
+        fresh_meta.record_iteration(2, "tool_call", "buscar_archivo")
+        assert fresh_meta._detect_progress() != "stuck_same_tool"
+
+    def test_degrading_all_errors(self, fresh_meta):
+        """3 consecutive errors should be degrading."""
+        for i in range(3):
+            fresh_meta.record_iteration(i, "tool_call", f"tool_{i}", had_error=True)
+        assert fresh_meta._detect_progress() == "degrading"
+
+    def test_declining_confidence(self, fresh_meta):
+        """Consistently declining confidence should be detected."""
+        # Simulate declining confidence by recording errors that progressively reduce it
+        for i in range(5):
+            fresh_meta.record_iteration(i, "tool_call", f"tool_{i}", had_error=True, error_type="critical")
+        # After 5 critical errors, confidence should be declining
+        progress = fresh_meta._detect_progress()
+        assert progress in ("degrading", "declining", "stuck_same_tool")
+
+    def test_progressing_after_successes(self, fresh_meta):
+        """After successes should be progressing."""
+        for i in range(3):
+            fresh_meta.record_iteration(i, "tool_call", f"tool_{i}", had_error=False)
+        assert fresh_meta._detect_progress() == "progressing"
+
+
+# ============================================================
+# M3.3: Escalation Strategy Tests
+# ============================================================
+
+class TestEscalationStrategy:
+    """Test M3.3: get_escalation_strategy() method."""
+
+    def test_returns_none_when_progressing(self, fresh_meta):
+        """Should return None when agent is progressing."""
+        fresh_meta.record_iteration(0, "tool_call", "tool_a", had_error=False)
+        result = fresh_meta.get_escalation_strategy(1, 6)
+        assert result is None
+
+    def test_change_tool_when_stuck(self, fresh_meta):
+        """Should suggest change_tool when stuck on same tool."""
+        for i in range(3):
+            fresh_meta.record_iteration(i, "tool_call", "same_tool", had_error=True)
+        result = fresh_meta.get_escalation_strategy(3, 10)
+        assert result is not None
+        assert result["strategy"] == "change_tool"
+
+    def test_decompose_when_degrading(self, fresh_meta):
+        """Should suggest decompose when degrading and past 60% iterations."""
+        for i in range(3):
+            fresh_meta.record_iteration(i, "tool_call", f"tool_{i}", had_error=True, error_type="critical")
+        # At iteration 6 of 10 = 60% threshold
+        result = fresh_meta.get_escalation_strategy(6, 10)
+        assert result is not None
+        assert result["strategy"] == "decompose"
+
+    def test_ask_user_when_declining_late(self, fresh_meta):
+        """Should suggest ask_user when declining and past 80% iterations."""
+        # Create a declining pattern
+        for i in range(5):
+            fresh_meta.record_iteration(i, "tool_call", f"tool_{i}", had_error=True, error_type="critical")
+        # At iteration 8 of 10 = 80% threshold
+        result = fresh_meta.get_escalation_strategy(8, 10)
+        # Result depends on whether degrading or declining is detected
+        assert result is not None
+
+    def test_escalation_has_required_keys(self, fresh_meta):
+        """Escalation result should have strategy, reason, and action keys."""
+        for i in range(3):
+            fresh_meta.record_iteration(i, "tool_call", "same_tool", had_error=True)
+        result = fresh_meta.get_escalation_strategy(3, 10)
+        assert "strategy" in result
+        assert "reason" in result
+        assert "action" in result
+
+    def test_no_decompose_before_60_percent(self, fresh_meta):
+        """Should not suggest decompose before 60% of iterations."""
+        for i in range(3):
+            fresh_meta.record_iteration(i, "tool_call", f"tool_{i}", had_error=True, error_type="recoverable")
+        # At iteration 2 of 10 = 20% - not enough for decompose
+        result = fresh_meta.get_escalation_strategy(2, 10)
+        # May return None or change_tool, but not decompose
+        if result:
+            assert result["strategy"] != "decompose"
+
+    def test_status_includes_progress(self, fresh_meta):
+        """get_status() should include progress field."""
+        status = fresh_meta.get_status()
+        assert "progress" in status
+        assert status["progress"] == "progressing"

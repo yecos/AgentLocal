@@ -71,10 +71,25 @@ class Metacognition:
         self._current_task_type = None
 
     def record_iteration(self, iteration, action_type, tool_name=None,
-                         result_summary=None, had_error=False):
+                         result_summary=None, had_error=False,
+                         error_type=None, result_quality=1.0):
         """
         Registra lo que paso en una iteracion del ReAct.
         Se llama DESPUES de cada paso Think->Act->Observe.
+
+        M3.1: Granular confidence adjustments por tipo de error.
+
+        Args:
+            iteration: Numero de iteracion
+            action_type: "tool_call", "respond", "error"
+            tool_name: Nombre de la herramienta ejecutada (si aplica)
+            result_summary: Resumen del resultado
+            had_error: Si hubo error
+            error_type: "critical" (tool no existe, error fatal) -> -0.25
+                        "recoverable" (timeout, red) -> -0.05
+                        "partial" (resultado incompleto) -> -0.10
+                        None (error generico) -> -0.15
+            result_quality: 0.0-1.0 calidad del resultado exitoso
         """
         record = {
             "iteration": iteration,
@@ -82,6 +97,8 @@ class Metacognition:
             "tool_name": tool_name,
             "result_summary": (result_summary or "")[:200],
             "had_error": had_error,
+            "error_type": error_type,
+            "result_quality": result_quality,
             "timestamp": datetime.now().isoformat(),
         }
         self.iteration_history.append(record)
@@ -89,19 +106,34 @@ class Metacognition:
         if tool_name:
             self.tool_history.append(tool_name)
 
+        # M3.1: Granular confidence adjustment
         if had_error:
             self.error_count += 1
-            self.confidence = max(0.1, self.confidence - 0.15)
+            if error_type == "critical":
+                delta = -0.25
+            elif error_type == "recoverable":
+                delta = -0.05
+            elif error_type == "partial":
+                delta = -0.10
+            else:
+                delta = -0.15
+            self.confidence = max(0.1, self.confidence + delta)
         else:
             self.success_count += 1
-            self.confidence = min(1.0, self.confidence + 0.05)
+            delta = 0.05 * result_quality
+            self.confidence = min(1.0, self.confidence + delta)
+
+        # Guardar confianza en el record para _detect_progress
+        record["confidence"] = round(self.confidence, 3)
 
         # Recalcular confianza basado en tendencia
         self._recalculate_confidence()
 
         logger.info(
             f"Meta: iter={iteration} action={action_type} "
-            f"tool={tool_name} err={had_error} conf={self.confidence:.2f}"
+            f"tool={tool_name} err={had_error} "
+            f"err_type={error_type} quality={result_quality:.2f} "
+            f"conf={self.confidence:.2f}"
         )
 
     def _recalculate_confidence(self):
@@ -298,14 +330,20 @@ class Metacognition:
         self._last_evaluation = reflection
         return reflection
 
-    def get_metacognitive_prompt(self, iteration):
+    def get_metacognitive_prompt(self, iteration, max_iterations=None):
         """
         Genera un prompt de metacognicion para inyectar en el mensaje del sistema.
         Se agrega DENTRO del bucle ReAct cuando se detectan problemas.
+        M3.3: Incorpora estrategia de escalada cuando el agente esta atascado.
         """
         should_revise, reason, suggestion = self.should_revise_plan(iteration)
 
-        if not should_revise:
+        # M3.3: Verificar estrategia de escalada
+        escalation = None
+        if max_iterations is not None:
+            escalation = self.get_escalation_strategy(iteration, max_iterations)
+
+        if not should_revise and not escalation:
             return ""
 
         meta_prompt = f"""
@@ -319,7 +357,16 @@ SUGERENCIA: {suggestion}
 Confianza actual: {self.confidence:.0%}
 Errores: {self.error_count} | Exitos: {self.success_count}
 Herramientas usadas: {', '.join(self.tool_history[-5:]) if self.tool_history else 'ninguna'}
+"""
 
+        # M3.3: Agregar estrategia de escalada si existe
+        if escalation:
+            meta_prompt += f"""
+ESCALADA ({escalation['strategy']}): {escalation['reason']}
+ACCION: {escalation['action']}
+"""
+
+        meta_prompt += """
 ACCION REQUERIDA: Cambia tu estrategia. No repitas lo mismo.
 === FIN ALERTA ===
 """
@@ -345,6 +392,91 @@ Lecciones: {lessons}
 Si tu respuesta es incompleta, mencionalo y sugiere que puede hacer el usuario.
 """
 
+    # ----------------------------------------------------------
+    # M3.2: DETECCION DE PROGRESO REAL
+    # ----------------------------------------------------------
+
+    def _detect_progress(self, user_message: str = "") -> str:
+        """
+        M3.2: Detecta si el agente esta progresando, atascado o degradando.
+
+        Returns:
+            "progressing" - El agente avanza normalmente
+            "stuck_same_tool" - Misma herramienta repetida 3+ veces sin exito
+            "degrading" - Ultimas 3 iteraciones con errores
+            "declining" - Confianza descendiendo consistentemente
+        """
+        # Mismo tool llamado 3 veces seguidas = stuck
+        if len(self.tool_history) >= 3:
+            last_3 = self.tool_history[-3:]
+            if len(set(last_3)) == 1:
+                return "stuck_same_tool"
+
+        # Ultimas 3 iteraciones todas con error = degrading
+        if len(self.iteration_history) >= 3:
+            recent_errors = sum(
+                1 for r in self.iteration_history[-3:] if r.get("had_error")
+            )
+            if recent_errors >= 3:
+                return "degrading"
+
+        # Confianza descendiendo consistentemente (4+ iteraciones)
+        if len(self.iteration_history) >= 4:
+            recent_confidences = [
+                r.get("confidence", 1.0)
+                for r in self.iteration_history[-4:]
+            ]
+            if all(
+                recent_confidences[i] > recent_confidences[i + 1]
+                for i in range(len(recent_confidences) - 1)
+            ):
+                return "declining"
+
+        return "progressing"
+
+    # ----------------------------------------------------------
+    # M3.3: ESTRATEGIA DE ESCALADA
+    # ----------------------------------------------------------
+
+    def get_escalation_strategy(self, iteration: int, max_iterations: int) -> dict | None:
+        """
+        M3.3: Retorna estrategia de escalada cuando el agente esta atascado.
+
+        Args:
+            iteration: Iteracion actual
+            max_iterations: Maximo de iteraciones permitidas
+
+        Returns:
+            dict con strategy/reason/action o None si esta progresando
+        """
+        progress = self._detect_progress()
+
+        if progress == "progressing":
+            return None
+
+        if progress == "stuck_same_tool":
+            return {
+                "strategy": "change_tool",
+                "reason": "Misma herramienta repetida sin exito",
+                "action": "Usa una herramienta alternativa"
+            }
+
+        if progress == "degrading" and iteration >= max_iterations * 0.6:
+            return {
+                "strategy": "decompose",
+                "reason": "Errores acumulados, descomponer tarea",
+                "action": "Divide la tarea en subtareas mas simples"
+            }
+
+        if progress == "declining" and iteration >= max_iterations * 0.8:
+            return {
+                "strategy": "ask_user",
+                "reason": "No se puede progresar automaticamente",
+                "action": "Pide clarificacion al usuario"
+            }
+
+        return None
+
     def reset(self):
         """Resetea el estado para una nueva consulta."""
         self.confidence = 0.7
@@ -369,6 +501,7 @@ Si tu respuesta es incompleta, mencionalo y sugiere que puede hacer el usuario.
             "tools_used": len(self.tool_history),
             "assessment": self._last_evaluation["assessment"] if self._last_evaluation else "pending",
             "suggested_strategy": self._current_task_type or "auto",
+            "progress": self._detect_progress(),
         }
 
     # ----------------------------------------------------------

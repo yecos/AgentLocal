@@ -30,6 +30,43 @@ from agent.metacognition import Metacognition
 from utils.metrics import get_metrics
 
 
+class ToolFailureHistory:
+    """M2.3: Track tool failures to avoid repeating same calls with similar params."""
+
+    def __init__(self):
+        self._failures: dict[str, list[tuple[str, str]]] = {}  # {tool_name: [(params_hash, error)]}
+
+    def record_failure(self, tool_name: str, params: dict, error: str):
+        """Record that a tool call failed with given params and error."""
+        key = self._params_key(params)
+        if tool_name not in self._failures:
+            self._failures[tool_name] = []
+        self._failures[tool_name].append((key, error))
+
+    def has_failed_with_similar_params(self, tool_name: str, params: dict) -> bool:
+        """Check if this tool already failed with similar params."""
+        if tool_name not in self._failures:
+            return False
+        key = self._params_key(params)
+        return any(k == key for k, _ in self._failures[tool_name])
+
+    def get_last_error(self, tool_name: str) -> str | None:
+        """Get the last error message for a tool, if any."""
+        if tool_name not in self._failures or not self._failures[tool_name]:
+            return None
+        return self._failures[tool_name][-1][1]
+
+    def clear(self):
+        """Reset all failure history."""
+        self._failures.clear()
+
+    def _params_key(self, params: dict) -> str:
+        """Create a hashable key from params (ignoring minor variations)."""
+        # Sort keys and truncate values for comparison
+        simplified = {k: str(v)[:50] for k, v in sorted(params.items())}
+        return json.dumps(simplified, sort_keys=True)
+
+
 class ReactAgent:
     """Motor ReAct: Piensa -> Actua -> Observa -> Piensa de nuevo."""
 
@@ -51,10 +88,82 @@ class ReactAgent:
         self._total_tool_calls = 0   # Total de tool calls en esta conversacion
         self._conversation_token_count = 0  # Approximate token count of conversation
         self._summarization_triggered = False  # Track if summarization was triggered
+        self._tool_failures = ToolFailureHistory()  # M2.3: Historial de fallos por herramienta
 
     def _log(self, message, category="info"):
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.thinking_log.append(f"[{timestamp}] [{category.upper()}] {message}")
+
+    # ----------------------------------------------------------
+    # M7.2: NATIVE THINKING PARA QWEN3
+    # ----------------------------------------------------------
+    def _should_use_native_thinking(self, iteration: int, user_message: str) -> bool:
+        """
+        M7.2: Solo usar native thinking en la primera iteracion de tareas complejas.
+
+        Detecta si el modelo es Qwen3/Qwen2.5 y si la complejidad justifica
+        activar el modo de pensamiento nativo del modelo.
+
+        Args:
+            iteration: Numero de iteracion actual
+            user_message: Mensaje del usuario
+
+        Returns:
+            True si se debe activar native thinking
+        """
+        # Solo en la primera iteracion
+        if iteration != 0:
+            return False
+
+        # Verificar si el modelo soporta native thinking
+        model = (ollama.model or "").lower()
+        if "qwen3" not in model and "qwen2.5" not in model:
+            return False
+
+        # Solo para tareas de complejidad moderada o superior
+        max_iter = self._get_max_iterations(user_message)
+        return max_iter >= 8
+
+    # ----------------------------------------------------------
+    # M7.3: REFLEXION SELECTIVA
+    # ----------------------------------------------------------
+    def _needs_reflection(self, final_response: str, user_message: str) -> bool:
+        """
+        M7.3: Determina si la reflexion post-respuesta es necesaria.
+
+        Solo reflejar cuando:
+        - La respuesta es muy corta (< 100 chars)
+        - El agente no esta progresando bien
+        - Hubo errores durante la ejecucion
+        Y NO reflejar para interacciones simples (saludos, agradecimientos).
+
+        Args:
+            final_response: La respuesta generada
+            user_message: El mensaje original del usuario
+
+        Returns:
+            True si se debe ejecutar la reflexion
+        """
+        msg_lower = user_message.lower().strip()
+
+        # Skip reflexion para interacciones simples
+        simple_patterns = ["hola", "gracias", "ok", "buenos", "hey", "adios"]
+        if any(simple in msg_lower for simple in simple_patterns) and len(msg_lower) < 30:
+            return False
+
+        # Reflexionar si la respuesta es muy corta
+        if len(final_response) < 100:
+            return True
+
+        # Reflexionar si no se esta progresando bien
+        if self.metacognition._detect_progress() != "progressing":
+            return True
+
+        # Reflexionar si hubo errores
+        if self.metacognition.error_count > 0:
+            return True
+
+        return False
 
     def _get_max_iterations(self, user_message: str) -> int:
         """Determina el maximo de iteraciones segun complejidad de la tarea (M2.2)."""
@@ -90,6 +199,7 @@ class ReactAgent:
         self.metacognition.reset()
         self._tool_call_counts = {}
         self._total_tool_calls = 0
+        self._tool_failures.clear()  # M2.3: Reset failure history for new conversation
         self._log(f"Mensaje del usuario: {user_message}", "input")
 
         messages = self._build_messages(user_message)
@@ -104,13 +214,37 @@ class ReactAgent:
         max_iter = self._get_max_iterations(user_message)
         self._log(f"Iteraciones adaptativas: {max_iter} (complejidad detectada)", "react")
 
+        # M7.2: Native thinking para Qwen3 en primera iteracion de tareas complejas
+        if self._should_use_native_thinking(0, user_message):
+            self._log("M7.2: Activando native thinking para Qwen3 (tarea compleja)", "thinking")
+            try:
+                from agent.deep_thinking import detect_native_thinking_support
+                if detect_native_thinking_support(ollama.model):
+                    # Hacer llamada de solo razonamiento (sin tools) para obtener thinking nativo
+                    think_msg = f"Antes de actuar, piensa profundamente sobre esta consulta:\n{user_message}"
+                    native_response = ollama.generate_chat([
+                        {"role": "system", "content": "Eres un asistente que piensa profundamente antes de responder. Responde en espanol."},
+                        {"role": "user", "content": think_msg}
+                    ])
+                    native_think = getattr(ollama, '_last_thinking', '')
+                    if native_think:
+                        self._log(f"Native thinking capturado: {len(native_think)} chars", "thinking")
+                        # Inyectar thinking nativo como contexto en la conversacion
+                        messages.append({
+                            "role": "user",
+                            "content": f"[PENSAMIENTO INTERNO DEL MODELO]:\n{native_think[:1500]}\n\nUsa este analisis como guia para tu respuesta."
+                        })
+                        self.metacognition.confidence = min(1.0, self.metacognition.confidence + 0.05)
+            except Exception as e:
+                logger.debug(f"Native thinking para Qwen3 fallo (no critico): {e}")
+
         for iteration in range(max_iter):
             self._log(f"--- Iteracion {iteration + 1}/{max_iter} ---", "react")
 
             # *** FIX: Metacognicion ANTES de decidir la accion ***
             # Antes: se evaluaba DESPUES de actuar (paso 4→5→2)
             # Ahora: se evalua ANTES (paso 2→3→4) para mejor toma de decisiones
-            meta_prompt = self.metacognition.get_metacognitive_prompt(iteration)
+            meta_prompt = self.metacognition.get_metacognitive_prompt(iteration, max_iterations=max_iter)
             if meta_prompt:
                 self._log("Alerta metacognitiva inyectada ANTES de accion", "evaluation")
                 self._inject_metacognitive_prompt(messages, meta_prompt)
@@ -138,7 +272,10 @@ class ReactAgent:
                 already_searched = any(t in self.metacognition.tool_history for t in web_tools)
                 
                 if not already_searched:
-                    self._log("Confianza baja: ejecutando busqueda web automatica", "cloud")
+                    # M2.1: Notificacion visible de auto-busqueda
+                    self._log("No tengo suficiente contexto, buscando en internet...", "search")
+                    if hasattr(self, '_stream_callback') and self._stream_callback:
+                        self._stream_callback({"type": "auto_search", "data": {"query": user_message[:80]}})
                     try:
                         search_result = TOOL_FUNCTIONS["buscar_web"](consulta=user_message)
                         if search_result and "No se encontraron" not in search_result:
@@ -220,31 +357,42 @@ class ReactAgent:
                         if clean != final_response:
                             final_response = clean
 
-                # Evaluar resultado para poblar _last_evaluation
-                reflection = self.metacognition.evaluate_result(
-                    user_message, final_response, iteration + 1
-                )
-                self._log(
-                    f"Evaluacion: {reflection['assessment']} "
-                    f"(confianza={reflection['confidence_final']})",
-                    "evaluation"
-                )
+                # M7.3: Reflexion selectiva - solo cuando es necesaria
+                if self._needs_reflection(final_response, user_message):
+                    # Evaluar resultado para poblar _last_evaluation
+                    reflection = self.metacognition.evaluate_result(
+                        user_message, final_response, iteration + 1
+                    )
+                    self._log(
+                        f"Evaluacion: {reflection['assessment']} "
+                        f"(confianza={reflection['confidence_final']})",
+                        "evaluation"
+                    )
 
-                # SEGUNDO: Ahora get_final_reflection_prompt() tiene datos reales
-                reflection_prompt = self.metacognition.get_final_reflection_prompt()
-                if reflection_prompt:
-                    self._log("Reflexion metacognitiva inyectada en respuesta final", "evaluation")
-                    # Re-generar con contexto de reflexion (solo si la respuesta puede mejorar)
-                    if len(final_response) < 100 and self.metacognition.error_count > 0:
-                        messages.append({"role": "assistant", "content": final_response})
-                        messages.append({"role": "user", "content": reflection_prompt + "\n\nMejora tu respuesta anterior si es incompleta."})
-                        improved = ollama.generate_chat(messages)
-                        if improved and len(improved) > len(final_response):
-                            final_response = improved
-                            self._log("Respuesta mejorada via metacognicion", "success")
+                    # Ahora get_final_reflection_prompt() tiene datos reales
+                    reflection_prompt = self.metacognition.get_final_reflection_prompt()
+                    if reflection_prompt:
+                        self._log("Reflexion metacognitiva inyectada en respuesta final", "evaluation")
+                        # Re-generar con contexto de reflexion (solo si la respuesta puede mejorar)
+                        if len(final_response) < 100 and self.metacognition.error_count > 0:
+                            messages.append({"role": "assistant", "content": final_response})
+                            messages.append({"role": "user", "content": reflection_prompt + "\n\nMejora tu respuesta anterior si es incompleta."})
+                            improved = ollama.generate_chat(messages)
+                            if improved and len(improved) > len(final_response):
+                                final_response = improved
+                                self._log("Respuesta mejorada via metacognicion", "success")
 
-                for lesson in reflection.get("lessons", []):
-                    learning.add_knowledge(lesson, source="metacognition")
+                    for lesson in reflection.get("lessons", []):
+                        learning.add_knowledge(lesson, source="metacognition")
+                else:
+                    # Reflexion skipeada - evaluacion ligera sin LLM
+                    self._log("Reflexion skipeada (consulta simple o progreso bueno)", "evaluation")
+                    self.metacognition._last_evaluation = {
+                        "assessment": "skipped",
+                        "iterations_used": iteration + 1,
+                        "confidence_final": round(self.metacognition.confidence, 2),
+                    }
+
                 self._log("Respuesta final generada", "success")
                 self._save_interaction(user_message, final_response)
                 return final_response, self.thinking_log
@@ -288,6 +436,7 @@ class ReactAgent:
         self.metacognition.reset()
         self._tool_call_counts = {}
         self._total_tool_calls = 0
+        self._tool_failures.clear()  # M2.3: Reset failure history for new conversation
         self._log(f"Mensaje del usuario: {user_message}", "input")
 
         # Emitir evento thinking: recibiendo pregunta
@@ -312,6 +461,46 @@ class ReactAgent:
 
         max_iter = self._get_max_iterations(user_message)
         self._log(f"Iteraciones adaptativas: {max_iter} (complejidad detectada)", "react")
+
+        # M7.2: Native thinking para Qwen3 en primera iteracion de tareas complejas
+        if self._should_use_native_thinking(0, user_message):
+            self._log("M7.2: Activando native thinking para Qwen3 (tarea compleja, streaming)", "thinking")
+            yield {
+                "type": "thinking",
+                "data": {
+                    "phase": "native_thinking",
+                    "message": "Activando pensamiento nativo del modelo...",
+                    "iteration": 0,
+                    "confidence": self.metacognition.confidence,
+                }
+            }
+            try:
+                from agent.deep_thinking import detect_native_thinking_support
+                if detect_native_thinking_support(ollama.model):
+                    think_msg = f"Antes de actuar, piensa profundamente sobre esta consulta:\n{user_message}"
+                    native_response = ollama.generate_chat([
+                        {"role": "system", "content": "Eres un asistente que piensa profundamente antes de responder. Responde en espanol."},
+                        {"role": "user", "content": think_msg}
+                    ])
+                    native_think = getattr(ollama, '_last_thinking', '')
+                    if native_think:
+                        self._log(f"Native thinking capturado (streaming): {len(native_think)} chars", "thinking")
+                        messages.append({
+                            "role": "user",
+                            "content": f"[PENSAMIENTO INTERNO DEL MODELO]:\n{native_think[:1500]}\n\nUsa este analisis como guia para tu respuesta."
+                        })
+                        self.metacognition.confidence = min(1.0, self.metacognition.confidence + 0.05)
+                        yield {
+                            "type": "thinking",
+                            "data": {
+                                "phase": "native_thinking_complete",
+                                "message": f"Pensamiento nativo completado ({len(native_think)} chars)",
+                                "iteration": 0,
+                                "confidence": self.metacognition.confidence,
+                            }
+                        }
+            except Exception as e:
+                logger.debug(f"Native thinking para Qwen3 fallo (streaming, no critico): {e}")
 
         # Emitir evento thinking: buscando en memoria
         yield {
@@ -339,7 +528,7 @@ class ReactAgent:
             }
 
             # *** FIX: Metacognicion ANTES de decidir la accion ***
-            meta_prompt = self.metacognition.get_metacognitive_prompt(iteration)
+            meta_prompt = self.metacognition.get_metacognitive_prompt(iteration, max_iterations=max_iter)
             if meta_prompt:
                 self._log("Alerta metacognitiva inyectada ANTES de accion", "evaluation")
                 self._inject_metacognitive_prompt(messages, meta_prompt)
@@ -359,7 +548,9 @@ class ReactAgent:
                 already_searched = any(t in self.metacognition.tool_history for t in web_tools)
                 
                 if not already_searched:
-                    self._log("Confianza baja (streaming): ejecutando busqueda web automatica", "cloud")
+                    # M2.1: Notificacion visible de auto-busqueda en streaming
+                    self._log("No tengo suficiente contexto, buscando en internet...", "search")
+                    yield {"type": "auto_search", "data": {"query": user_message[:80], "reason": "confidence baja"}}
                     yield {"type": "tool_start", "data": {"name": "buscar_web", "params": {"consulta": user_message}}}
                     try:
                         search_result = TOOL_FUNCTIONS["buscar_web"](consulta=user_message)
@@ -386,7 +577,9 @@ class ReactAgent:
                         self._log(f"Error en busqueda web automatica: {e}", "error")
                 
                 elif "buscar_web_profundo" not in self.metacognition.tool_history and self.metacognition.confidence < 0.4:
-                    self._log("Confianza muy baja tras busqueda: ejecutando busqueda profunda", "cloud")
+                    # M2.1: Notificacion visible de busqueda profunda en streaming
+                    self._log("No tengo suficiente contexto, buscando mas en internet...", "search")
+                    yield {"type": "auto_search", "data": {"query": user_message[:80], "reason": "confidence muy baja, buscando mas"}}
                     yield {"type": "tool_start", "data": {"name": "buscar_web_profundo", "params": {"consulta": user_message}}}
                     try:
                         deep_result = TOOL_FUNCTIONS["buscar_web_profundo"](consulta=user_message)
@@ -473,32 +666,42 @@ class ReactAgent:
                         "confidence": self.metacognition.confidence,
                     }
                 }
-                # PRIMERO: Evaluar resultado para poblar _last_evaluation
-                reflection = self.metacognition.evaluate_result(
-                    user_message, full_text, iteration + 1
-                )
-                self._log(
-                    f"Evaluacion: {reflection['assessment']} (confianza={reflection['confidence_final']})",
-                    "evaluation"
-                )
+                # M7.3: Reflexion selectiva - solo cuando es necesaria
+                if self._needs_reflection(full_text, user_message):
+                    # Evaluar resultado para poblar _last_evaluation
+                    reflection = self.metacognition.evaluate_result(
+                        user_message, full_text, iteration + 1
+                    )
+                    self._log(
+                        f"Evaluacion: {reflection['assessment']} (confianza={reflection['confidence_final']})",
+                        "evaluation"
+                    )
 
-                # SEGUNDO: Ahora get_final_reflection_prompt() tiene datos reales
-                reflection_prompt = self.metacognition.get_final_reflection_prompt()
-                if reflection_prompt and len(full_text) < 100 and self.metacognition.error_count > 0:
-                    self._log("Reflexion metacognitiva: reintentando respuesta mejorada", "evaluation")
-                    try:
-                        messages.append({"role": "assistant", "content": full_text})
-                        messages.append({"role": "user", "content": reflection_prompt + "\n\nDa una respuesta mas completa."})
-                        improved = ollama.generate_chat(messages)
-                        if improved and len(improved) > len(full_text):
-                            full_text = improved
-                            yield {"type": "text", "data": "\n\n[Respuesta mejorada] " + improved}
-                    except Exception as e:
-                        logger.debug(f"Error en reflexion metacognitiva de mejora: {e}")
+                    # Ahora get_final_reflection_prompt() tiene datos reales
+                    reflection_prompt = self.metacognition.get_final_reflection_prompt()
+                    if reflection_prompt and len(full_text) < 100 and self.metacognition.error_count > 0:
+                        self._log("Reflexion metacognitiva: reintentando respuesta mejorada", "evaluation")
+                        try:
+                            messages.append({"role": "assistant", "content": full_text})
+                            messages.append({"role": "user", "content": reflection_prompt + "\n\nDa una respuesta mas completa."})
+                            improved = ollama.generate_chat(messages)
+                            if improved and len(improved) > len(full_text):
+                                full_text = improved
+                                yield {"type": "text", "data": "\n\n[Respuesta mejorada] " + improved}
+                        except Exception as e:
+                            logger.debug(f"Error en reflexion metacognitiva de mejora: {e}")
 
-                # Respuesta final - terminar
-                for lesson in reflection.get("lessons", []):
-                    learning.add_knowledge(lesson, source="metacognition")
+                    # Respuesta final - guardar lecciones
+                    for lesson in reflection.get("lessons", []):
+                        learning.add_knowledge(lesson, source="metacognition")
+                else:
+                    # Reflexion skipeada - evaluacion ligera sin LLM
+                    self._log("Reflexion skipeada (consulta simple o progreso bueno)", "evaluation")
+                    self.metacognition._last_evaluation = {
+                        "assessment": "skipped",
+                        "iterations_used": iteration + 1,
+                        "confidence_final": round(self.metacognition.confidence, 2),
+                    }
 
                 self._log("Respuesta final generada (streaming)", "success")
                 self._save_interaction(user_message, full_text)
@@ -906,6 +1109,7 @@ class ReactAgent:
     def _execute_tool_calls(self, tool_calls, messages):
         """Ejecuta multiples tool calls con rate limiting y paralelismo."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
+        from config import TOOL_EXECUTION_TIMEOUT
 
         # Rate limiting: filtrar herramientas que se llamaron demasiadas veces
         filtered_calls = []
@@ -945,7 +1149,7 @@ class ReactAgent:
                 results.append(self._execute_single_tool(tc, messages))
             return results
 
-        # Ejecucion paralela para tools de solo lectura
+        # M2.4: Ejecucion paralela para tools de solo lectura con timeout global
         results = [None] * len(tool_calls)
         with ThreadPoolExecutor(max_workers=min(len(tool_calls), 3)) as executor:
             futures = {}
@@ -953,12 +1157,22 @@ class ReactAgent:
                 future = executor.submit(self._execute_single_tool, tc, messages)
                 futures[future] = i
             
-            for future in as_completed(futures):
-                idx = futures[future]
-                try:
-                    results[idx] = future.result(timeout=30)
-                except Exception as e:
-                    results[idx] = f"ERROR: {e}"
+            try:
+                for future in as_completed(futures, timeout=TOOL_EXECUTION_TIMEOUT):
+                    idx = futures[future]
+                    try:
+                        results[idx] = future.result(timeout=30)
+                    except Exception as e:
+                        results[idx] = f"ERROR: {e}"
+            except TimeoutError:
+                # M2.4: Cancel remaining futures on global timeout
+                for f in futures:
+                    f.cancel()
+                logger.warning(f"Timeout global en ejecucion de tools ({TOOL_EXECUTION_TIMEOUT}s)")
+                # Fill any remaining None results with timeout error
+                for i in range(len(results)):
+                    if results[i] is None:
+                        results[i] = f"ERROR: Timeout global ({TOOL_EXECUTION_TIMEOUT}s) - ejecucion cancelada"
 
         return results
 
@@ -967,6 +1181,16 @@ class ReactAgent:
         import time as _time
         tool_name = tc["name"]
         tool_params = tc["params"]
+
+        # M2.3: Check if this tool already failed with similar params
+        if self._tool_failures.has_failed_with_similar_params(tool_name, tool_params):
+            last_err = self._tool_failures.get_last_error(tool_name)
+            self._log(
+                f"Tool {tool_name} ya fallo con params similares: {last_err[:80] if last_err else 'unknown'}",
+                "warning"
+            )
+            # Skip execution and return cached error info
+            return f"ERROR: {tool_name} ya fallo con los mismos parametros ({last_err[:100] if last_err else 'error previo'}). Intenta con parametros diferentes o otra herramienta."
 
         self._log(f"Ejecutando: {tool_name}({tool_params})", "execution")
 
@@ -1005,6 +1229,8 @@ class ReactAgent:
 
         if "ERROR" in tool_result:
             get_metrics().record_error("tool:" + tool_name)
+            # M2.3: Record tool failure in history
+            self._tool_failures.record_failure(tool_name, tool_params, tool_result[:200])
 
         # v16.3: SkillRouter — Record success/failure history
         try:

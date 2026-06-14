@@ -151,6 +151,21 @@ class DeepThinking:
     # Rango de complejidad donde se usa LLM para desempatar
     LLM_AMBIGUITY_RANGE = (0.2, 0.5)
 
+    # M7.1: Patrones que activan deep thinking por tipo semantico
+    DEEP_THINK_TRIGGERS = {
+        "ethical_dilemma": r"deber[i\u00eda]|\u00e9tico|correcto|moral",
+        "multi_constraint": r"que sea.*y.*tambi[e\u00e9]n|cumpliendo.*y",
+        "ambiguous": r"depende|puede que|no estoy seguro",
+        "code_architecture": r"arquitectura|dise[\u00f1]o.*sistema|patr[o\u00f3]n",
+        "data_analysis": r"por qu[e\u00e9].*resultado|qu[e\u00e9].*significa.*dato",
+    }
+
+    # M7.1: Patrones que SKIP deep thinking (consultas simples)
+    DEEP_THINK_SKIP_PATTERNS = [
+        r"^(hola|hey|buenos d[i\u00ed]as|gracias|ok|s[i\u00ed]|no|entiendo)$",
+        r"^(crea|abre|lee|ejecuta|busca)\s+(un|el|la)\s+\w+$",  # Simple single-step
+    ]
+
     def __init__(self, mode=None):
         """
         Args:
@@ -174,16 +189,66 @@ class DeepThinking:
     # EVALUACION DE COMPLEJIDAD
     # ----------------------------------------------------------
 
+    # ----------------------------------------------------------
+    # M7.1: DECISION ADAPTATIVA DE DEEP THINKING
+    # ----------------------------------------------------------
+
+    def _should_deep_think(self, user_message: str) -> bool:
+        """
+        M7.1: Decide si deep thinking es justificado para esta consulta.
+
+        Usa patrones semantitos para detectar:
+        - Dilemas eticos
+        - Multi-restriccion
+        - Ambiguedad
+        - Arquitectura de codigo
+        - Analisis de datos
+
+        Y SKIPara consultas simples (saludos, comandos directos).
+
+        Returns:
+            True si la consulta justifica deep thinking
+        """
+        import re
+        msg_lower = user_message.lower().strip()
+
+        # Skip consultas simples
+        for skip_pattern in self.DEEP_THINK_SKIP_PATTERNS:
+            if re.match(skip_pattern, msg_lower):
+                return False
+
+        # Contar triggers semanticos
+        trigger_count = sum(
+            1 for pattern in self.DEEP_THINK_TRIGGERS.values()
+            if re.search(pattern, msg_lower)
+        )
+
+        return trigger_count >= 1
+
     def should_think_deep(self, user_message):
         """
         Evalua si una consulta merece pensamiento profundo.
 
         Usa evaluacion hibrida: heuristica rapida + LLM para casos ambiguos.
+        M7.1: Incorpora _should_deep_think() como gate semantico.
 
         Retorna: (should_think: bool, complexity: float, query_type: str)
         """
         if self.mode == "off":
             return False, 0.0, "conversational"
+
+        # M7.1: Gate semantico - skip consultas que no justifican deep thinking
+        if not self._should_deep_think(user_message):
+            # Aun puede activarse si la complejidad heuristica es alta
+            # Pero con un umbral mas alto (0.5 en vez de 0.3)
+            msg_lower = user_message.lower()
+            complexity = self._heuristic_complexity(msg_lower, user_message)
+            query_type = self._classify_query(msg_lower)
+            should = complexity >= max(DEEP_THINKING_MIN_COMPLEXITY, 0.5)
+            self._stats["total_queries"] += 1
+            if should:
+                self._stats["deep_think_activated"] += 1
+            return should, complexity, query_type
 
         msg_lower = user_message.lower()
 

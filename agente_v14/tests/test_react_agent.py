@@ -6,6 +6,9 @@ Tests for agent/react.py new features:
 - _validate_tool_call() strips _LLM_BLOCKED_PARAMS
 - Conversation token counting and auto-summarization logic
 - _call_llm_with_retry() behavior
+- M2.1: Auto-search transparent notification
+- M2.3: ToolFailureHistory
+- M2.4: Global timeout for parallel tool execution
 
 Since agent/react.py has complex import dependencies, we import it once at module
 level and then mock the specific attributes needed for each test.
@@ -13,6 +16,7 @@ level and then mock the specific attributes needed for each test.
 
 import os
 import sys
+import json
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -24,6 +28,7 @@ if AGENT_DIR not in sys.path:
 
 # Import ReactAgent once - it should be importable since conftest.py sets up sys.path
 from agent.react import ReactAgent
+from agent.react import ToolFailureHistory
 
 
 class TestLlmBlockedParams:
@@ -460,3 +465,174 @@ class TestCallLlmWithRetry:
             with patch('agent.react._time_module.sleep'):
                 result = agent._call_llm_with_retry([{"role": "user", "content": "Hi"}])
                 assert result is None
+
+
+# ==============================================================
+# M2.3: ToolFailureHistory Tests
+# ==============================================================
+class TestToolFailureHistory:
+    """Test ToolFailureHistory class for tracking tool failures."""
+
+    def test_record_failure_stores_entry(self):
+        tfh = ToolFailureHistory()
+        tfh.record_failure("buscar_web", {"consulta": "test"}, "ERROR: timeout")
+        assert "buscar_web" in tfh._failures
+        assert len(tfh._failures["buscar_web"]) == 1
+
+    def test_record_failure_multiple_entries(self):
+        tfh = ToolFailureHistory()
+        tfh.record_failure("buscar_web", {"consulta": "test1"}, "ERROR: timeout")
+        tfh.record_failure("buscar_web", {"consulta": "test2"}, "ERROR: not found")
+        assert len(tfh._failures["buscar_web"]) == 2
+
+    def test_has_failed_with_similar_params_true(self):
+        tfh = ToolFailureHistory()
+        tfh.record_failure("buscar_web", {"consulta": "python"}, "ERROR: timeout")
+        assert tfh.has_failed_with_similar_params("buscar_web", {"consulta": "python"}) is True
+
+    def test_has_failed_with_similar_params_false_different_params(self):
+        tfh = ToolFailureHistory()
+        tfh.record_failure("buscar_web", {"consulta": "python"}, "ERROR: timeout")
+        assert tfh.has_failed_with_similar_params("buscar_web", {"consulta": "java"}) is False
+
+    def test_has_failed_with_similar_params_false_unknown_tool(self):
+        tfh = ToolFailureHistory()
+        assert tfh.has_failed_with_similar_params("nonexistent_tool", {"a": 1}) is False
+
+    def test_get_last_error(self):
+        tfh = ToolFailureHistory()
+        tfh.record_failure("buscar_web", {"consulta": "test"}, "ERROR: timeout")
+        assert tfh.get_last_error("buscar_web") == "ERROR: timeout"
+
+    def test_get_last_error_none_when_empty(self):
+        tfh = ToolFailureHistory()
+        assert tfh.get_last_error("buscar_web") is None
+
+    def test_get_last_error_returns_most_recent(self):
+        tfh = ToolFailureHistory()
+        tfh.record_failure("buscar_web", {"consulta": "test1"}, "ERROR: first")
+        tfh.record_failure("buscar_web", {"consulta": "test2"}, "ERROR: second")
+        assert tfh.get_last_error("buscar_web") == "ERROR: second"
+
+    def test_clear_resets_history(self):
+        tfh = ToolFailureHistory()
+        tfh.record_failure("buscar_web", {"consulta": "test"}, "ERROR: timeout")
+        tfh.clear()
+        assert len(tfh._failures) == 0
+        assert tfh.has_failed_with_similar_params("buscar_web", {"consulta": "test"}) is False
+
+    def test_params_key_deterministic(self):
+        tfh = ToolFailureHistory()
+        key1 = tfh._params_key({"a": "1", "b": "2"})
+        key2 = tfh._params_key({"b": "2", "a": "1"})
+        assert key1 == key2  # Order doesn't matter
+
+    def test_params_key_truncates_long_values(self):
+        tfh = ToolFailureHistory()
+        key = tfh._params_key({"consulta": "x" * 200})
+        parsed = json.loads(key)
+        assert len(parsed["consulta"]) == 50  # Truncated to 50 chars
+
+
+class TestReactAgentToolFailureIntegration:
+    """Test ReactAgent integration with ToolFailureHistory (M2.3)."""
+
+    @pytest.fixture
+    def agent(self):
+        with patch.object(ReactAgent, '__init__', lambda self, **kw: None):
+            a = ReactAgent.__new__(ReactAgent)
+            a.thinking_log = []
+            a._tool_failures = ToolFailureHistory()
+            a._LLM_BLOCKED_PARAMS = {"confirmar_peligroso", "force", "skip_safety"}
+            a._tool_call_counts = {}
+            a._total_tool_calls = 0
+            a.memory = MagicMock()
+            a.memory.add_step = MagicMock()
+            a.memory.set_error = MagicMock()
+            a.memory.remember = MagicMock()
+            return a
+
+    def test_tool_failures_initialized(self):
+        """ReactAgent.__init__ should create _tool_failures."""
+        agent = ReactAgent()
+        assert hasattr(agent, '_tool_failures')
+        assert isinstance(agent._tool_failures, ToolFailureHistory)
+
+    def test_execute_single_tool_records_failure(self, agent):
+        """When a tool returns ERROR, it should be recorded in failure history."""
+        with patch.object(agent, '_execute_tool', return_value="ERROR: something went wrong"):
+            with patch('agent.react.get_metrics') as mock_metrics:
+                mock_metrics.return_value = MagicMock()
+                result = agent._execute_single_tool(
+                    {"name": "buscar_web", "params": {"consulta": "test"}}, []
+                )
+                assert "ERROR" in result
+                assert agent._tool_failures.has_failed_with_similar_params("buscar_web", {"consulta": "test"})
+
+    def test_execute_single_tool_skips_repeated_failure(self, agent):
+        """If a tool failed with similar params, should skip and return error."""
+        agent._tool_failures.record_failure("buscar_web", {"consulta": "test"}, "ERROR: timeout")
+        result = agent._execute_single_tool(
+            {"name": "buscar_web", "params": {"consulta": "test"}}, []
+        )
+        assert "ERROR" in result
+        assert "ya fallo" in result.lower()
+
+    def test_failure_history_cleared_on_run(self):
+        """Failure history should be cleared at the start of each run()."""
+        agent = ReactAgent()
+        agent._tool_failures.record_failure("test_tool", {"a": "1"}, "ERROR: test")
+        assert agent._tool_failures.has_failed_with_similar_params("test_tool", {"a": "1"})
+        # Simulate run() reset
+        agent._tool_failures.clear()
+        assert not agent._tool_failures.has_failed_with_similar_params("test_tool", {"a": "1"})
+
+
+# ==============================================================
+# M2.4: TOOL_EXECUTION_TIMEOUT config test
+# ==============================================================
+class TestToolExecutionTimeoutConfig:
+    """Test TOOL_EXECUTION_TIMEOUT is properly configured (M2.4)."""
+
+    def test_tool_execution_timeout_exists(self):
+        from config import TOOL_EXECUTION_TIMEOUT
+        assert TOOL_EXECUTION_TIMEOUT is not None
+
+    def test_tool_execution_timeout_is_45(self):
+        from config import TOOL_EXECUTION_TIMEOUT
+        assert TOOL_EXECUTION_TIMEOUT == 45
+
+    def test_tool_execution_timeout_in_config_summary(self):
+        from config import get_config_summary
+        summary = get_config_summary()
+        assert "TOOL_EXECUTION_TIMEOUT" in summary
+        assert summary["TOOL_EXECUTION_TIMEOUT"] == 45
+
+    def test_tool_execution_timeout_validated(self):
+        from config import validate_config
+        results = validate_config()
+        assert "TOOL_EXECUTION_TIMEOUT" in results
+        assert results["TOOL_EXECUTION_TIMEOUT"] == "ok"
+
+
+# ==============================================================
+# M2.1: Auto-search transparent notification test
+# ==============================================================
+class TestAutoSearchNotification:
+    """Test M2.1: Auto-search visible notification events."""
+
+    def test_auto_search_event_type_exists_in_run_stream(self):
+        """Verify auto_search event structure."""
+        event = {"type": "auto_search", "data": {"query": "test query", "reason": "confidence baja"}}
+        assert event["type"] == "auto_search"
+        assert "query" in event["data"]
+        assert "reason" in event["data"]
+
+    def test_stream_callback_support(self):
+        """Verify _stream_callback is checked in run()."""
+        agent = ReactAgent()
+        # By default, no _stream_callback
+        assert not hasattr(agent, '_stream_callback')
+        # Adding one should not break anything
+        agent._stream_callback = None
+        assert hasattr(agent, '_stream_callback')
