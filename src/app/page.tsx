@@ -2003,16 +2003,16 @@ function ConfirmationDialog({
 
 function AdvancedModuleStatus({ name, endpoint }: { name: string; endpoint: string }) {
   const [status, setStatus] = useState<"loading" | "available" | "unavailable">("loading");
+  const [details, setDetails] = useState<Record<string, unknown> | null>(null);
 
   useEffect(() => {
     const check = async () => {
       try {
-        const token = process.env.NEXT_PUBLIC_BRIDGE_TOKEN;
-        const headers: Record<string, string> = {};
-        if (token) headers["Authorization"] = `Bearer ${token}`;
-        const res = await fetch(`http://localhost:8000${endpoint}`, { headers, signal: AbortSignal.timeout(3000) });
+        // Use Next.js API route proxy instead of calling bridge directly (B6 fix)
+        const res = await fetch(endpoint, { signal: AbortSignal.timeout(5000) });
         if (res.ok) {
           const data = await res.json();
+          setDetails(data);
           setStatus(data.available !== false ? "available" : "unavailable");
         } else {
           setStatus("unavailable");
@@ -2022,6 +2022,8 @@ function AdvancedModuleStatus({ name, endpoint }: { name: string; endpoint: stri
       }
     };
     check();
+    const interval = setInterval(check, 30000); // Re-check every 30s
+    return () => clearInterval(interval);
   }, [endpoint]);
 
   return (
@@ -2515,16 +2517,24 @@ export default function AgentLocalInterface() {
     const recognition = new SpeechRecognition();
     recognition.continuous = false;
     recognition.interimResults = false;
-    recognition.lang = "en-US";
+    // Auto-detect language from model name (Spanish models start with "qwen3")
+    const modelName = selectedModel.toLowerCase();
+    recognition.lang = modelName.includes("qwen3") || modelName.includes("spanish") ? "es-ES" : "en-US";
 
     recognition.onresult = (event: any) => {
       const transcript = event.results[0][0].transcript;
       setInput((prev) => (prev ? prev + " " + transcript : transcript));
       setIsRecording(false);
+      toast.success("Voice input captured");
     };
 
-    recognition.onerror = () => {
+    recognition.onerror = (event: any) => {
       setIsRecording(false);
+      if (event.error === "not-allowed") {
+        toast.error("Microphone access denied. Check browser permissions.");
+      } else {
+        toast.error(`Voice error: ${event.error}`);
+      }
     };
 
     recognition.onend = () => {
@@ -2534,7 +2544,8 @@ export default function AgentLocalInterface() {
     recognitionRef.current = recognition;
     recognition.start();
     setIsRecording(true);
-  }, [isRecording]);
+    toast.info("Listening...");
+  }, [isRecording, selectedModel]);
 
   // ─── Stop Generation ────────────────────────────────────────────────────
 
@@ -2951,14 +2962,18 @@ export default function AgentLocalInterface() {
       totalTokens: 0,
     });
     responseTimesRef.current = [];
-    // Also clear agent memory via bridge (B2 fix)
-    if (useAgent) {
-      try {
+    setExpandedThinking({});
+    // Reset both agent memory and conversation context (B2 + B8 fix)
+    try {
+      if (useAgent) {
         await fetch("/api/memory/clear", { method: "POST" });
-      } catch {
-        // Bridge not available - local clear is sufficient
       }
+      // Also reset bridge conversation context to sync AGENT/CHAT modes (B8)
+      await fetch("/api/reset", { method: "POST" });
+    } catch {
+      // Bridge not available - local clear is sufficient
     }
+    toast.success("Chat cleared");
   };
 
   // ─── Save Config ─────────────────────────────────────────────────────
@@ -3968,7 +3983,7 @@ export default function AgentLocalInterface() {
                   {[
                     { name: "Orchestrator", endpoint: "/api/orchestrator/status" },
                     { name: "Circuit Breaker", endpoint: "/api/circuit-breaker/status" },
-                    { name: "Auto-Evolve", endpoint: "/api/auto-evolve/log" },
+                    { name: "Auto-Evolve", endpoint: "/api/auto-evolve" },
                     { name: "MCP Client", endpoint: "/api/mcp/status" },
                   ].map((mod) => (
                     <AdvancedModuleStatus key={mod.name} name={mod.name} endpoint={mod.endpoint} />
