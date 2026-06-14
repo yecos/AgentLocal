@@ -12,6 +12,8 @@ Endpoints:
 - GET  /api/memory      - Stats de memoria
 - POST /api/memory/save  - Guardar sesion
 - POST /api/memory/clear - Limpiar sesion
+- POST /api/reset       - Resetear contexto de conversacion
+- GET  /api/version     - Informacion de version
 - GET  /api/config      - Configuracion actual (non-sensitive)
 - GET  /api/sessions    - Listar sesiones guardadas
 - POST /api/execute     - Ejecutar una herramienta directamente
@@ -33,8 +35,7 @@ import asyncio
 import time
 import queue
 import threading
-import traceback
-import shutil
+
 import logging
 import signal
 import uuid
@@ -777,6 +778,61 @@ async def upload_files(files: List[UploadFile] = File(...), auth=Depends(verify_
             })
 
     return {"files": uploaded, "count": len(uploaded)}
+
+
+@app.get("/api/version")
+async def version():
+    """Version del API y del agente. No requiere auth."""
+    version_info = {
+        "api_version": "17.0.0",
+        "agent_version": "17.0.0",
+        "bridge_api": "v16",
+        "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "agent_available": AGENT_AVAILABLE,
+    }
+    if AGENT_AVAILABLE:
+        try:
+            version_info["tools_count"] = len(TOOL_FUNCTIONS)
+            version_info["active_model"] = getattr(ollama, 'model', None)
+        except Exception:
+            pass
+    return version_info
+
+
+@app.post("/api/reset")
+async def reset_conversation(auth=Depends(verify_token)):
+    """Resetea el contexto de conversacion del agente.
+
+    Limpia la memoria a corto plazo, el historial de thinking, y recrea el agente.
+    La memoria a largo plazo (aprendizaje) se preserva.
+    """
+    global _agent
+    if not AGENT_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Agente no disponible.")
+
+    with _agent_lock:
+        try:
+            # Save current session before reset
+            if _memory is not None:
+                _memory.save_session()
+
+            # Clear short-term memory but preserve long-term learning
+            mem = get_memory()
+            mem.short_term = []
+            mem.medium_term = []
+
+            # Recreate agent with same memory instance
+            _agent = ReactAgent(memory=mem)
+
+            _bridge_logger.info("Conversation context reset successfully")
+            return {
+                "status": "ok",
+                "message": "Contexto de conversacion reiniciado. Memoria de aprendizaje preservada.",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        except Exception as e:
+            _bridge_logger.error(f"Error resetting conversation: {e}")
+            raise HTTPException(status_code=500, detail=f"Error reiniciando conversacion: {str(e)}")
 
 
 @app.get("/api/history")

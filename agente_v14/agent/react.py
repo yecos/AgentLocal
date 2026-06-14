@@ -12,7 +12,6 @@ v14.3: Streaming REAL token-a-token, metacognicion integrada,
 import os
 import re
 import json
-import logging
 from datetime import datetime
 
 import time as _time_module

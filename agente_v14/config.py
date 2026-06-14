@@ -12,7 +12,6 @@ v14.8: validate_config(), env var overrides, get_config_summary()
 import os
 import platform
 import logging
-from pathlib import Path
 
 # ============================================================
 # LOGGING

@@ -902,3 +902,95 @@ Stage Summary:
 - 324 total new tests (48 + 71 + 63 + 42 + 41 + 59)
 - All 523 tests pass (324 new + 199 existing)
 - 1 production bug fixed (undefined logger in bridge_api.py)
+
+---
+Task ID: 9-r5
+Agent: R5 Agent
+Task: Final cleanup and remaining improvements
+
+Work Log:
+TASK 1: Fix .gitignore - add comprehensive ignore patterns
+- Created /home/z/my-project/agente_v14/.gitignore (NEW file, ~120 lines)
+- Python bytecode: __pycache__/, *.py[cod], *.egg, *.egg-info/, dist/, build/
+- IDE: .vscode/, .idea/, *.swp, *.swo
+- OS: .DS_Store, Thumbs.db, desktop.ini
+- Sensitive: *.env, *.key, *.pem, .hmac_key, secrets.json
+- Node: node_modules/
+- Backups: *.bak, *.bak.*, *.orig, *.tmp
+- Agent data: *.log, metrics.json, session files, user profile, vectors
+- Testing: .pytest_cache/, .coverage, htmlcov/
+- Type checking: .mypy_cache/
+- Generated media: *.png, *.jpg, *.mp3, *.wav, *.mp4 (with exception for docs/img/)
+
+TASK 2: Remove exposed GitHub token from git remote
+- Ran: git remote set-url origin https://github.com/yecos/AgentLocal.git
+- PAT token ***REDACTED*** removed from URL
+- Future pushes will need SSH keys or credential helper
+
+TASK 3: Add pyproject.toml for the project
+- Created /home/z/my-project/agente_v14/pyproject.toml (NEW file)
+- Project: agent-local v17.0.0, requires-python >= 3.9
+- 9 core dependencies (ollama, fastapi, uvicorn, requests, etc.)
+- 9 optional dependency groups: ui, documents, chromadb, data, multimedia, web, gpu, dev, all
+- pytest config: testpaths=["tests"], addopts="-v --tb=short"
+- mypy config: python_version=3.9, ignore_missing_imports=true
+- ruff config: target=py39, line-length=120
+- Verified: valid TOML, all groups load correctly
+
+TASK 4: Improve tools/schemas.py
+- Verified all 83 tool schemas match their registered function names
+- Added missing parameters to schemas:
+  - ejecutar_comando: added cwd, confirmar_peligroso, timeout params
+  - buscar_web: added use_cache param
+  - leer_documento: added separador, max_filas, max_capitulos, idioma params
+  - ejecutar_subagente: added max_iteraciones param, corrected timeout default to 120
+  - crear_dashboard: added opciones param
+- Added enum constraints to 15 parameters that previously had free-form strings:
+  - instalar_dependencias.gestor: ["auto", "npm", "pip", "poetry", "yarn", "cargo"]
+  - editar_imagen.accion: ["info", "redimensionar", "recortar", "rotar", "convertir", "espejo", "grayscale", "ajustar"]
+  - analizar_video.accion: ["info", "frames", "analizar", "transcribir"]
+  - ejecutar_subagente.tipo: ["researcher", "coder", "analyst", "writer", "reviewer", "general"]
+  - orquestar.estrategia: ["auto", "secuencial", "paralelo", "mixto"]
+  - crear_proyecto_web.tipo: ["nextjs", "react", "vue", "express", "static"]
+  - resumir_url.extraer: ["texto", "metadatos", "html", "links", "imagenes"]
+  - configurar_api_key.servicio: ["google", "google_cx", "openai", "anthropic", "stability", "replicate", "huggingface", "google_gemini"]
+  - crear_dashboard.layout: ["auto", "2x2", "3x2", "2x3", "1x3", "3x1"]
+  - limpiar_datos.operaciones: ["duplicados", "nulos", "outliers", "normalizar", "tipos", "todo"]
+  - transformar_datos.operacion: ["filtrar", "ordenar", "agrupar", "seleccionar", "renombrar", "agregar_columna", "head", "sample"]
+  - parsear_datos.formato_origen: ["auto", "csv", "json", "tsv", "yaml", "xml"]
+  - parsear_datos.formato_destino: ["json", "csv", "tsv", "yaml", "tabla"]
+  - exportar_datos.formato: ["csv", "json", "xlsx", "tsv"]
+  - merge_datos.tipo: ["inner", "left", "right", "outer"]
+  - tabla_pivote.funcion: ["sum", "mean", "count", "min", "max"]
+  - listar_glob.solo_tipo: ["todos", "archivos", "directorios"]
+
+TASK 5: Add error recovery improvements to bridge_api.py
+- Added GET /api/version endpoint (no auth required):
+  Returns api_version, agent_version, bridge_api version, python version, agent_available, tools_count, active_model
+- Added POST /api/reset endpoint (auth required):
+  Saves current session, clears short_term and medium_term memory, recreates agent instance
+  Preserves long-term learning memory
+  Returns structured response with timestamp
+- Updated docstring to list both new endpoints
+
+TASK 6: Clean up unused imports
+- agent/react.py: removed unused `import logging` (logger imported from config)
+- bridge_api.py: removed unused `import shutil` and `import traceback`
+- config.py: removed unused `from pathlib import Path`
+- llm.py: all imports verified as used (json, os, logging, datetime, OrderedDict, config, metrics)
+
+Verification:
+- All 523 tests pass (python -m pytest tests/ -q --tb=short)
+- Schemas load: 76 schemas in file, 83 total registered (including inline @tool schemas)
+- All 83 registered functions have matching schemas
+- bridge_api.py syntax OK, 17 endpoints found including new /api/version and /api/reset
+- pyproject.toml valid TOML, 9 optional dependency groups
+
+Stage Summary:
+- .gitignore created with comprehensive patterns (~120 lines)
+- GitHub PAT token removed from git remote URL
+- pyproject.toml created with project metadata, 9 dependency groups, pytest/mypy/ruff config
+- 15 schema parameters enhanced with enum constraints, 6 missing params added
+- 2 new API endpoints: GET /api/version, POST /api/reset
+- 3 unused imports removed across 3 files
+- All 523 tests pass

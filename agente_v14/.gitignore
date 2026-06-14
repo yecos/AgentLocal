@@ -1,0 +1,123 @@
+# ============================================================
+# Python
+# ============================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+*.whl
+dist/
+build/
+eggs/
+sdist/
+develop-eggs/
+.installed.cfg
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ============================================================
+# Virtual environments
+# ============================================================
+.venv/
+venv/
+ENV/
+env/
+
+# ============================================================
+# IDE / Editor
+# ============================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# ============================================================
+# OS
+# ============================================================
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# ============================================================
+# Sensitive / Secrets
+# ============================================================
+.env
+.env.*
+*.key
+*.pem
+.hmac_key
+secrets.json
+
+# ============================================================
+# Node.js
+# ============================================================
+node_modules/
+
+# ============================================================
+# Backup files
+# ============================================================
+*.bak
+*.bak.*
+*.orig
+*.tmp
+
+# ============================================================
+# Agent data / metrics (runtime generated)
+# ============================================================
+# Learning data (user-specific, should not be committed)
+# Note: we ignore the data files but keep the directory structure
+*.log
+metrics.json
+session*.json
+user_profile.json
+corrections.json
+feedback.json
+patterns.json
+knowledge.json
+ollama_connection.json
+notes.json
+vectors.pkl
+vectors.json
+index.pkl
+
+# ============================================================
+# Uploads directory
+# ============================================================
+uploads/
+
+# ============================================================
+# Testing / Coverage
+# ============================================================
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# ============================================================
+# MyPy / Type checking
+# ============================================================
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# ============================================================
+# Project-specific: generated images, audio, documents
+# ============================================================
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+!docs/img/*.png
+*.mp3
+*.wav
+*.mp4
+*.avi
+*.mov

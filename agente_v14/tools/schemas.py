@@ -19,7 +19,10 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "comando": {"type": "string", "description": "Comando a ejecutar"}
+                    "comando": {"type": "string", "description": "Comando a ejecutar"},
+                    "cwd": {"type": "string", "description": "Directorio de trabajo (opcional)"},
+                    "confirmar_peligroso": {"type": "boolean", "description": "Si el usuario confirmo un comando peligroso (default False)"},
+                    "timeout": {"type": "integer", "description": "Timeout en segundos (default 90)"}
                 },
                 "required": ["comando"]
             }
@@ -163,7 +166,7 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "ruta": {"type": "string", "description": "Ruta del proyecto"},
-                    "gestor": {"type": "string", "description": "Gestor de paquetes (auto/npm/pip/poetry)"}
+                    "gestor": {"type": "string", "enum": ["auto", "npm", "pip", "poetry", "yarn", "cargo"], "description": "Gestor de paquetes (auto = detectar)"}
                 },
                 "required": ["ruta"]
             }
@@ -220,7 +223,8 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "consulta": {"type": "string", "description": "Consulta de busqueda"}
+                    "consulta": {"type": "string", "description": "Consulta de busqueda"},
+                    "use_cache": {"type": "boolean", "description": "Usar cache de resultados (default True)"}
                 },
                 "required": ["consulta"]
             }
@@ -258,7 +262,11 @@ TOOL_SCHEMAS = [
                     "tabla": {"type": "string", "description": "Tabla a ver (solo SQLite/XLSX)"},
                     "archivo_interno": {"type": "string", "description": "Archivo interno a extraer (solo ZIP/TAR)"},
                     "pagina_inicio": {"type": "integer", "description": "Pagina inicial (solo PDF, 1-indexed)"},
-                    "pagina_fin": {"type": "integer", "description": "Pagina final (solo PDF)"}
+                    "pagina_fin": {"type": "integer", "description": "Pagina final (solo PDF)"},
+                    "separador": {"type": "string", "description": "Separador CSV (solo CSV, default coma)"},
+                    "max_filas": {"type": "integer", "description": "Maximo filas (solo CSV/XLSX/SQLite, default 50)"},
+                    "max_capitulos": {"type": "integer", "description": "Max capitulos (solo ePub, default 10)"},
+                    "idioma": {"type": "string", "description": "Idioma OCR si es imagen (solo para imagenes dentro de docs)"}
                 },
                 "required": ["ruta"]
             }
@@ -632,7 +640,8 @@ TOOL_SCHEMAS = [
                     "ruta": {"type": "string", "description": "Ruta donde guardar el dashboard (PNG o SVG)"},
                     "graficos": {"type": "string", "description": "Lista JSON de graficos: [{tipo, datos, titulo}, ...]"},
                     "titulo": {"type": "string", "description": "Titulo del dashboard"},
-                    "layout": {"type": "string", "description": "Layout: auto, 2x2, 3x2, 2x3, 1x3, 3x1"}
+                    "layout": {"type": "string", "enum": ["auto", "2x2", "3x2", "2x3", "1x3", "3x1"], "description": "Layout del grid (default auto)"},
+                    "opciones": {"type": "string", "description": "Opciones globales en JSON (colores, fondo, etc.)"}
                 },
                 "required": ["ruta", "graficos"]
             }
@@ -750,7 +759,7 @@ TOOL_SCHEMAS = [
                     "filas": {"type": "string", "description": "Columna para las filas"},
                     "columnas": {"type": "string", "description": "Columna para las columnas"},
                     "valores": {"type": "string", "description": "Columna de valores a agregar"},
-                    "funcion": {"type": "string", "description": "Funcion: sum, mean, count, min, max"}
+                    "funcion": {"type": "string", "enum": ["sum", "mean", "count", "min", "max"], "description": "Funcion de agregacion (default sum)"}
                 },
                 "required": ["datos", "filas"]
             }
@@ -767,7 +776,7 @@ TOOL_SCHEMAS = [
                     "datos1": {"type": "string", "description": "Primer dataset (CSV o JSON)"},
                     "datos2": {"type": "string", "description": "Segundo dataset (CSV o JSON)"},
                     "clave": {"type": "string", "description": "Columna clave para el join"},
-                    "tipo": {"type": "string", "description": "Tipo: inner, left, right, outer"}
+                    "tipo": {"type": "string", "enum": ["inner", "left", "right", "outer"], "description": "Tipo de join (default inner)"}
                 },
                 "required": ["datos1", "datos2"]
             }
@@ -782,7 +791,7 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "datos": {"type": "string", "description": "Datos en CSV o JSON"},
-                    "operaciones": {"type": "string", "description": "Operaciones: duplicados, nulos, outliers, normalizar, tipos, todo"}
+                    "operaciones": {"type": "string", "enum": ["duplicados", "nulos", "outliers", "normalizar", "tipos", "todo"], "description": "Operacion de limpieza (default todo)"}
                 },
                 "required": ["datos"]
             }
@@ -797,7 +806,7 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "datos": {"type": "string", "description": "Datos en CSV o JSON"},
-                    "operacion": {"type": "string", "description": "Operacion: filtrar, ordenar, agrupar, seleccionar, renombrar, agregar_columna, head, sample"},
+                    "operacion": {"type": "string", "enum": ["filtrar", "ordenar", "agrupar", "seleccionar", "renombrar", "agregar_columna", "head", "sample"], "description": "Tipo de transformacion"},
                     "parametros": {"type": "string", "description": "Parametros en JSON"}
                 },
                 "required": ["datos", "operacion"]
@@ -813,8 +822,8 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "datos": {"type": "string", "description": "Datos en formato de origen"},
-                    "formato_origen": {"type": "string", "description": "Formato: auto, csv, json, tsv, yaml, xml"},
-                    "formato_destino": {"type": "string", "description": "Formato: json, csv, tsv, yaml, tabla"}
+                    "formato_origen": {"type": "string", "enum": ["auto", "csv", "json", "tsv", "yaml", "xml"], "description": "Formato de origen (auto = detectar)"},
+                    "formato_destino": {"type": "string", "enum": ["json", "csv", "tsv", "yaml", "tabla"], "description": "Formato de destino"}
                 },
                 "required": ["datos"]
             }
@@ -830,7 +839,7 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "datos": {"type": "string", "description": "Datos en CSV o JSON"},
                     "ruta": {"type": "string", "description": "Ruta del archivo de salida"},
-                    "formato": {"type": "string", "description": "Formato: csv, json, xlsx, tsv"}
+                    "formato": {"type": "string", "enum": ["csv", "json", "xlsx", "tsv"], "description": "Formato de salida (default csv)"}
                 },
                 "required": ["datos", "ruta"]
             }
@@ -884,7 +893,7 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "ruta_entrada": {"type": "string", "description": "Ruta de la imagen"},
-                    "accion": {"type": "string", "description": "Accion: info, redimensionar, recortar, rotar, convertir, espejo, grayscale, ajustar"},
+                    "accion": {"type": "string", "enum": ["info", "redimensionar", "recortar", "rotar", "convertir", "espejo", "grayscale", "ajustar"], "description": "Accion a realizar"},
                     "parametros": {"type": "string", "description": "Parametros en JSON segun la accion"},
                     "ruta_salida": {"type": "string", "description": "Ruta de salida (opcional, sobreescribe si vacio)"}
                 },
@@ -916,7 +925,7 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "ruta": {"type": "string", "description": "Ruta del video"},
-                    "accion": {"type": "string", "description": "Accion: info, frames, analizar, transcribir"},
+                    "accion": {"type": "string", "enum": ["info", "frames", "analizar", "transcribir"], "description": "Accion a realizar"},
                     "parametros": {"type": "string", "description": "Parametros extra en JSON"}
                 },
                 "required": ["ruta", "accion"]
@@ -934,10 +943,11 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "tipo": {"type": "string", "description": "Tipo: researcher, coder, analyst, writer, reviewer, general"},
+                    "tipo": {"type": "string", "enum": ["researcher", "coder", "analyst", "writer", "reviewer", "general"], "description": "Tipo de sub-agente"},
                     "tarea": {"type": "string", "description": "Descripcion de la tarea"},
                     "contexto": {"type": "string", "description": "Contexto adicional (opcional)"},
-                    "timeout": {"type": "integer", "description": "Timeout en segundos (default 60)"}
+                    "timeout": {"type": "integer", "description": "Timeout en segundos (default 120)"},
+                    "max_iteraciones": {"type": "integer", "description": "Max iteraciones del sub-agente (opcional)"}
                 },
                 "required": ["tipo", "tarea"]
             }
@@ -967,7 +977,7 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "tarea_principal": {"type": "string", "description": "Descripcion de la tarea compleja"},
-                    "estrategia": {"type": "string", "description": "Estrategia: auto, secuencial, paralelo, mixto"},
+                    "estrategia": {"type": "string", "enum": ["auto", "secuencial", "paralelo", "mixto"], "description": "Estrategia de orquestacion (auto = detectar)"},
                     "max_subagentes": {"type": "integer", "description": "Max sub-agentes (default 4)"}
                 },
                 "required": ["tarea_principal"]
@@ -1081,7 +1091,7 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "patron": {"type": "string", "description": "Patron glob: **/*.py, **/test_*.js, *.md (default **/*)"},
                     "directorio": {"type": "string", "description": "Directorio base (default actual)"},
-                    "solo_tipo": {"type": "string", "description": "Filtrar: todos, archivos, directorios"},
+                    "solo_tipo": {"type": "string", "enum": ["todos", "archivos", "directorios"], "description": "Filtrar por tipo (default todos)"},
                     "max_resultados": {"type": "integer", "description": "Max resultados (default 100)"}
                 },
                 "required": []
@@ -1097,7 +1107,7 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "nombre": {"type": "string", "description": "Nombre del proyecto"},
-                    "tipo": {"type": "string", "description": "Tipo: nextjs, react, vue, express, static (default nextjs)"},
+                    "tipo": {"type": "string", "enum": ["nextjs", "react", "vue", "express", "static"], "description": "Tipo de proyecto (default nextjs)"},
                     "directorio": {"type": "string", "description": "Directorio donde crear el proyecto (default REPOS_DIR)"},
                     "opciones": {"type": "string", "description": "Opciones JSON: {typescript, tailwind, prisma}"}
                 },
@@ -1115,7 +1125,7 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "url": {"type": "string", "description": "URL de la pagina web"},
                     "max_caracteres": {"type": "integer", "description": "Max caracteres a extraer (default 5000)"},
-                    "extraer": {"type": "string", "description": "Que extraer: texto, metadatos, html, links, imagenes (default texto)"}
+                    "extraer": {"type": "string", "enum": ["texto", "metadatos", "html", "links", "imagenes"], "description": "Que extraer (default texto)"}
                 },
                 "required": ["url"]
             }
@@ -1156,7 +1166,7 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "servicio": {"type": "string", "description": "Servicio: google, openai, anthropic, stability, replicate, huggingface, google_gemini"},
+                    "servicio": {"type": "string", "enum": ["google", "google_cx", "openai", "anthropic", "stability", "replicate", "huggingface", "google_gemini"], "description": "Servicio cloud a configurar"},
                     "clave": {"type": "string", "description": "API key del servicio"}
                 },
                 "required": ["servicio", "clave"]

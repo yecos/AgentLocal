@@ -1,0 +1,150 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-local"
+version = "17.0.0"
+description = "Agente Autonomo Local - AI assistant with ReAct reasoning, tools, memory, and web UI"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "ZAI Team"},
+]
+keywords = ["ai", "agent", "ollama", "react", "autonomous", "assistant"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "ollama>=0.1.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "requests>=2.31.0",
+    "duckduckgo-search>=4.0.0",
+    "beautifulsoup4>=4.12.0",
+    "pyperclip>=1.8.2",
+    "Pillow>=10.0.0",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+# Core UI
+ui = [
+    "streamlit>=1.30.0",
+]
+
+# Document reading & creation
+documents = [
+    "fpdf2>=2.7.0",
+    "reportlab>=4.0.0",
+    "python-docx>=0.8.11",
+    "openpyxl>=3.1.0",
+    "python-pptx>=0.6.21",
+    "PyMuPDF>=1.23.0",
+]
+
+# Vector database for semantic memory
+chromadb = [
+    "chromadb>=0.4.0",
+]
+
+# Data processing & visualization
+data = [
+    "pandas>=2.0.0",
+    "matplotlib>=3.7.0",
+    "networkx>=3.1",
+    "scipy>=1.11.0",
+]
+
+# Multimedia: TTS, image generation, OCR, ASR
+multimedia = [
+    "edge-tts>=6.1.0",
+    "pytesseract>=0.3.10",
+]
+
+# Web automation
+web = [
+    "playwright>=1.40.0",
+]
+
+# GPU support (CUDA)
+gpu = [
+    "torch>=2.0.0",
+]
+
+# Development tools
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "mypy>=1.5.0",
+    "ruff>=0.1.0",
+]
+
+# All optional dependencies except gpu and dev
+all = [
+    "agent-local[ui,documents,chromadb,data,multimedia,web]",
+]
+
+[project.urls]
+Homepage = "https://github.com/yecos/AgentLocal"
+Repository = "https://github.com/yecos/AgentLocal"
+Issues = "https://github.com/yecos/AgentLocal/issues"
+
+[tool.setuptools.packages.find]
+include = ["agent*", "tools*", "memory*", "utils*", "config*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.json", "*.txt"]
+
+# ============================================================
+# pytest configuration
+# ============================================================
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]
+
+# ============================================================
+# mypy configuration
+# ============================================================
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+exclude = [
+    "tests/",
+    "venv/",
+]
+
+# ============================================================
+# ruff configuration (linting)
+# ============================================================
+[tool.ruff]
+target-version = "py39"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]  # line too long - handled by formatter
+
+[tool.ruff.lint.isort]
+known-first-party = ["agent", "tools", "memory", "utils", "config"]
