@@ -1012,11 +1012,19 @@ class ReactAgent:
                     "content": f"Resultado de {tc['name']}: {result}\n\nQue hago ahora? Responde con JSON."
                 })
 
+    # SECURITY: Parametros que NUNCA el LLM puede setear (solo la UI del usuario)
+    _LLM_BLOCKED_PARAMS = {"confirmar_peligroso", "force", "skip_safety"}
+
     def _execute_tool(self, tool_name, params):
         """Ejecuta una herramienta por nombre."""
         if tool_name in TOOL_FUNCTIONS:
             try:
                 params = self._resolve_params(params)
+                # SECURITY: Eliminar parametros peligrosos que el LLM nunca debe poder setear
+                for blocked in self._LLM_BLOCKED_PARAMS:
+                    if blocked in params:
+                        self._log(f"SECURITY: Parametro bloqueado '{blocked}' eliminado de {tool_name}", "warning")
+                        del params[blocked]
                 return TOOL_FUNCTIONS[tool_name](**params)
             except Exception as e:
                 return f"ERROR ejecutando {tool_name}: {e}"

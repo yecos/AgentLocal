@@ -8,6 +8,7 @@ Ejecutar: python check_gpu.py
 """
 
 import subprocess
+import shlex
 import json
 import sys
 import time
@@ -17,7 +18,7 @@ def run_cmd(cmd):
     """Ejecuta un comando y retorna la salida."""
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=15, shell=True
+            shlex.split(cmd), capture_output=True, text=True, timeout=15
         )
         return result.stdout.strip(), result.returncode
     except Exception as e:

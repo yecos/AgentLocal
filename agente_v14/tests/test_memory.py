@@ -292,13 +292,16 @@ class TestPicklePersistence(unittest.TestCase):
         entry_id = vs1.add("Persistent test entry")
         self.assertIsNotNone(entry_id)
 
-        # Verify pickle file was created
+        # Verify vectors file was created
         pkl_path = os.path.join(self.vs_dir, "vectors.pkl")
         self.assertTrue(os.path.exists(pkl_path))
 
-        # Read pickle file directly and verify content
+        # Read vectors using safe deserialization (not pickle.load)
+        from memory.vectorstore import _safe_deserialize_vectors
         with open(pkl_path, "rb") as f:
-            vectors = pickle.load(f)
+            data = f.read()
+        vectors = _safe_deserialize_vectors(data)
+        self.assertIsNotNone(vectors, "HMAC verification should pass for our own files")
         self.assertIn(entry_id, vectors)
         self.assertEqual(vectors[entry_id], [0.5] * 384)
 

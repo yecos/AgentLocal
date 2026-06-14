@@ -22,6 +22,7 @@ v1: Initial implementation.
 import os
 import sys
 import time
+import shlex
 import shutil
 import subprocess
 import threading
@@ -86,16 +87,14 @@ def _run_cmd(
     cwd: str = None,
     timeout: int = 120,
     env: dict = None,
-    shell: bool = False,
 ) -> dict:
     """Execute a subprocess command and return a structured result.
 
     Args:
-        cmd: Command and arguments (list) or string (if shell=True).
+        cmd: Command and arguments as a list.
         cwd: Working directory.
         timeout: Timeout in seconds.
         env: Optional environment variables override.
-        shell: Whether to use shell execution.
 
     Returns:
         Dict with success, stdout, stderr, exit_code.
@@ -108,7 +107,6 @@ def _run_cmd(
             timeout=timeout,
             cwd=cwd,
             env=env,
-            shell=shell,
         )
         return {
             "success": result.returncode == 0,

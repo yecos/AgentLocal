@@ -400,30 +400,40 @@ def _register_system_task(task):
     """Intenta registrar la tarea en el programador del sistema."""
     import platform
     import subprocess
+    import shlex
 
     try:
         if platform.system() == "Windows":
-            # Windows Task Scheduler
+            # Windows Task Scheduler - build args list safely
             cmd = (
                 f'schtasks /create /tn "AgenteLocal_{task["id"]}_{task["name"]}" '
                 f'/tr "{task["command"]}" '
                 f'/sc once /st {task.get("when", "00:00")} '
                 f'/f'
             )
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+            result = subprocess.run(shlex.split(cmd), capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
                 return "Registrada en Windows Task Scheduler."
         else:
             # Linux/Mac cron
             cron_line = f"# AgenteLocal: {task['name']}\n"
-            result = subprocess.run("crontab -l", shell=True, capture_output=True, text=True, timeout=5)
+            result = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=5)
             existing = result.stdout if result.returncode == 0 else ""
             new_cron = existing + cron_line
-            process = subprocess.run(
-                f"echo '{new_cron}' | crontab -",
-                shell=True, capture_output=True, text=True, timeout=5
+            # Use Popen chain instead of shell pipe: echo '...' | crontab -
+            echo_proc = subprocess.Popen(
+                ["echo", new_cron],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             )
-            if process.returncode == 0:
+            crontab_proc = subprocess.Popen(
+                ["crontab", "-"],
+                stdin=echo_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            # Allow echo_proc to receive SIGPIPE if crontab_proc exits
+            echo_proc.stdout.close()
+            _stdout, stderr = crontab_proc.communicate(timeout=5)
+            echo_proc.wait(timeout=5)
+            if crontab_proc.returncode == 0:
                 return "Registrada en crontab."
     except Exception:
         pass

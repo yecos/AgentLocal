@@ -25,6 +25,7 @@ Usage:
 import os
 import json
 import subprocess
+import shlex
 import re
 from typing import Optional
 
@@ -2419,14 +2420,43 @@ class ProjectScaffold:
             for cmd in post_commands:
                 logger.info(f"Running post-create command: {cmd}")
                 try:
-                    result = subprocess.run(
-                        cmd,
-                        shell=True,
-                        capture_output=True,
-                        text=True,
-                        timeout=300,
-                        cwd=target_dir,
-                    )
+                    if '|' in cmd:
+                        # Handle piped commands with chained Popen
+                        pipe_segments = cmd.split('|')
+                        processes = []
+                        prev_stdout = None
+                        for i, segment in enumerate(pipe_segments):
+                            try:
+                                parts = shlex.split(segment.strip())
+                            except ValueError:
+                                parts = segment.strip().split()
+                            if not parts:
+                                continue
+                            proc = subprocess.Popen(
+                                parts, stdin=prev_stdout,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, cwd=target_dir,
+                            )
+                            processes.append(proc)
+                            if prev_stdout:
+                                prev_stdout.close()
+                            prev_stdout = proc.stdout
+                        stdout, stderr = processes[-1].communicate(timeout=300)
+                        for p in processes[:-1]:
+                            p.wait(timeout=5)
+                        returncode = processes[-1].returncode
+                        result = subprocess.CompletedProcess(
+                            args=cmd, returncode=returncode,
+                            stdout=stdout, stderr=stderr,
+                        )
+                    else:
+                        result = subprocess.run(
+                            shlex.split(cmd),
+                            capture_output=True,
+                            text=True,
+                            timeout=300,
+                            cwd=target_dir,
+                        )
                     post_command_results.append({
                         "command": cmd,
                         "success": result.returncode == 0,
@@ -2724,14 +2754,43 @@ class ProjectScaffold:
         for cmd in post_commands:
             logger.info(f"Running post-create command: {cmd}")
             try:
-                result = subprocess.run(
-                    cmd,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=300,
-                    cwd=target_dir,
-                )
+                if '|' in cmd:
+                    # Handle piped commands with chained Popen
+                    pipe_segments = cmd.split('|')
+                    processes = []
+                    prev_stdout = None
+                    for i, segment in enumerate(pipe_segments):
+                        try:
+                            parts = shlex.split(segment.strip())
+                        except ValueError:
+                            parts = segment.strip().split()
+                        if not parts:
+                            continue
+                        proc = subprocess.Popen(
+                            parts, stdin=prev_stdout,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, cwd=target_dir,
+                        )
+                        processes.append(proc)
+                        if prev_stdout:
+                            prev_stdout.close()
+                        prev_stdout = proc.stdout
+                    stdout, stderr = processes[-1].communicate(timeout=300)
+                    for p in processes[:-1]:
+                        p.wait(timeout=5)
+                    returncode = processes[-1].returncode
+                    result = subprocess.CompletedProcess(
+                        args=cmd, returncode=returncode,
+                        stdout=stdout, stderr=stderr,
+                    )
+                else:
+                    result = subprocess.run(
+                        shlex.split(cmd),
+                        capture_output=True,
+                        text=True,
+                        timeout=300,
+                        cwd=target_dir,
+                    )
                 post_command_results.append({
                     "command": cmd,
                     "success": result.returncode == 0,

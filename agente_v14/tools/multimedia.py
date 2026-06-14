@@ -25,6 +25,7 @@ Dependencias opcionales: Pillow, edge-tts, stable-diffusion
 import os
 import json
 import logging
+import shlex
 import subprocess
 import tempfile
 from config import REPOS_DIR, LEARN_DIR, MAX_TOOL_OUTPUT, logger
@@ -215,8 +216,8 @@ def _tts_espeak(texto, ruta, voz, velocidad):
     """TTS con espeak (comando del sistema Linux)."""
     try:
         speed = int(160 * velocidad)
-        cmd = f'espeak -v {voz} -s {speed} -w "{ruta}" "{texto[:500]}"'
-        result = subprocess.run(cmd, shell=True, capture_output=True, timeout=30)
+        cmd = ["espeak", "-v", voz, "-s", str(speed), "-w", ruta, texto[:500]]
+        result = subprocess.run(cmd, capture_output=True, timeout=30)
 
         if result.returncode == 0 and os.path.exists(ruta):
             size_kb = os.path.getsize(ruta) / 1024

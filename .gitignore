@@ -106,3 +106,6 @@ agente_v14/credentials/
 
 # Z scripts runtime
 .zscripts/dev.pid
+
+# Internal worklog (exposes paths)
+worklog.md

@@ -354,19 +354,20 @@ def _leer_xlsx_comando(ruta, hoja, max_filas):
     """Fallback: lee XLSX con comando python + zipfile (basico)."""
     import subprocess
     try:
-        cmd = (
-            f"python3 -c \""
-            f"import zipfile,xml.etree.ElementTree as ET;"
+        python_code = (
+            "import zipfile,xml.etree.ElementTree as ET;"
             f"z=zipfile.ZipFile('{ruta}');"
-            f"tree=ET.parse(z.open('xl/sharedStrings.xml'));"
-            f"root=tree.getroot();"
-            f"ns={{'s':'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}};"
-            f"strings=[t.text or '' for t in root.findall('.//s:t',ns)];"
-            f"print('Strings:', len(strings));"
-            f"print('Sheets:', z.namelist())"
-            f"\""
+            "tree=ET.parse(z.open('xl/sharedStrings.xml'));"
+            "root=tree.getroot();"
+            "ns={'s':'http://schemas.openxmlformats.org/spreadsheetml/2006/main'};"
+            "strings=[t.text or '' for t in root.findall('.//s:t',ns)];"
+            "print('Strings:', len(strings));"
+            "print('Sheets:', z.namelist())"
         )
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            ["python3", "-c", python_code],
+            capture_output=True, text=True, timeout=30
+        )
         if result.returncode == 0:
             return f"XLSX (basico): {os.path.basename(ruta)}\n{result.stdout}\nInstala openpyxl para lectura completa: pip install openpyxl"
     except Exception:

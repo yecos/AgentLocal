@@ -13,14 +13,89 @@ v14.4: Pre-filtro mejorado con stemming español + stopwords.
 
 import os
 import json
-import pickle
 import hashlib
+import hmac
+import base64
+import struct
 import logging
 import time
 from datetime import datetime
 
 from config import LEARN_DIR, MAX_VECTORS_IN_MEMORY, logger
 from llm import ollama
+
+# Clave HMAC para verificacion de integridad de archivos de vectores
+# Generada aleatoriamente en primer inicio, persistida junto a los datos
+_HMAC_KEY_FILE = os.path.join(LEARN_DIR, "vectors", ".hmac_key")
+_hmac_key = None
+
+
+def _get_hmac_key():
+    """Obtiene o genera la clave HMAC para verificar integridad de vectores."""
+    global _hmac_key
+    if _hmac_key is not None:
+        return _hmac_key
+    try:
+        if os.path.exists(_HMAC_KEY_FILE):
+            with open(_HMAC_KEY_FILE, "rb") as f:
+                _hmac_key = f.read()
+        else:
+            _hmac_key = os.urandom(32)
+            os.makedirs(os.path.dirname(_HMAC_KEY_FILE), exist_ok=True)
+            with open(_HMAC_KEY_FILE, "wb") as f:
+                f.write(_hmac_key)
+            # Proteger permisos del archivo de clave
+            try:
+                os.chmod(_HMAC_KEY_FILE, 0o600)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.debug(f"Error inicializando clave HMAC: {e}")
+        _hmac_key = b"fallback-key-not-secure"  # Fallback para modo sin persistencia
+    return _hmac_key
+
+
+def _safe_deserialize_vectors(data_bytes):
+    """Deserializa vectores de forma segura usando formato propio en vez de pickle.
+    
+    Formato seguro: HMAC(32 bytes) + JSON-encoded dict de {id: [float, ...]}
+    Evita la vulnerabilidad de pickle.loads() que permite ejecucion de codigo arbitrario.
+    
+    Returns:
+        dict o None si falla la verificacion de integridad
+    """
+    if len(data_bytes) < 33:  # Minimo: 32 bytes HMAC + al menos 1 byte de datos
+        return None
+    
+    stored_hmac = data_bytes[:32]
+    payload = data_bytes[32:]
+    
+    # Verificar integridad HMAC
+    key = _get_hmac_key()
+    computed_hmac = hmac.new(key, payload, hashlib.sha256).digest()
+    if not hmac.compare_digest(stored_hmac, computed_hmac):
+        logger.warning("INTEGRIDAD: Archivo de vectores falla verificacion HMAC - posible tampering!")
+        return None
+    
+    # Deserializar JSON (seguro, no ejecuta codigo arbitrario)
+    try:
+        vectors = json.loads(payload.decode('utf-8'))
+        if isinstance(vectors, dict):
+            return vectors
+    except Exception as e:
+        logger.debug(f"Error deserializando vectores JSON: {e}")
+    return None
+
+
+def _safe_serialize_vectors(vectors):
+    """Serializa vectores de forma segura con HMAC para integridad.
+    
+    Formato: HMAC(32 bytes) + JSON-encoded dict
+    """
+    payload = json.dumps(vectors, ensure_ascii=False).encode('utf-8')
+    key = _get_hmac_key()
+    computed_hmac = hmac.new(key, payload, hashlib.sha256).digest()
+    return computed_hmac + payload
 
 
 class VectorStore:
@@ -68,25 +143,41 @@ class VectorStore:
             logger.warning(f"Error guardando indice: {e}")
 
     def _get_vectors(self):
-        """Carga los vectores con cache en memoria. Pickle primero, JSON como fallback."""
+        """Carga los vectores con cache en memoria. Formato seguro con HMAC primero, JSON legacy como fallback."""
         if self._vectors_cache is not None:
             return self._vectors_cache
-        # 1. Intentar Pickle (rapido)
+        # 1. Intentar formato seguro (HMAC + JSON)
         try:
             if os.path.exists(self.vectors_file):
                 with open(self.vectors_file, "rb") as f:
-                    self._vectors_cache = pickle.load(f)
+                    data = f.read()
+                vectors = _safe_deserialize_vectors(data)
+                if vectors is not None:
+                    self._vectors_cache = vectors
                     return self._vectors_cache
+                else:
+                    logger.warning("Vectores pickle legacy sin HMAC - migrando a formato seguro")
+                    # Intentar migrar desde pickle legacy (solo si HMAC falla por formato viejo)
+                    import pickle
+                    try:
+                        vectors = pickle.loads(data)
+                        if isinstance(vectors, dict):
+                            self._vectors_cache = vectors
+                            self._save_vectors(vectors)  # Re-guardar en formato seguro
+                            logger.info("Vectores migrados de pickle a formato seguro HMAC+JSON")
+                            return self._vectors_cache
+                    except Exception:
+                        pass
         except Exception as e:
-            logger.debug(f"Error cargando vectores Pickle: {e}")
+            logger.debug(f"Error cargando vectores con formato seguro: {e}")
         # 2. Fallback: JSON legacy
         try:
             if os.path.exists(self._vectors_legacy_file):
                 with open(self._vectors_legacy_file, "r", encoding="utf-8") as f:
                     self._vectors_cache = json.load(f)
-                    # Guardar como Pickle para proxima vez
+                    # Guardar en formato seguro para proxima vez
                     self._save_vectors(self._vectors_cache)
-                    logger.info("Vectores migrados de JSON a Pickle")
+                    logger.info("Vectores migrados de JSON legacy a formato seguro HMAC+JSON")
                     return self._vectors_cache
         except Exception as e:
             logger.debug(f"Error cargando vectores JSON legacy: {e}")
@@ -99,13 +190,14 @@ class VectorStore:
         return {eid: all_vectors[eid] for eid in entry_ids if eid in all_vectors}
 
     def _save_vectors(self, vectors):
-        """Guarda vectores en formato Pickle (10x mas rapido que JSON para floats)."""
+        """Guarda vectores en formato seguro (HMAC + JSON) en vez de pickle inseguro."""
         try:
+            data = _safe_serialize_vectors(vectors)
             with open(self.vectors_file, "wb") as f:
-                pickle.dump(vectors, f, protocol=pickle.HIGHEST_PROTOCOL)
+                f.write(data)
             self._vectors_cache = vectors
         except Exception as e:
-            logger.warning(f"Error guardando vectores Pickle: {e}")
+            logger.warning(f"Error guardando vectores: {e}")
 
     def _flush(self):
         if self._dirty:

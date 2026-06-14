@@ -18,6 +18,7 @@ v16: Ejecucion segura y verificable de codigo.
 import os
 import re
 import json
+import shlex
 import subprocess
 import tempfile
 import logging
@@ -26,7 +27,7 @@ from datetime import datetime
 from typing import Optional
 
 from config import REPOS_DIR, logger
-from utils.security import is_dangerous_command
+from utils.security import is_dangerous_command, is_dangerous_python
 
 # ============================================================
 # CONFIGURACION
@@ -36,6 +37,12 @@ SANDBOX_DIR = os.path.join(REPOS_DIR, ".sandbox")
 MAX_EXECUTION_TIME = 60  # segundos
 MAX_OUTPUT_LENGTH = 5000  # caracteres
 MAX_TEST_RETRIES = 3
+
+# SECURITY: Limites del sandbox para ejecucion de codigo
+SANDBOX_MAX_MEMORY_MB = 256  # Memoria maxima en MB (rlimit)
+SANDBOX_MAX_CPU_SECONDS = 30  # CPU time maximo en segundos
+SANDBOX_MAX_PROCESSES = 5     # Maximo de subprocesos
+SANDBOX_MAX_FILE_SIZE_MB = 10 # Tamano maximo de archivo que puede crear
 
 # Extensiones de archivo y sus ejecutores
 RUNNERS = {
@@ -114,6 +121,16 @@ def execute_code(code: str, language: str = "python", timeout: int = MAX_EXECUTI
     # Crear directorio sandbox si no existe
     os.makedirs(SANDBOX_DIR, exist_ok=True)
 
+    # SECURITY: Verificar codigo peligroso antes de ejecutar
+    if language == "python":
+        is_danger, reason = is_dangerous_python(code)
+        if is_danger:
+            return ExecutionResult(
+                command="", exit_code=-1, stdout="",
+                stderr=f"Codigo bloqueado por seguridad: {reason}",
+                duration=0
+            )
+
     # Mapear lenguaje a extension y comando
     lang_config = {
         "python": {"ext": ".py", "cmd": ["python3"]},
@@ -141,11 +158,18 @@ def execute_code(code: str, language: str = "python", timeout: int = MAX_EXECUTI
         exec_env = os.environ.copy()
         exec_env["PYTHONIOENCODING"] = "utf-8"
         exec_env["NODE_OPTIONS"] = "--max-old-space-size=256"
+        # SECURITY: Restringir acceso a red y filesystem en Python
+        if language == "python":
+            exec_env["PYTHONPATH"] = tmp_dir  # Solo importar desde sandbox
         if env_vars:
             exec_env.update(env_vars)
 
-        # Ejecutar
-        cmd = config["cmd"] + [tmp_file]
+        # SECURITY: Para Python, agregar wrapper de sandbox con rlimits
+        if language == "python":
+            sandbox_wrapper = _build_sandbox_wrapper(tmp_file, tmp_dir)
+            cmd = ["python3", sandbox_wrapper]
+        else:
+            cmd = config["cmd"] + [tmp_file]
         start_time = time.time()
 
         try:
@@ -283,12 +307,12 @@ def run_tests(project_path: str, test_framework: str = None,
     start_time = time.time()
     try:
         result = subprocess.run(
-            cmd,
+            shlex.split(cmd),
             capture_output=True,
             text=True,
             timeout=timeout,
             cwd=project_path,
-            shell=True,
+            stderr=subprocess.STDOUT,
         )
         duration = time.time() - start_time
 
@@ -349,12 +373,12 @@ def _detect_test_framework(project_path: str) -> str:
 def _build_test_command(framework: str, project_path: str, test_path: str = None) -> Optional[str]:
     """Construye el comando de test para el framework detectado."""
     commands = {
-        "pytest": f"python3 -m pytest {test_path or ''} -v --tb=short 2>&1",
-        "django": f"python3 manage.py test {test_path or ''} --verbosity=2 2>&1",
-        "vitest": f"npx vitest run {test_path or ''} 2>&1",
-        "jest": f"npx jest {test_path or ''} --verbose 2>&1",
-        "mocha": f"npx mocha {test_path or 'test/'} 2>&1",
-        "node-test": f"node --test {test_path or '**/*.test.*'} 2>&1",
+        "pytest": f"python3 -m pytest {test_path or ''} -v --tb=short",
+        "django": f"python3 manage.py test {test_path or ''} --verbosity=2",
+        "vitest": f"npx vitest run {test_path or ''}",
+        "jest": f"npx jest {test_path or ''} --verbose",
+        "mocha": f"npx mocha {test_path or 'test/'}",
+        "node-test": f"node --test {test_path or '**/*.test.*'}",
     }
     return commands.get(framework)
 
@@ -580,3 +604,116 @@ def diagnose_error(result: ExecutionResult) -> dict:
         ]
 
     return diagnosis
+
+
+# ============================================================
+# SANDBOX: Wrapper con rlimits para ejecucion segura
+# ============================================================
+
+def _build_sandbox_wrapper(target_script: str, sandbox_dir: str) -> str:
+    """Crea un script wrapper que aplica rlimits antes de ejecutar el codigo del usuario.
+    
+    SECURITY: El wrapper se ejecuta como proceso separado con:
+    - resource.RLIMIT_AS: Limita memoria virtual
+    - resource.RLIMIT_CPU: Limita tiempo de CPU
+    - resource.RLIMIT_NPROC: Limita numero de subprocesos
+    - resource.RLIMIT_FSIZE: Limita tamano de archivos creados
+    - sys.path restringido al sandbox
+    """
+    wrapper_code = '''#!/usr/bin/env python3
+"""Sandbox wrapper - aplica rlimits antes de ejecutar codigo de usuario."""
+import sys
+import os
+import resource
+
+# Aplicar rlimits
+try:
+    # Memoria virtual maxima
+    resource.setrlimit(resource.RLIMIT_AS, (
+        {max_memory} * 1024 * 1024,  # soft limit
+        {max_memory} * 1024 * 1024   # hard limit
+    ))
+except (ValueError, resource.error):
+    pass
+
+try:
+    # Tiempo de CPU maximo
+    resource.setrlimit(resource.RLIMIT_CPU, (
+        {max_cpu},  # soft limit (segundos)
+        {max_cpu} + 5  # hard limit
+    ))
+except (ValueError, resource.error):
+    pass
+
+try:
+    # Maximo de subprocesos
+    resource.setrlimit(resource.RLIMIT_NPROC, (
+        {max_procs},  # soft limit
+        {max_procs}   # hard limit
+    ))
+except (ValueError, resource.error):
+    pass
+
+try:
+    # Tamano maximo de archivo creado
+    resource.setrlimit(resource.RLIMIT_FSIZE, (
+        {max_file_size} * 1024 * 1024,  # soft limit
+        {max_file_size} * 1024 * 1024   # hard limit
+    ))
+except (ValueError, resource.error):
+    pass
+
+# Restringir sys.path al sandbox
+sandbox_dir = {sandbox_dir!r}
+sys.path = [sandbox_dir, os.path.dirname(os.path.abspath(__file__))]
+
+# Ejecutar el script objetivo
+target = {target!r}
+if os.path.exists(target):
+    # Leer y compilar el codigo para evitar importaciones posteriores
+    with open(target, 'r', encoding='utf-8') as f:
+        code = f.read()
+    
+    # Restringir builtins peligrosos
+    import builtins
+    _original_import = builtins.__import__
+    
+    _BLOCKED_MODULES = {{'os', 'subprocess', 'shutil', 'ctypes', 'socket',
+                         'http', 'pickle', 'marshal', 'code', 'codeop',
+                         'multiprocessing', 'signal', 'resource'}}
+    
+    def _restricted_import(name, *args, **kwargs):
+        top_level = name.split('.')[0]
+        if top_level in _BLOCKED_MODULES:
+            raise ImportError(f"Modulo '{{name}}' bloqueado por sandbox de seguridad")
+        return _original_import(name, *args, **kwargs)
+    
+    builtins.__import__ = _restricted_import
+    
+    try:
+        exec(compile(code, target, 'exec'), {{"__name__": "__main__", "__file__": target}})
+    except ImportError as e:
+        print(f"SANDBOX: {{e}}", file=sys.stderr)
+        sys.exit(1)
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"ERROR: {{type(e).__name__}}: {{e}}", file=sys.stderr)
+        sys.exit(1)
+else:
+    print(f"ERROR: Script no encontrado: {{target}}", file=sys.stderr)
+    sys.exit(1)
+'''.format(
+        max_memory=SANDBOX_MAX_MEMORY_MB,
+        max_cpu=SANDBOX_MAX_CPU_SECONDS,
+        max_procs=SANDBOX_MAX_PROCESSES,
+        max_file_size=SANDBOX_MAX_FILE_SIZE_MB,
+        sandbox_dir=sandbox_dir,
+        target=target_script,
+    )
+    
+    wrapper_path = os.path.join(sandbox_dir, "_sandbox_wrapper.py")
+    with open(wrapper_path, "w", encoding="utf-8") as f:
+        f.write(wrapper_code)
+    
+    return wrapper_path

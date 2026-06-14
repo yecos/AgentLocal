@@ -96,6 +96,55 @@ class TestSafeCommandAllowed(unittest.TestCase):
         self.assertFalse(is_dangerous_command("yarn install"))
 
 
+class TestAllowlistBypassBlocked(unittest.TestCase):
+    """Verify that allowlisted commands with DANGEROUS arguments are STILL blocked.
+    
+    This is the core fix for MEDIO-1: blocklist must run BEFORE allowlist.
+    Previously, 'python -c "os.system(...)"' would pass because it starts
+    with 'python' (allowlist). Now it's correctly blocked.
+    """
+
+    def test_python_c_os_system_blocked(self):
+        """python -c with os.system should be blocked despite starting with 'python'."""
+        self.assertTrue(is_dangerous_command('python -c "import os; os.system(\'rm -rf /\')"'))
+
+    def test_python_c_subprocess_blocked(self):
+        """python -c with subprocess should be blocked."""
+        self.assertTrue(is_dangerous_command('python -c "import subprocess; subprocess.call([\'rm\'])"'))
+
+    def test_python_c_pickle_blocked(self):
+        """python -c with pickle should be blocked."""
+        self.assertTrue(is_dangerous_command('python -c "import pickle; pickle.loads(data)"'))
+
+    def test_node_e_require_child_process_blocked(self):
+        """node -e with require('child_process') should be blocked."""
+        self.assertTrue(is_dangerous_command('node -e "require(\'child_process\').exec(\'rm -rf /\')"'))
+
+    def test_node_e_fs_blocked(self):
+        """node -e with fs. operations should be blocked."""
+        self.assertTrue(is_dangerous_command('node -e "require(\'fs\').unlinkSync(\'/etc/passwd\')"'))
+
+    def test_python_safe_script_allowed(self):
+        """python script.py (no -c) should still be allowed."""
+        self.assertFalse(is_dangerous_command("python script.py"))
+
+    def test_node_safe_script_allowed(self):
+        """node server.js (no -e) should still be allowed."""
+        self.assertFalse(is_dangerous_command("node server.js"))
+
+    def test_pip_install_safe_allowed(self):
+        """pip install package should still be allowed."""
+        self.assertFalse(is_dangerous_command("pip install requests"))
+
+    def test_unknown_command_with_pipe_blocked(self):
+        """Unknown command with pipe should be blocked."""
+        self.assertTrue(is_dangerous_command("unknown_cmd | something"))
+
+    def test_unknown_command_with_redirect_blocked(self):
+        """Unknown command with redirect should be blocked."""
+        self.assertTrue(is_dangerous_command("unknown_cmd > /tmp/file"))
+
+
 class TestInjectionPatternsBlocked(unittest.TestCase):
     """Verify that injection patterns are detected."""
 

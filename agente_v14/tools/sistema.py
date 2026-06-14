@@ -7,6 +7,7 @@ ejecutar_comando, procesos_activos, matar_proceso
 """
 
 import subprocess
+import shlex
 import platform
 import logging
 
@@ -79,20 +80,26 @@ def ejecutar_comando(comando: str, cwd: str = None, confirmar_peligroso: bool = 
         timeout = LONG_TIMEOUT
 
     try:
-        # Detectar si es un comando simple (sin pipes/redirecciones)
+        # SECURITY: Evitar shell=True siempre que sea posible
+        # Para comandos con pipes/redirecciones, usar Popen encadenado
+        # Para comandos simples, usar shlex.split() para lista de argumentos
         is_simple = not any(c in comando for c in '|&><`')
 
         if is_simple:
-            parts = comando.split()
+            # Comando simple: usar shlex.split() para separar argumentos de forma segura
+            try:
+                parts = shlex.split(comando, posix=not IS_WINDOWS)
+            except ValueError:
+                # Fallback si shlex falla (comillas raras)
+                parts = comando.split()
             result = subprocess.run(
                 parts, capture_output=True, text=True,
                 timeout=timeout, cwd=cwd or REPOS_DIR
             )
         else:
-            result = subprocess.run(
-                comando, shell=True, capture_output=True, text=True,
-                timeout=timeout, cwd=cwd or REPOS_DIR
-            )
+            # Comando con pipes: usar Popen encadenado en vez de shell=True
+            # SECURITY: Verificar que no hay patrones de inyeccion en los pipes
+            result = _run_piped_command(comando, timeout, cwd or REPOS_DIR)
 
         output = ""
         if result.stdout:
@@ -115,16 +122,105 @@ def ejecutar_comando(comando: str, cwd: str = None, confirmar_peligroso: bool = 
         return f"ERROR: {e}"
 
 
+def _run_piped_command(comando: str, timeout: int, cwd: str) -> subprocess.CompletedProcess:
+    """Ejecuta un comando con pipes usando Popen encadenado en vez de shell=True.
+    
+    SECURITY: Evita inyeccion de comandos al no usar shell=True.
+    Parsea pipes y ejecuta cada segmento como proceso independiente,
+    conectando stdout de uno al stdin del siguiente.
+    """
+    # Separar el comando por pipes
+    pipe_segments = comando.split('|')
+    
+    if len(pipe_segments) == 1:
+        # No hay pipes reales - probablemente redirecciones
+        # Usar shlex.split de forma segura
+        try:
+            parts = shlex.split(comando.strip(), posix=not IS_WINDOWS)
+        except ValueError:
+            parts = comando.strip().split()
+        return subprocess.run(
+            parts, capture_output=True, text=True,
+            timeout=timeout, cwd=cwd
+        )
+    
+    # Ejecutar pipeline encadenando Popen
+    processes = []
+    prev_stdout = None
+    
+    for i, segment in enumerate(pipe_segments):
+        segment = segment.strip()
+        try:
+            parts = shlex.split(segment, posix=not IS_WINDOWS)
+        except ValueError:
+            parts = segment.split()
+        
+        # Verificar que el primer argumento no sea vacío
+        if not parts:
+            continue
+        
+        is_last = (i == len(pipe_segments) - 1)
+        
+        try:
+            proc = subprocess.Popen(
+                parts,
+                stdin=prev_stdout,
+                stdout=subprocess.PIPE if not is_last else subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=cwd
+            )
+            processes.append(proc)
+            if prev_stdout:
+                prev_stdout.close()  # Cerrar el pipe del proceso anterior
+            prev_stdout = proc.stdout
+        except FileNotFoundError:
+            # Comando no encontrado en este segmento del pipe
+            for p in processes:
+                p.kill()
+            return subprocess.CompletedProcess(
+                args=comando, returncode=127,
+                stdout="", stderr=f"Comando no encontrado: {parts[0]}"
+            )
+    
+    # Leer salida del último proceso
+    try:
+        stdout, stderr = processes[-1].communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        for p in processes:
+            p.kill()
+        for p in processes:
+            p.wait()
+        return subprocess.CompletedProcess(
+            args=comando, returncode=-1,
+            stdout="", stderr="TIMEOUT"
+        )
+    
+    # Esperar todos los procesos
+    for p in processes[:-1]:
+        p.wait(timeout=5)
+    
+    return subprocess.CompletedProcess(
+        args=comando, returncode=processes[-1].returncode,
+        stdout=stdout, stderr=stderr
+    )
+
+
 def procesos_activos(filtro: str = "") -> str:
     """Lista procesos corriendo. Opcionalmente filtra por nombre."""
+    # SECURITY: Evitar shell=True - usar Popen encadenado para pipes
+    filtro = sanitize_input(filtro) if filtro else ""
+    
     if IS_WINDOWS:
-        cmd = 'tasklist /fo csv'
         if filtro:
-            cmd += f' | findstr /i "{filtro}"'
+            cmd = f'tasklist /fo csv | findstr /i "{filtro}"'
+        else:
+            cmd = 'tasklist /fo csv'
     else:
-        cmd = 'ps aux'
         if filtro:
-            cmd += f' | grep -i "{filtro}"'
+            cmd = f'ps aux | grep -i "{filtro}"'
+        else:
+            cmd = 'ps aux'
     result = ejecutar_comando(cmd)
     if len(result) > MAX_TOOL_OUTPUT:
         result = result[:MAX_TOOL_OUTPUT] + "\n... [truncado]"

@@ -751,33 +751,32 @@ def _execute_skill_tool(tool_name: str, params: dict, config: dict) -> str:
             if agent_param in params:
                 mapped_params[cli_param] = params[agent_param]
 
-        # Construir comando
+        # Construir comando como lista para evitar shell=True
         cli_command = config.get("cli_command", "")
 
         if "z-ai function" in cli_command:
             # Formato: z-ai function -n <name> -a '<json>'
             json_args = json.dumps(mapped_params, ensure_ascii=False)
-            cmd = f"{cli_command} '{json_args}'"
+            cmd_list = shlex.split(cli_command) + [json_args]
         elif "z-ai-generate" in cli_command:
             # Formato: z-ai-generate -p "<prompt>" -o "<output>" -s "<size>"
             prompt = mapped_params.get("prompt", "")
             output = mapped_params.get("output", "")
             size = mapped_params.get("size", "1024x1024")
-            cmd = f'z-ai-generate -p "{prompt}"'
+            cmd_list = ["z-ai-generate", "-p", prompt]
             if output:
-                cmd += f' -o "{output}"'
-            cmd += f' -s {size}'
+                cmd_list.extend(["-o", output])
+            cmd_list.extend(["-s", size])
         else:
             # Fallback generico
             json_args = json.dumps(mapped_params, ensure_ascii=False)
-            cmd = f"{cli_command} '{json_args}'"
+            cmd_list = shlex.split(cli_command) + [json_args]
 
-        logger.info(f"[SkillLoader] Ejecutando: {cmd[:200]}")
+        logger.info(f"[SkillLoader] Ejecutando: {' '.join(cmd_list)[:200]}")
 
-        # Ejecutar con timeout
+        # Ejecutar con timeout (sin shell=True)
         result = subprocess.run(
-            cmd,
-            shell=True,
+            cmd_list,
             capture_output=True,
             text=True,
             timeout=120,

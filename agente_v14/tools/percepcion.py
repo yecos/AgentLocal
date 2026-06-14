@@ -150,10 +150,12 @@ def _transcribir_comando(ruta, idioma):
     """Fallback: transcribe con comando whisper."""
     import subprocess
     try:
-        lang_opt = f"--language {idioma}" if idioma != "auto" else ""
+        cmd = ["whisper", ruta, "--model", "base", "--output_format", "txt",
+               "--output_dir", "/tmp/whisper_out"]
+        if idioma != "auto":
+            cmd.extend(["--language", idioma])
         result = subprocess.run(
-            f"whisper '{ruta}' --model base --output_format txt {lang_opt} --output_dir /tmp/whisper_out",
-            shell=True, capture_output=True, text=True, timeout=300
+            cmd, capture_output=True, text=True, timeout=300
         )
 
         # Leer archivo de salida

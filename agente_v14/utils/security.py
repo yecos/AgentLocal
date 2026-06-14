@@ -106,21 +106,23 @@ _PATRONES_INYECCION_COMPILADOS = [
 
 
 def is_dangerous_command(comando: str) -> bool:
-    """Verifica si un comando es peligroso. 
-    Comandos en la allowlist (COMANDOS_SEGUROS) nunca son peligrosos."""
+    """Verifica si un comando es peligroso.
+    
+    SECURITY: El orden de verificacion es CRITICO.
+    1. Primero verificar blocklist (patrones peligrosos SIEMPRE tienen prioridad)
+    2. Luego verificar regex sospechosos (inyecciones, subshells, etc.)
+    3. Solo si NADA peligroso se encontro, verificar allowlist
+    Esto evita que 'python -c "os.system(...)"' bypass la seguridad
+    porque empieza con 'python' (allowlist).
+    """
     cmd_lower = comando.lower().strip()
     
-    # 1. Si empieza con un comando seguro, NO es peligroso
-    for seguro in COMANDOS_SEGUROS:
-        if cmd_lower.startswith(seguro):
-            return False
-    
-    # 2. Verificar contra lista de peligrosos
+    # 1. Verificar contra lista de peligrosos (SIEMPRE primero)
     for peligro in COMANDOS_PELIGROSOS:
         if peligro in cmd_lower:
             return True
     
-    # 3. Detectar patrones sospechosos por regex
+    # 2. Detectar patrones sospechosos por regex (SIEMPRE antes de allowlist)
     sospechosos = [
         r';\s*rm\b',           # ; rm (encadenado)
         r'&&\s*rm\b',          # && rm
@@ -151,10 +153,26 @@ def is_dangerous_command(comando: str) -> bool:
         r'data\s*:',
         r'file\s*:',
         r'vbscript\s*:',
+        # Nuevos: argumentos peligrosos en comandos allowlisteados
+        r'\bpython\d*\s+-c\b.*\b(os\.|subprocess|shutil|pickle|marshal|__import__)\b',  # python -c con modulo peligroso
+        r'\bnode\s+-e\b.*\b(require\(|child_process|fs\.)',  # node -e con modulo peligroso
+        r'\bpip\s+install\b.*\b(--user|--root|--prefix)\s+/',  # pip install fuera de venv
+        r'\bgit\s+push\s+.*--force',  # git push --force
     ]
     for pattern in sospechosos:
         if re.search(pattern, cmd_lower):
             return True
+    
+    # 3. Si empieza con un comando seguro y NO se detecto nada peligroso, no es peligroso
+    for seguro in COMANDOS_SEGUROS:
+        if cmd_lower.startswith(seguro):
+            return False
+    
+    # 4. Comando desconocido: no esta en allowlist ni blocklist
+    # Verificar si tiene argumentos sospechosos adicionales
+    # Comandos desconocidos con redirecciones o pipes son sospechosos
+    if re.search(r'[|;&>`$]', cmd_lower):
+        return True
     
     return False
 
