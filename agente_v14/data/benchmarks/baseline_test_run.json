@@ -1,0 +1,22 @@
+{
+  "name": "test_run",
+  "saved_at": "2026-06-12T06:44:05.960281",
+  "results": [
+    {
+      "name": "text_processing",
+      "category": "processing",
+      "iterations": 50,
+      "total_time_ms": 0.765,
+      "avg_time_ms": 0.015,
+      "min_time_ms": 0.008,
+      "max_time_ms": 0.269,
+      "std_dev_ms": 0.037,
+      "throughput_per_sec": 65332.49,
+      "metadata": {
+        "verification_passed": true
+      },
+      "timestamp": "2026-06-12T06:44:05.960215",
+      "passed": true
+    }
+  ]
+}

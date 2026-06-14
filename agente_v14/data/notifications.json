@@ -1,0 +1,87 @@
+{
+  "notifications": [
+    {
+      "id": "e70301be",
+      "title": "Test",
+      "message": "This is a test notification",
+      "channel": "in_app",
+      "priority": "medium",
+      "category": "general",
+      "created_at": "2026-06-12T06:44:16.105929",
+      "read": true,
+      "dismissed": false
+    },
+    {
+      "id": "82804d05",
+      "title": "Test",
+      "message": "Test notification",
+      "channel": "in_app",
+      "priority": "medium",
+      "category": "general",
+      "created_at": "2026-06-12T06:44:27.565836",
+      "read": false,
+      "dismissed": false
+    },
+    {
+      "id": "403dcafc",
+      "title": "Test",
+      "message": "Test notification",
+      "channel": "in_app",
+      "priority": "medium",
+      "category": "general",
+      "created_at": "2026-06-12T06:44:43.172745",
+      "read": false,
+      "dismissed": false
+    }
+  ],
+  "rules": [
+    {
+      "rule_id": "default_task_failure",
+      "name": "Task failure notification",
+      "condition": {
+        "event_type": "task_failure"
+      },
+      "channel": "in_app,desktop",
+      "priority": "high",
+      "enabled": true
+    },
+    {
+      "rule_id": "default_scheduler_trigger",
+      "name": "Scheduler trigger notification",
+      "condition": {
+        "event_type": "scheduler_trigger"
+      },
+      "channel": "in_app",
+      "priority": "low",
+      "enabled": true
+    },
+    {
+      "rule_id": "default_error_rate",
+      "name": "High error rate alert",
+      "condition": {
+        "event_type": "error_rate",
+        "params": {
+          "count": 5
+        }
+      },
+      "channel": "in_app,email",
+      "priority": "critical",
+      "enabled": true
+    },
+    {
+      "rule_id": "default_deployment",
+      "name": "New deployment notification",
+      "condition": {
+        "event_type": "new_deployment"
+      },
+      "channel": "webhook",
+      "priority": "medium",
+      "enabled": true
+    }
+  ],
+  "rate_limits": {
+    "in_app": [
+      1781246683.172968
+    ]
+  }
+}
