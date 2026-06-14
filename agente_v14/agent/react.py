@@ -24,9 +24,7 @@ from memory.triple_memory import TripleMemory, learning
 from llm import ollama
 from agent.schemas import SYSTEM_PROMPT, JSON_TOOLS_PROMPT
 from agent.metacognition import Metacognition
-from agent.deep_thinking import DeepThinking
 from utils.metrics import get_metrics
-from utils.token_manager import TokenManager, estimate_tokens
 
 
 class ReactAgent:
@@ -41,11 +39,9 @@ class ReactAgent:
         self.thinking_log = []
         self.supports_tool_calling = None
         self.metacognition = Metacognition()
-        self.deep_thinking = DeepThinking()  # Motor de pensamiento profundo
         self._models_cache = None  # Cache de modelos para no llamar API cada vez
         self._tool_call_counts = {}  # Rate limiting por herramienta
         self._total_tool_calls = 0   # Total de tool calls en esta conversacion
-        self.token_manager = TokenManager(model_name=ollama.model or "default")  # Gestion de tokens
 
     def _log(self, message, category="info"):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -57,7 +53,6 @@ class ReactAgent:
     def run(self, user_message):
         """
         Bucle ReAct principal. Retorna (respuesta, thinking_log).
-        v14.7: Pensamiento profundo con profundidad progresiva y reflexion con contexto.
         """
         self.thinking_log = []
         self.metacognition.reset()
@@ -66,25 +61,6 @@ class ReactAgent:
         self._log(f"Mensaje del usuario: {user_message}", "input")
 
         messages = self._build_messages(user_message)
-
-        # ---- PENSAMIENTO PROFUNDO (v14.7) ----
-        deep_result = self.deep_thinking.think(
-            user_message,
-            context=self.memory.get_context_for(user_message)
-        )
-        if deep_result.should_deep_think:
-            _nsteps = len(deep_result.plan)
-            depth_labels = {0: "ninguno", 1: "rapido", 2: "completo", 3: "profundo"}
-            self._log(
-                f"Pensamiento profundo: complejidad={deep_result.complexity:.2f}, "
-                f"tipo={deep_result.query_type}, profundidad={depth_labels.get(deep_result.depth, '?')}, "
-                f"pasos={_nsteps}",
-                "deep_thinking"
-            )
-            thinking_prompt = self.deep_thinking.get_thinking_prompt(deep_result)
-            if thinking_prompt:
-                messages.append({"role": "user", "content": thinking_prompt})
-                messages.append({"role": "assistant", "content": "Entendido. Analizare la situacion con el nivel de profundidad indicado."})
 
         if self.supports_tool_calling is None:
             self.supports_tool_calling = self._detect_tool_calling_support()
@@ -120,6 +96,58 @@ class ReactAgent:
                             "role": "user",
                             "content": f"[Contexto adicional relevante]:\n{extra_context[:500]}\n\nUsa esta informacion si es relevante."
                         })
+            
+            # *** NUEVO: AUTO-BUSQUEDA WEB cuando la confianza baja y no se ha buscado ***
+            if self.metacognition.confidence < 0.5 and iteration > 0:
+                web_tools = ["buscar_web", "buscar_web_profundo", "leer_web"]
+                already_searched = any(t in self.metacognition.tool_history for t in web_tools)
+                
+                if not already_searched:
+                    self._log("Confianza baja: ejecutando busqueda web automatica", "cloud")
+                    try:
+                        search_result = TOOL_FUNCTIONS["buscar_web"](consulta=user_message)
+                        if search_result and "No se encontraron" not in search_result:
+                            self._log(f"Busqueda web automatica exitosa: {search_result[:150]}...", "cloud")
+                            # Inyectar resultados como contexto
+                            messages.append({
+                                "role": "user", 
+                                "content": f"[RESULTADO DE BUSQUEDA WEB AUTOMATICA]:\n{search_result[:1500]}\n\nUsa esta informacion para responder. Si necesitas mas detalle, usa leer_web o buscar_web_profundo."
+                            })
+                            # Guardar en memoria
+                            self.memory.remember(
+                                f"Busqueda web para '{user_message[:50]}': {search_result[:300]}",
+                                metadata={"type": "web_search", "query": user_message[:50]},
+                                fast=True
+                            )
+                            self.metacognition.record_iteration(
+                                iteration=iteration, action_type="tool_call", 
+                                tool_name="buscar_web", result_summary=search_result[:100]
+                            )
+                            self.metacognition.confidence = min(0.7, self.metacognition.confidence + 0.2)
+                        else:
+                            self._log("Busqueda web automatica sin resultados", "warning")
+                    except Exception as e:
+                        self._log(f"Error en busqueda web automatica: {e}", "error")
+                
+                # Si ya se busco pero confianza sigue baja, intentar busqueda profunda
+                elif "buscar_web_profundo" not in self.metacognition.tool_history and self.metacognition.confidence < 0.4:
+                    self._log("Confianza muy baja tras busqueda: ejecutando busqueda profunda", "cloud")
+                    try:
+                        deep_result = TOOL_FUNCTIONS["buscar_web_profundo"](consulta=user_message)
+                        if deep_result and len(deep_result) > 200:
+                            self._log(f"Busqueda profunda exitosa: {deep_result[:150]}...", "cloud")
+                            messages.append({
+                                "role": "user",
+                                "content": f"[RESULTADO DE BUSQUEDA PROFUNDA]:\n{deep_result[:2000]}\n\nResponde al usuario usando esta informacion detallada."
+                            })
+                            self.memory.remember(
+                                f"Busqueda profunda para '{user_message[:50]}': {deep_result[:400]}",
+                                metadata={"type": "web_search_deep", "query": user_message[:50]},
+                                fast=True
+                            )
+                            self.metacognition.confidence = min(0.7, self.metacognition.confidence + 0.15)
+                    except Exception as e:
+                        self._log(f"Error en busqueda profunda automatica: {e}", "error")
 
             if self.supports_tool_calling:
                 action_result = self._react_with_tools(messages, iteration)
@@ -182,19 +210,6 @@ class ReactAgent:
 
                 for lesson in reflection.get("lessons", []):
                     learning.add_knowledge(lesson, source="metacognition")
-
-                # ---- POST-REFLEXION DEEP THINKING (v14.7) ----
-                # Pasar resultados de tools para reflexion informada
-                had_errors = self.metacognition.error_count > 0
-                tool_results_for_reflection = self._collect_tool_results()
-                improved_response, was_improved = self.deep_thinking.reflect(
-                    user_message, final_response, had_errors=had_errors,
-                    tool_results=tool_results_for_reflection
-                )
-                if was_improved:
-                    final_response = improved_response
-                    self._log("Respuesta mejorada via pensamiento profundo", "deep_thinking")
-
                 self._log("Respuesta final generada", "success")
                 self._save_interaction(user_message, final_response)
                 return final_response, self.thinking_log
@@ -231,8 +246,8 @@ class ReactAgent:
     def run_stream(self, user_message):
         """
         Bucle ReAct con streaming REAL. Yields cada token al instante.
-        Eventos: {"type": "text"|"tool_start"|"tool_result"|"meta"|"thinking"|"done", "data": ...}
-        v14.7: Pensamiento profundo con profundidad progresiva y reflexion con contexto.
+        Eventos: {"type": "text"|"thinking"|"tool_start"|"tool_result"|"meta"|"done", "data": ...}
+        v15: Agrega evento "thinking" para que la UI muestre el proceso de pensamiento.
         """
         self.thinking_log = []
         self.metacognition.reset()
@@ -240,39 +255,18 @@ class ReactAgent:
         self._total_tool_calls = 0
         self._log(f"Mensaje del usuario: {user_message}", "input")
 
-        messages = self._build_messages(user_message)
-
-        # ---- PENSAMIENTO PROFUNDO (v14.7) ----
-        deep_result = self.deep_thinking.think(
-            user_message,
-            context=self.memory.get_context_for(user_message)
-        )
-        if deep_result.should_deep_think:
-            _nsteps = len(deep_result.plan)
-            depth_labels = {0: "ninguno", 1: "rapido", 2: "completo", 3: "profundo"}
-            self._log(
-                f"Pensamiento profundo: complejidad={deep_result.complexity:.2f}, "
-                f"tipo={deep_result.query_type}, profundidad={depth_labels.get(deep_result.depth, '?')}, "
-                f"pasos={_nsteps}",
-                "deep_thinking"
-            )
-            # Emitir evento de thinking para la UI
-            yield {
-                "type": "thinking",
-                "data": {
-                    "reasoning": deep_result.reasoning[:500],
-                    "plan": deep_result.plan,
-                    "complexity": deep_result.complexity,
-                    "query_type": deep_result.query_type,
-                    "depth": deep_result.depth,
-                    "native_thinking": deep_result.native_thinking[:200] if deep_result.native_thinking else None,
-                }
+        # Emitir evento thinking: recibiendo pregunta
+        yield {
+            "type": "thinking",
+            "data": {
+                "phase": "receiving",
+                "message": f"Recibiendo pregunta: {user_message[:80]}...",
+                "iteration": 0,
+                "confidence": 0.7,
             }
-            # Inyectar razonamiento en la conversacion
-            thinking_prompt = self.deep_thinking.get_thinking_prompt(deep_result)
-            if thinking_prompt:
-                messages.append({"role": "user", "content": thinking_prompt})
-                messages.append({"role": "assistant", "content": "Entendido. Analizare la situacion con el nivel de profundidad indicado."})
+        }
+
+        messages = self._build_messages(user_message)
 
         if self.supports_tool_calling is None:
             self.supports_tool_calling = self._detect_tool_calling_support()
@@ -281,8 +275,30 @@ class ReactAgent:
                 "info"
             )
 
+        # Emitir evento thinking: buscando en memoria
+        yield {
+            "type": "thinking",
+            "data": {
+                "phase": "memory_search",
+                "message": "Buscando en memoria conocimiento relevante...",
+                "iteration": 0,
+                "confidence": self.metacognition.confidence,
+            }
+        }
+
         for iteration in range(MAX_REACT_ITERATIONS):
             self._log(f"--- Iteracion {iteration + 1}/{MAX_REACT_ITERATIONS} ---", "react")
+
+            # Emitir evento thinking: nueva iteracion
+            yield {
+                "type": "thinking",
+                "data": {
+                    "phase": "iteration_start",
+                    "message": f"Iteracion {iteration + 1}/{MAX_REACT_ITERATIONS}: Pensando como responder...",
+                    "iteration": iteration + 1,
+                    "confidence": self.metacognition.confidence,
+                }
+            }
 
             # *** FIX: Metacognicion ANTES de decidir la accion ***
             meta_prompt = self.metacognition.get_metacognitive_prompt(iteration)
@@ -298,6 +314,59 @@ class ReactAgent:
                         "plan_changes": self.metacognition.plan_changes,
                     }
                 }
+
+            # *** NUEVO: AUTO-BUSQUEDA WEB en streaming cuando confianza baja ***
+            if self.metacognition.confidence < 0.5 and iteration > 0:
+                web_tools = ["buscar_web", "buscar_web_profundo", "leer_web"]
+                already_searched = any(t in self.metacognition.tool_history for t in web_tools)
+                
+                if not already_searched:
+                    self._log("Confianza baja (streaming): ejecutando busqueda web automatica", "cloud")
+                    yield {"type": "tool_start", "data": {"name": "buscar_web", "params": {"consulta": user_message}}}
+                    try:
+                        search_result = TOOL_FUNCTIONS["buscar_web"](consulta=user_message)
+                        if search_result and "No se encontraron" not in search_result:
+                            self._log(f"Busqueda web automatica exitosa", "cloud")
+                            yield {"type": "tool_result", "data": {"tool": {"name": "buscar_web"}, "result": search_result[:200]}}
+                            messages.append({
+                                "role": "user", 
+                                "content": f"[RESULTADO DE BUSQUEDA WEB AUTOMATICA]:\n{search_result[:1500]}\n\nUsa esta informacion para responder."
+                            })
+                            self.memory.remember(
+                                f"Busqueda web para '{user_message[:50]}': {search_result[:300]}",
+                                metadata={"type": "web_search", "query": user_message[:50]},
+                                fast=True
+                            )
+                            self.metacognition.record_iteration(
+                                iteration=iteration, action_type="tool_call",
+                                tool_name="buscar_web", result_summary=search_result[:100]
+                            )
+                            self.metacognition.confidence = min(0.7, self.metacognition.confidence + 0.2)
+                        else:
+                            self._log("Busqueda web automatica sin resultados", "warning")
+                    except Exception as e:
+                        self._log(f"Error en busqueda web automatica: {e}", "error")
+                
+                elif "buscar_web_profundo" not in self.metacognition.tool_history and self.metacognition.confidence < 0.4:
+                    self._log("Confianza muy baja tras busqueda: ejecutando busqueda profunda", "cloud")
+                    yield {"type": "tool_start", "data": {"name": "buscar_web_profundo", "params": {"consulta": user_message}}}
+                    try:
+                        deep_result = TOOL_FUNCTIONS["buscar_web_profundo"](consulta=user_message)
+                        if deep_result and len(deep_result) > 200:
+                            self._log(f"Busqueda profunda exitosa", "cloud")
+                            yield {"type": "tool_result", "data": {"tool": {"name": "buscar_web_profundo"}, "result": deep_result[:200]}}
+                            messages.append({
+                                "role": "user",
+                                "content": f"[RESULTADO DE BUSQUEDA PROFUNDA]:\n{deep_result[:2000]}\n\nResponde usando esta informacion."
+                            })
+                            self.memory.remember(
+                                f"Busqueda profunda para '{user_message[:50]}': {deep_result[:400]}",
+                                metadata={"type": "web_search_deep", "query": user_message[:50]},
+                                fast=True
+                            )
+                            self.metacognition.confidence = min(0.7, self.metacognition.confidence + 0.15)
+                    except Exception as e:
+                        self._log(f"Error en busqueda profunda automatica: {e}", "error")
 
             # ---- NUCLEO: Streaming token-a-token ----
             full_text = ""
@@ -356,6 +425,16 @@ class ReactAgent:
                             full_text = clean
 
             if is_final_response and not tool_calls_found:
+                # Emitir evento thinking: generando respuesta final
+                yield {
+                    "type": "thinking",
+                    "data": {
+                        "phase": "final_response",
+                        "message": "Tengo suficiente informacion. Generando respuesta final...",
+                        "iteration": iteration + 1,
+                        "confidence": self.metacognition.confidence,
+                    }
+                }
                 # PRIMERO: Evaluar resultado para poblar _last_evaluation
                 reflection = self.metacognition.evaluate_result(
                     user_message, full_text, iteration + 1
@@ -383,28 +462,13 @@ class ReactAgent:
                 for lesson in reflection.get("lessons", []):
                     learning.add_knowledge(lesson, source="metacognition")
 
-                # ---- POST-REFLEXION DEEP THINKING (v14.7) ----
-                had_errors = self.metacognition.error_count > 0
-                tool_results_for_reflection = self._collect_tool_results()
-                improved_response, was_improved = self.deep_thinking.reflect(
-                    user_message, full_text, had_errors=had_errors,
-                    tool_results=tool_results_for_reflection
-                )
-                if was_improved:
-                    full_text = improved_response
-                    self._log("Respuesta mejorada via pensamiento profundo", "deep_thinking")
-
                 self._log("Respuesta final generada (streaming)", "success")
                 self._save_interaction(user_message, full_text)
-                # Registrar tokens de respuesta
-                self.token_manager.add_response(full_text)
                 yield {
                     "type": "done",
                     "data": full_text,
                     "thinking_log": self.thinking_log,
                     "meta_status": self.metacognition.get_status(),
-                    "deep_thinking_stats": self.deep_thinking.stats(),
-                    "token_stats": self.token_manager.stats(),
                 }
                 return
 
@@ -414,6 +478,17 @@ class ReactAgent:
                     self.metacognition.record_iteration(
                         iteration=iteration, action_type="tool_call", tool_name=tc["name"]
                     )
+                    # Emitir evento thinking: decidi usar una herramienta
+                    yield {
+                        "type": "thinking",
+                        "data": {
+                            "phase": "tool_decision",
+                            "message": f"Decidi usar la herramienta: {tc['name']} — buscando informacion o ejecutando accion...",
+                            "iteration": iteration + 1,
+                            "confidence": self.metacognition.confidence,
+                            "tool": tc["name"],
+                        }
+                    }
                     yield {"type": "tool_start", "data": tc}
 
                 results = self._execute_tool_calls(tool_calls_found, messages)
@@ -424,6 +499,19 @@ class ReactAgent:
                         iteration=iteration, action_type="tool_result",
                         tool_name=tc["name"], result_summary=res[:200], had_error=had_error
                     )
+                    # Emitir evento thinking: observando resultado
+                    status = "exitoso" if not had_error else "con error"
+                    yield {
+                        "type": "thinking",
+                        "data": {
+                            "phase": "observation",
+                            "message": f"Observacion: {tc['name']} termino {status}. Analizando si tengo suficiente informacion...",
+                            "iteration": iteration + 1,
+                            "confidence": self.metacognition.confidence,
+                            "tool": tc["name"],
+                            "success": not had_error,
+                        }
+                    }
                     yield {"type": "tool_result", "data": {"tool": tc, "result": res}}
 
                 self._feed_tool_results(tool_calls_found, results, messages)
@@ -676,12 +764,8 @@ class ReactAgent:
 
     def _clean_json_leak(self, text):
         """Limpia texto que tiene restos de formato JSON para mostrar al usuario.
-        v4: Ultra-agresivo - NUNCA muestra JSON al usuario.
-        Siempre extrae el contenido util y descarta la estructura JSON.
+        v3: Mas agresivo - tambien limpia JSON parcial al inicio/final del texto.
         """
-        if not text or not text.strip():
-            return text
-
         # Si el texto es JSON completo, extraer solo el contenido util
         parsed = self._parse_json(text)
         if parsed:
@@ -690,67 +774,15 @@ class ReactAgent:
                 return parsed["respuesta_final"].strip()
             if parsed.get("pensamiento", "").strip():
                 return parsed["pensamiento"].strip()
-            # Si tiene accion pero no respuesta, generar una descripcion humana
-            accion = parsed.get("accion", "").strip()
-            if accion:
-                params = parsed.get("params", {})
-                params_str = ", ".join(f"{k}={v}" for k, v in params.items()) if params else ""
-                return f"Ejecutando {accion}({params_str})..." if params_str else f"Ejecutando {accion}..."
-            # JSON vacio o sin campos utiles
-            return ""
-
         # Si no es JSON completo, intentar limpiar restos
+        # Caso: texto que empieza con JSON parcial
         import re as _re
-
-        # Remover bloques JSON completos embebidos en texto
-        cleaned = _re.sub(r'\{["\w\s:,.]*"pensamiento"["\w\s:,.]*\}', '', text)
-
-        # Remover JSON parcial al inicio
-        cleaned = _re.sub(r'^\s*\{[^}]*$', '', cleaned).strip()
-
+        # Remover JSON parcial al inicio: {"pensamiento": "..." ... restos
+        cleaned = _re.sub(r'^\s*\{[^}]*$', '', text).strip()
         # Remover JSON parcial al final
         cleaned = _re.sub(r'\{[^}]*$\s*$', '', cleaned).strip()
-
-        # Remover lineas que parecen JSON keys
-        cleaned = _re.sub(r'^\s*"(pensamiento|accion|params|respuesta_final)"\s*:', '', cleaned, flags=_re.MULTILINE).strip()
-
-        # Remover llaves y comillas sueltas
-        cleaned = _re.sub(r'^\s*[\{\}]\s*$', '', cleaned, flags=_re.MULTILINE).strip()
-
-        # Si despues de limpiar quedo vacio, intentar extraer texto entre comillas
-        if not cleaned:
-            # Buscar el contenido mas largo entre comillas
-            quotes = _re.findall(r'"([^"]{10,})"', text)
-            if quotes:
-                cleaned = max(quotes, key=len)
-            else:
-                cleaned = text
-
-        return cleaned
-
-    # ----------------------------------------------------------
-    # RECOLECCION DE RESULTADOS DE TOOLS (v14.7)
-    # ----------------------------------------------------------
-    def _collect_tool_results(self):
-        """
-        Recolecta los resultados de las herramientas ejecutadas en esta conversacion.
-        Se usa para pasar contexto a la reflexion profunda.
-        Retorna: Lista de (tool_name, result_summary)
-        """
-        results = []
-        # Buscar en el thinking_log las entradas de tool execution
-        for entry in self.thinking_log:
-            # Formato: "[HH:MM:SS] [TOOL] tool_name: resultado..."
-            if "[TOOL]" in entry and ":" in entry:
-                try:
-                    # Extraer nombre de herramienta y resultado
-                    tool_part = entry.split("[TOOL]")[1].strip()
-                    if ":" in tool_part:
-                        tool_name, result = tool_part.split(":", 1)
-                        results.append((tool_name.strip(), result.strip()[:200]))
-                except (IndexError, ValueError):
-                    pass
-        return results[:5]  # Max 5 resultados para no saturar
+        # Si despues de limpiar quedo vacio, devolver texto original
+        return cleaned if cleaned else text
 
     # ----------------------------------------------------------
     # EJECUCION DE TOOLS (paralelo + retry)
@@ -839,8 +871,6 @@ class ReactAgent:
             get_metrics().record_error("tool:" + tool_name)
 
         self._log(f"Resultado: {tool_result[:150]}...", "observation")
-        # Registrar en formato [TOOL] para _collect_tool_results (v14.7)
-        self._log(f"[TOOL] {tool_name}: {tool_result[:200]}", "tool_result")
 
         # Alimentar memoria de trabajo
         self.memory.add_step(f"{tool_name}({tool_params})", tool_result[:200])
@@ -962,9 +992,15 @@ class ReactAgent:
         if relevant_knowledge:
             knowledge_text = "\n".join([f"- {k['content']}" for k in relevant_knowledge[:3]])
             system_content += f"\n\nConocimiento adicional:\n{knowledge_text}"
-
-        # Registrar tokens del system prompt
-        self.token_manager.add_system(system_content)
+        
+        # *** NUEVO: Conocimiento aprendido de busquedas web previas ***
+        try:
+            from tools.web import get_web_learned
+            web_knowledge = get_web_learned(new_message)
+            if web_knowledge:
+                system_content += f"\n\n--- CONOCIMIENTO WEB APRENDIDO ---\n{web_knowledge}"
+        except Exception:
+            pass
 
         messages = [{"role": "system", "content": system_content}]
 
@@ -972,30 +1008,9 @@ class ReactAgent:
         recent_history = self.memory.short_term[-MAX_CONVERSATION_MEMORY:]
         for msg in recent_history:
             messages.append({"role": msg["role"], "content": msg["content"]})
-            self.token_manager.add_context(msg["content"], description=f"History ({msg['role']})")
 
         # Mensaje actual
         messages.append({"role": "user", "content": new_message})
-        self.token_manager.add_context(new_message, description="User message")
-
-        # Registrar tokens de tool schemas
-        tools_text = json.dumps(TOOL_SCHEMAS, ensure_ascii=False)
-        self.token_manager.add_tools(tools_text)
-
-        # Comprimir contexto si excede el presupuesto de tokens
-        if self.token_manager.needs_compression():
-            level = self.token_manager.compression_level()
-            self._log(f"Comprimiendo contexto (nivel: {level})", "warning")
-            messages = self.token_manager.compress(messages, level=level)
-            self._log(f"Contexto comprimido: {len(messages)} mensajes", "info")
-
-        # Log de stats de tokens
-        token_stats = self.token_manager.stats()
-        self._log(
-            f"Tokens: {token_stats['used']:,}/{token_stats['context_size']:,} "
-            f"({token_stats['utilization_pct']}%)",
-            "info"
-        )
 
         return messages
 
@@ -1109,55 +1124,28 @@ class ReactAgent:
 
     def _looks_like_tool_json(self, text):
         """Detecta si el texto parece ser JSON de tool call (no respuesta al usuario).
-        v4: Mucho mas preciso - evita falsos positivos con markdown y codigo.
-        
-        Solo suprime si:
-        1. El texto es JSON que contiene campos de tool call (accion, params, etc.)
-        2. O es el inicio de un JSON de tool call detectable
-        
-        NO suprime:
-        - Markdown que empieza con {
-        - Bloques de codigo JSON explicativos
-        - Respuestas que contienen JSON como ejemplo
+        v3: Mas robusto - detecta JSON que empieza despues de whitespace o texto corto.
         """
         text = text.strip()
         if not text:
             return False
-        
-        # Solo considerar si empieza con { y parece JSON completo/parcial
-        if not text.startswith('{') and not text.lstrip().startswith('{'):
-            return False
-        
-        # Si el texto esta dentro de un bloque de codigo markdown, NO suprimir
-        # (el modelo esta explicando JSON, no llamando herramientas)
-        if text.startswith('```') or '```json' in text[:50] or '```' in text[:20]:
-            return False
-        
-        # Intentar parsear como JSON - si falla, probablemente es texto normal
-        # que casualmente empieza con {
-        try:
-            parsed = json.loads(text)
-            if isinstance(parsed, dict):
-                # Tiene campos de tool call? → suprimir
-                tool_keys = {"accion", "pensamiento", "params", "respuesta_final", "action"}
-                if tool_keys & set(parsed.keys()):
-                    return True
-                # Tiene function/tool_calls structure? → suprimir
-                if "function" in parsed or "tool_calls" in parsed:
-                    return True
-        except json.JSONDecodeError:
-            pass
-        
-        # Verificar si es inicio de JSON de tool call (no completo aun)
-        # Solo si contiene indicadores fuertes de tool call
-        strong_indicators = ['"accion"', '"pensamiento"', '"respuesta_final"',
-                           '"params":', '"function"']
-        for indicator in strong_indicators:
+        # Si el texto empieza con { probablemente es JSON de tool call
+        if text.startswith('{'):
+            return True
+        # Si despues de whitespace/newline hay {, tambien es JSON
+        # Esto captura casos donde el modelo genera: "\n{" o "  {"
+        stripped = text.lstrip()
+        if stripped.startswith('{'):
+            return True
+        # Si contiene patrones de tool calls en cualquier parte
+        tool_indicators = ['"accion"', '"pensamiento"', '"params"', '"respuesta_final"',
+                          '"abrir_', '"ejecutar_', '"leer_', '"escribir_', '"buscar_"']
+        for indicator in tool_indicators:
             if indicator in text:
                 return True
-        
-        # Por defecto: NO suprimir. Es mejor mostrar texto que podria ser
-        # markdown o codigo que suprimir respuestas legitimas.
+        # Si el texto es corto y parece inicio de JSON
+        if len(text) < 5 and text in ['{', '"', '\n', '\r']:
+            return True
         return False
 
     def _detect_tool_calling_support(self):
@@ -1192,7 +1180,7 @@ class ReactAgent:
         return False
 
     def _save_interaction(self, user_message, final_response):
-        """Guarda la interaccion en la triple memoria."""
+        """Guarda la interaccion en la triple memoria + auto-aprende de busquedas web."""
         self.memory.add_conversation("user", user_message)
         self.memory.add_conversation("assistant", final_response)
         # Guardar interaccion sin embedding (mas rapido)
@@ -1202,3 +1190,22 @@ class ReactAgent:
             fast=True  # skip_embedding para velocidad
         )
         self.memory.set_success(final_response[:100])
+        
+        # *** NUEVO: Auto-aprender de busquedas web ***
+        # Si se uso buscar_web en esta interaccion, guardar el conocimiento
+        web_tools_used = [t for t in self.metacognition.tool_history 
+                         if t in ["buscar_web", "buscar_web_profundo", "leer_web"]]
+        if web_tools_used:
+            # Guardar que se aprendio algo de internet
+            learning.add_knowledge(
+                content=f"Pregunta: {user_message[:100]} | Respuesta: {final_response[:200]} | Fuentes: busqueda web",
+                topic=f"web_learned:{user_message[:50]}",
+                source="web_search"
+            )
+            # Tambien guardar en el cache de conocimiento web
+            try:
+                from tools.web import get_web_learned
+                web_knowledge = get_web_learned(user_message)
+                # El conocimiento ya se guardo automaticamente en _auto_learn_from_search
+            except Exception:
+                pass

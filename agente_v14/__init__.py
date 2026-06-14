@@ -1,2 +1,2 @@
-"""Agente Local Autonomo v16 - Super Agente con Cloud APIs."""
-__version__ = "16.5.0"
+"""Agente Local Autonomo v15 - Arquitectura Modular con Visibilidad de Pensamiento."""
+__version__ = "15.0.0"
