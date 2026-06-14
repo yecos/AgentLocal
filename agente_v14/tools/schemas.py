@@ -1142,4 +1142,34 @@ TOOL_SCHEMAS = [
             }
         }
     },
+    # ============================================================
+    # v16 SUPER AGENTE - CLOUD APIs
+    # ============================================================
+    {
+        "type": "function",
+        "function": {
+            "name": "configurar_api_key",
+            "description": "Configura una API key para servicios cloud. Servicios: google, google_cx, openai, anthropic, stability, replicate, huggingface, google_gemini. Permite usar DALL-E, GPT-4, Claude, Stable Diffusion, etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "servicio": {"type": "string", "description": "Servicio: google, openai, anthropic, stability, replicate, huggingface, google_gemini"},
+                    "clave": {"type": "string", "description": "API key del servicio"}
+                },
+                "required": ["servicio", "clave"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "listar_api_keys",
+            "description": "Lista los servicios cloud con API keys configuradas y su estado.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
 ]
