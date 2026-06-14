@@ -370,6 +370,39 @@ class OllamaClient:
             return LLM_TIMEOUT_LARGE
         return LLM_TIMEOUT_SMALL
 
+    def _detect_tool_calling_support_fast(self) -> bool | None:
+        """Detecta soporte de tool calling por nombre del modelo (M8.2).
+        
+        Returns:
+            True if model is known to support tools
+            False if model is known NOT to support tools
+            None if model is unknown (needs live check)
+        """
+        model = (self.model or "").lower()
+        
+        # Modelos conocidos con soporte nativo de function calling
+        SUPPORTS_TOOLS = {
+            "qwen3", "qwen2.5-coder", "mistral-nemo",
+            "hermes", "llama3.1", "llama3.2", "phi3.5",
+            "command-r", "firefunction", "qwen2.5"
+        }
+        
+        # Modelos conocidos SIN soporte de function calling
+        LACKS_TOOLS = {
+            "gemma", "orca", "phi2", "codellama",
+            "deepseek-coder:6.7b", "starcoder", "tinyllama"
+        }
+        
+        for pattern in SUPPORTS_TOOLS:
+            if pattern in model:
+                return True
+        
+        for pattern in LACKS_TOOLS:
+            if pattern in model:
+                return False
+        
+        return None  # Unknown model - needs live check
+
     @timed("llm")
     def generate(self, messages, tools=None, model_override=None, timeout_overwrite=None):
         """

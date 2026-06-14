@@ -17,14 +17,15 @@ from datetime import datetime
 import time as _time_module
 
 from config import (
-    REPOS_DIR, MAX_REACT_ITERATIONS, MAX_CONVERSATION_MEMORY, logger,
+    REPOS_DIR, MAX_REACT_ITERATIONS, ADAPTIVE_ITERATIONS, MAX_CONVERSATION_MEMORY, logger,
     USER_PROFILE_FILE, CONTEXT_WINDOW_TOKENS, SUMMARIZATION_THRESHOLD,
+    TOOL_CALLING_MODEL_CACHE,
 )
 from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS
 from tools.registry import get_tool_metadata
 from memory.triple_memory import TripleMemory, learning
 from llm import ollama
-from agent.schemas import SYSTEM_PROMPT, JSON_TOOLS_PROMPT
+from agent.schemas import SYSTEM_PROMPT, JSON_TOOLS_PROMPT, build_system_prompt
 from agent.metacognition import Metacognition
 from utils.metrics import get_metrics
 
@@ -55,6 +56,29 @@ class ReactAgent:
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.thinking_log.append(f"[{timestamp}] [{category.upper()}] {message}")
 
+    def _get_max_iterations(self, user_message: str) -> int:
+        """Determina el maximo de iteraciones segun complejidad de la tarea (M2.2)."""
+        if not ADAPTIVE_ITERATIONS:
+            return MAX_REACT_ITERATIONS
+
+        msg_lower = user_message.lower()
+
+        # Tareas complejas: creacion, analisis multi-paso, proyectos
+        complex_keywords = [
+            "crea", "construye", "desarrolla", "implementa",
+            "analiza todo", "compara", "genera un reporte",
+            "proyecto completo", "app", "aplicacion", "sistema",
+            "paso a paso", "completo", "integra"
+        ]
+        complexity_score = sum(1 for k in complex_keywords if k in msg_lower)
+
+        if complexity_score >= 2:
+            return 12  # Tarea compleja
+        elif complexity_score == 1:
+            return 8   # Tarea moderada
+        else:
+            return 4   # Consulta simple (ahorra tokens)
+
     # ----------------------------------------------------------
     # RUN SIN STREAMING (original, para compatibilidad)
     # ----------------------------------------------------------
@@ -77,8 +101,11 @@ class ReactAgent:
                 "info"
             )
 
-        for iteration in range(MAX_REACT_ITERATIONS):
-            self._log(f"--- Iteracion {iteration + 1}/{MAX_REACT_ITERATIONS} ---", "react")
+        max_iter = self._get_max_iterations(user_message)
+        self._log(f"Iteraciones adaptativas: {max_iter} (complejidad detectada)", "react")
+
+        for iteration in range(max_iter):
+            self._log(f"--- Iteracion {iteration + 1}/{max_iter} ---", "react")
 
             # *** FIX: Metacognicion ANTES de decidir la accion ***
             # Antes: se evaluaba DESPUES de actuar (paso 4→5→2)
@@ -242,7 +269,7 @@ class ReactAgent:
                 self.metacognition.record_iteration(
                     iteration=iteration, action_type="error", had_error=True
                 )
-                if iteration >= MAX_REACT_ITERATIONS - 1:
+                if iteration >= max_iter - 1:
                     return "Tuve problemas para procesar tu solicitud. Puedes reformularla?", self.thinking_log
 
         self._log("Alcanzado limite de iteraciones", "warning")
@@ -283,6 +310,9 @@ class ReactAgent:
                 "info"
             )
 
+        max_iter = self._get_max_iterations(user_message)
+        self._log(f"Iteraciones adaptativas: {max_iter} (complejidad detectada)", "react")
+
         # Emitir evento thinking: buscando en memoria
         yield {
             "type": "thinking",
@@ -294,15 +324,15 @@ class ReactAgent:
             }
         }
 
-        for iteration in range(MAX_REACT_ITERATIONS):
-            self._log(f"--- Iteracion {iteration + 1}/{MAX_REACT_ITERATIONS} ---", "react")
+        for iteration in range(max_iter):
+            self._log(f"--- Iteracion {iteration + 1}/{max_iter} ---", "react")
 
             # Emitir evento thinking: nueva iteracion
             yield {
                 "type": "thinking",
                 "data": {
                     "phase": "iteration_start",
-                    "message": f"Iteracion {iteration + 1}/{MAX_REACT_ITERATIONS}: Pensando como responder...",
+                    "message": f"Iteracion {iteration + 1}/{max_iter}: Pensando como responder...",
                     "iteration": iteration + 1,
                     "confidence": self.metacognition.confidence,
                 }
@@ -405,7 +435,7 @@ class ReactAgent:
                     self.metacognition.record_iteration(
                         iteration=iteration, action_type="error", had_error=True
                     )
-                    if iteration >= MAX_REACT_ITERATIONS - 1:
+                    if iteration >= max_iter - 1:
                         yield {
                             "type": "done",
                             "data": "Tuve problemas para procesar tu solicitud. Puedes reformularla?",
@@ -530,7 +560,7 @@ class ReactAgent:
                 self.metacognition.record_iteration(
                     iteration=iteration, action_type="error", had_error=True
                 )
-                if iteration >= MAX_REACT_ITERATIONS - 1:
+                if iteration >= max_iter - 1:
                     yield {
                         "type": "done",
                         "data": "Tuve problemas para procesar tu solicitud. Puedes reformularla?",
@@ -950,11 +980,42 @@ class ReactAgent:
                 self._log(f"Reintentando {tool_name} (error transitorio)...", "execution")
                 tool_result = self._execute_tool(tool_name, tool_params)
 
+        # v16.3: SkillRouter — Fallback automatico z-ai → local
+        if "ERROR" in tool_result and "z-ai" in tool_result:
+            try:
+                from tools.skill_errors import create_missing_dependency_error
+                error = create_missing_dependency_error(tool_name)
+                if error.alternative_tool and error.alternative_tool in TOOL_FUNCTIONS:
+                    self._log(
+                        f"Intentando fallback: {tool_name} -> {error.alternative_tool}",
+                        "routing"
+                    )
+                    try:
+                        params = self._resolve_params(tool_params)
+                        tool_result = TOOL_FUNCTIONS[error.alternative_tool](**params)
+                    except Exception as fallback_err:
+                        tool_result = error.to_agent_message()
+                else:
+                    tool_result = error.to_agent_message()
+            except Exception:
+                pass  # Si skill_errors falla, mantener error original
+
         _tool_elapsed_ms = (_time.monotonic() - _tool_start) * 1000.0
         get_metrics().record_tool_call(tool_name, _tool_elapsed_ms)
 
         if "ERROR" in tool_result:
             get_metrics().record_error("tool:" + tool_name)
+
+        # v16.3: SkillRouter — Record success/failure history
+        try:
+            from tools.skill_router import get_skill_router
+            router = get_skill_router()
+            if "ERROR" in tool_result:
+                router.record_failure(tool_name)
+            else:
+                router.record_success(tool_name)
+        except Exception:
+            pass  # No bloquear ejecucion si el router falla
 
         self._log(f"Resultado: {tool_result[:150]}...", "observation")
 
@@ -1320,28 +1381,71 @@ class ReactAgent:
     # CONSTRUCCION DE MENSAJES (OPTIMIZADA)
     # ----------------------------------------------------------
     def _build_messages(self, new_message):
-        """Construye la lista de mensajes con contexto enriquecido (optimizado)."""
+        """Construye la lista de mensajes con contexto enriquecido (optimizado).
+        
+        v16.3: Usa build_system_prompt() con 3 capas dinamicas.
+        Correcciones reales + few-shot + deteccion de z-ai.
+        """
         # Cache de modelos para evitar llamada API en cada mensaje
         if self._models_cache is None:
             self._models_cache = ollama._fetch_available_models() or [ollama.model or "desconocido"]
         models = self._models_cache
 
-        system_content = SYSTEM_PROMPT
-        # Usar replace en vez de .format() para evitar KeyError con llaves {} en el texto
-        system_content = system_content.replace("{so}", os.name)
-        system_content = system_content.replace("{repos_dir}", REPOS_DIR)
-        system_content = system_content.replace("{models}", ", ".join(models))
-        system_content = system_content.replace("{corrections}", "Ver correcciones abajo")
+        # Detectar mejor herramienta de busqueda segun z-ai availability
+        try:
+            from tools.skill_loader import is_zai_available
+            best_search = "buscar_web_api" if is_zai_available() else "buscar_web"
+        except ImportError:
+            best_search = "buscar_web"
 
-        # Perfil de usuario (personalizacion)
-        user_profile = self._load_user_profile()
-        if user_profile:
-            profile_parts = []
-            for key, label in [("name", "Nombre"), ("role", "Rol"), ("interests", "Intereses"), ("language", "Idioma preferido"), ("style", "Estilo de respuesta")]:
-                if key in user_profile and user_profile[key]:
-                    profile_parts.append(f"{label}: {user_profile[key]}")
-            if profile_parts:
-                system_content += "\n\n--- PERFIL DEL USUARIO ---\n" + "\n".join(profile_parts)
+        # Obtener correcciones reales del sistema de aprendizaje
+        corrections_text = None  # Se llenara via build_system_prompt
+        if hasattr(self, 'memory') and self.memory and hasattr(self.memory, 'long_term'):
+            try:
+                from memory.learning import LearningSystem
+                learning_sys = LearningSystem()
+                corrections_list = learning_sys.get_corrections_for(new_message)
+                if corrections_list:
+                    corrections_text = "\n".join([
+                        f"- NO hagas: {c.get('wrong_action', c.get('user_message', ''))} → HAZ: {c.get('correct_action', '')}"
+                        for c in corrections_list[:5]
+                    ])
+            except Exception as e:
+                logger.debug(f"Error obteniendo correcciones reales: {e}")
+
+        # Obtener few-shot examples de la memoria
+        few_shot_text = None  # Se llenara via build_system_prompt
+        if hasattr(self, 'memory') and self.memory:
+            try:
+                similar = self.memory.recall(new_message, limit=2)
+                if similar:
+                    few_shot_text = "\n".join([
+                        f"Ejemplo: {ex.get('text', '')[:80]}"
+                        for ex in similar
+                    ])
+            except Exception as e:
+                logger.debug(f"Error obteniendo few-shot examples: {e}")
+
+        # Construir context para build_system_prompt
+        prompt_context = {
+            "so": os.name,
+            "repos_dir": REPOS_DIR,
+            "models": models,
+            "query": new_message,
+            "memory": self.memory,
+            "best_search_tool": best_search,
+        }
+
+        # Si tenemos correcciones reales, pasarlas directamente
+        if corrections_text is not None:
+            prompt_context["corrections"] = corrections_text
+
+        # Si tenemos few-shot examples, pasarlos directamente
+        if few_shot_text is not None:
+            prompt_context["few_shot_examples"] = few_shot_text
+
+        # Construir system prompt con las 3 capas
+        system_content = build_system_prompt(prompt_context)
 
         # Contexto enriquecido desde Triple Memoria (con cache de embedding)
         enriched_context = self.memory.get_context_for(new_message)
@@ -1354,7 +1458,7 @@ class ReactAgent:
             knowledge_text = "\n".join([f"- {k['content']}" for k in relevant_knowledge[:3]])
             system_content += f"\n\nConocimiento adicional:\n{knowledge_text}"
         
-        # *** NUEVO: Conocimiento aprendido de busquedas web previas ***
+        # Conocimiento aprendido de busquedas web previas
         try:
             from tools.web import get_web_learned
             web_knowledge = get_web_learned(new_message)
@@ -1517,35 +1621,49 @@ class ReactAgent:
         return False
 
     def _detect_tool_calling_support(self):
-        """Detecta si el modelo soporta function calling nativo."""
+        """Detecta si el modelo soporta function calling nativo (M8.2: fast path + cache)."""
         ollama.detect_models()
-        if ollama.model:
-            model_lower = ollama.model.lower()
-            # Modelos que SI soportan tool calling nativo
-            if "qwen3" in model_lower:
-                return True
-            if "qwen2.5-coder" in model_lower:
-                return True
-            # Modelos que NO soportan tool calling
-            if any(x in model_lower for x in ["qwen2.5:14b", "qwen2.5:32b", "llama3.1"]):
-                return False
-        # Test rapido
+        model_name = ollama.model
+
+        # M8.2: Try fast detection first (no LLM call needed)
+        fast_result = ollama._detect_tool_calling_support_fast()
+        if fast_result is not None:
+            # Cache the result for future lookups
+            if model_name:
+                TOOL_CALLING_MODEL_CACHE[model_name] = fast_result
+            logger.info(f"Tool calling detectado por nombre: {fast_result} (modelo: {model_name})")
+            return fast_result
+
+        # M8.2: Check cache for previously detected unknown models
+        if model_name and model_name in TOOL_CALLING_MODEL_CACHE:
+            cached = TOOL_CALLING_MODEL_CACHE[model_name]
+            logger.info(f"Tool calling desde cache: {cached} (modelo: {model_name})")
+            return cached
+
+        # Fall back to live detection for unknown models
         try:
             import ollama as ollama_lib
             for host in ['http://localhost:11434', 'http://127.0.0.1:11434']:
                 try:
                     client = ollama_lib.Client(host=host)
                     client.chat(
-                        model=ollama.model,
+                        model=model_name,
                         messages=[{"role": "user", "content": "hi"}],
                         tools=[TOOL_SCHEMAS[0]]
                     )
+                    # Cache the result
+                    if model_name:
+                        TOOL_CALLING_MODEL_CACHE[model_name] = True
                     return True
                 except Exception as e:
-                    logger.debug(f"Error probando tool calling con modelo {model}: {e}")
+                    logger.debug(f"Error probando tool calling con modelo {model_name}: {e}")
                     continue
         except Exception as e:
             logger.debug(f"Error detectando soporte de tool calling: {e}")
+
+        # Cache negative result too
+        if model_name:
+            TOOL_CALLING_MODEL_CACHE[model_name] = False
         return False
 
     def _save_interaction(self, user_message, final_response):

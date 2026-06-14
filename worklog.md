@@ -994,3 +994,173 @@ Stage Summary:
 - 2 new API endpoints: GET /api/version, POST /api/reset
 - 3 unused imports removed across 3 files
 - All 523 tests pass
+
+---
+Task ID: r1c
+Agent: Sub Agent R1
+Task: Implement S2 (Skill Router) + S4 (SkillError estructurado)
+
+Work Log:
+- Read worklog.md and all 4 source files (skill_loader.py, __init__.py, registry.py, react.py)
+- Analyzed z-ai availability check in skill_loader.py (is_zai_available() with caching)
+- Analyzed TOOL_FUNCTIONS registry pattern and _execute_single_tool flow in react.py
+
+Created files:
+1. tools/skill_router.py (242 lines) — NEW
+   - SkillRouter class with scoring-based tool selection
+   - ZAI_TO_LOCAL_FALLBACK: 9 z-ai → local tool mappings
+   - INTENT_TO_TOOLS: 8 intent categories with regex patterns and tool priority lists
+   - select_best_tool(): Scores candidates by availability, z-ai status, failure/success history
+   - get_fallback(): Returns local alternative for z-ai tools
+   - record_success()/record_failure(): Tracks tool execution history
+   - detect_intent(): Regex-based user intent detection → best tool + alternatives
+   - get_contextual_tools(): Returns relevant subset of tools for a message (max 15)
+   - get_skill_router() singleton function
+
+2. tools/skill_errors.py (147 lines) — NEW
+   - SkillError(Exception) with structured error info:
+     - skill_name, error_type, message, suggestion, recoverable, alternative_tool
+     - 8 predefined error types (MISSING_DEPENDENCY, BAD_PARAMS, TIMEOUT, etc.)
+     - to_agent_message(): Actionable message for the ReAct agent
+     - to_dict(): Serialization for API responses
+   - Helper factories:
+     - create_missing_dependency_error(): z-ai missing → local fallback suggestion
+     - create_timeout_error(): Timeout with recovery suggestion
+     - create_bad_params_error(): Invalid parameter with format hint
+
+Modified files:
+3. tools/__init__.py (+7 lines)
+   - Added imports: SkillRouter, get_skill_router, ZAI_TO_LOCAL_FALLBACK, INTENT_TO_TOOLS
+   - Added imports: SkillError, create_missing_dependency_error, create_timeout_error, create_bad_params_error
+   - Updated docstring to v16.3
+
+4. agent/react.py (+27 lines in _execute_single_tool)
+   - v16.3: SkillRouter — Fallback automatico z-ai → local
+     When a tool returns ERROR containing "z-ai", creates SkillError,
+     checks for alternative_tool, and retries with the local fallback
+   - v16.3: SkillRouter — Record success/failure history
+     After every tool execution, records result in SkillRouter
+     for future scoring-based tool selection
+
+Verification:
+- All 523 tests pass (python -m pytest tests/ -q --tb=short)
+- SkillRouter correctly detects z-ai not available, routes to local tools
+- SkillError.to_agent_message() produces actionable multi-line error messages
+- create_missing_dependency_error() finds local fallbacks (e.g., buscar_web_api → buscar_web)
+- detect_intent() works for Spanish regex patterns
+- get_contextual_tools() returns filtered relevant tools
+- Singleton pattern verified (get_skill_router() returns same instance)
+- All imports from tools/__init__.py work correctly
+
+Stage Summary:
+- 2 new modules: skill_router.py (242L), skill_errors.py (147L)
+- 2 modified files: __init__.py (+7L), react.py (+27L in _execute_single_tool)
+- 389 lines of new code total
+- 523/523 tests pass
+
+---
+Task ID: r1b
+Agent: Sub Agent
+Task: M2.2 (Iteraciones adaptativas) + M8.2 (Detección tool calling sin LLM)
+
+Work Log:
+- Leidos archivos: react.py, llm.py, config.py
+- M2.2: Agregado método _get_max_iterations() a ReactAgent en react.py
+  - Complejidad por keywords: score >= 2 → 12 iter, score == 1 → 8 iter, else → 4 iter
+  - Keywords complejas: crea, construye, desarrolla, implementa, analiza todo, compara, etc.
+  - Cuando ADAPTIVE_ITERATIONS=False, usa MAX_REACT_ITERATIONS fijo (6)
+- M2.2: Actualizado run() y run_stream() para usar max_iter dinámico
+  - Reemplazados 5 usos de MAX_REACT_ITERATIONS por max_iter local
+  - Agregado log: "Iteraciones adaptativas: N (complejidad detectada)"
+- M2.2: Agregado ADAPTIVE_ITERATIONS=True en config.py (línea 74)
+- M8.2: Agregado _detect_tool_calling_support_fast() a OllamaClient en llm.py
+  - SUPPORTS_TOOLS: qwen3, qwen2.5-coder, mistral-nemo, hermes, llama3.1, llama3.2, phi3.5, command-r, firefunction, qwen2.5
+  - LACKS_TOOLS: gemma, orca, phi2, codellama, deepseek-coder:6.7b, starcoder, tinyllama
+  - Returns None para modelos desconocidos (necesita check en vivo)
+- M8.2: Actualizado _detect_tool_calling_support() en react.py
+  - Fast path primero (sin llamada LLM): ollama._detect_tool_calling_support_fast()
+  - Cache lookup segundo: TOOL_CALLING_MODEL_CACHE[model_name]
+  - Fallback a live detection solo para modelos desconocidos
+  - Cache actualizado con resultado True/False después de detección
+- M8.2: Agregado TOOL_CALLING_MODEL_CACHE={} en config.py (línea 154)
+
+Verification:
+- All 523 tests pass (python -m pytest tests/ -q --tb=short)
+- _get_max_iterations() returns 4/8/12 correctly based on complexity keywords
+- _detect_tool_calling_support_fast() correctly identifies known models
+- Cache prevents repeated LLM calls for tool calling detection
+
+Stage Summary:
+- Modified files: react.py (1698L), llm.py (1014L), config.py (458L)
+- M2.2: +26 lines in react.py (_get_max_iterations method + adaptive iteration logic)
+- M8.2: +33 lines in llm.py (_detect_tool_calling_support_fast method)
+- M8.2: +38 lines in react.py (_detect_tool_calling_support rewrite with fast path + cache)
+- M8.2: +2 lines in config.py (ADAPTIVE_ITERATIONS + TOOL_CALLING_MODEL_CACHE)
+- 523/523 tests pass
+
+---
+Task ID: r1a
+Agent: Sub Agent (general-purpose)
+Task: M1 - System Prompt Overhaul (3 capas + arbol de decision + correcciones reales + few-shot dinamicos)
+
+Work Log:
+- Read worklog.md and all 4 target files (schemas.py, react.py, learning.py, triple_memory.py)
+- Read skill_loader.py to understand is_zai_available() API
+- Read config.py for constants (CORRECTIONS_FILE, USER_PROFILE_FILE, etc.)
+- Read test files (test_react_agent.py, conftest.py) to understand test patterns
+- Read _helpers.py to verify SYSTEM_PROMPT import compatibility
+
+Changes Made:
+
+1. agent/schemas.py (208 → 530 lines, +322 lines):
+   - Added 3-layer prompt architecture:
+     * IDENTITY_PROMPT (Capa 1): ~200 tokens, always present, core identity + principles
+     * CAPABILITIES_PROMPT (Capa 2): Dynamic capabilities based on context, search tool decision tree
+     * EPISODIC_CONTEXT_TEMPLATE (Capa 3): Per-conversation context with corrections, profile, few-shot
+   - Added RESPONSE_FORMAT_PROMPT: Separated response format instructions (always present)
+   - Added build_system_prompt(context: dict) -> str function:
+     * Combines all 3 layers dynamically
+     * Auto-detects z-ai availability for best_search_tool
+     * Gets real corrections from LearningSystem (NOT placeholder)
+     * Gets few-shot examples from TripleMemory.recall()
+     * Loads user profile from file
+     * Returns complete system prompt string
+   - Added helper functions: _detect_best_search_tool(), _get_tool_count(), _load_user_profile(), _format_user_profile(), _get_real_corrections(), _get_few_shot_examples()
+   - Kept backward compatibility: SYSTEM_PROMPT still importable (marked as deprecated)
+   - Added _deprecated_system_prompt() warning function
+
+2. agent/react.py (1642 → 1698 lines, +56 lines):
+   - Updated import: added build_system_prompt to imports from agent.schemas
+   - Rewrote _build_messages() to use build_system_prompt() instead of static SYSTEM_PROMPT:
+     * Detects z-ai availability for best_search_tool selection
+     * Gets real corrections from LearningSystem via get_corrections_for()
+     * Gets few-shot examples from memory.recall()
+     * Passes all context to build_system_prompt() via dict
+     * Falls back gracefully when corrections/examples not available
+   - Preserved all existing behavior: enriched context, knowledge backup, web knowledge
+
+3. memory/learning.py (131 → 173 lines, +42 lines):
+   - Added get_corrections(query: str = "", limit: int = 5) -> list[dict] method:
+     * Returns list of {mistake, fix} dicts (consistent interface)
+     * With query: uses get_corrections_for() for semantic matching
+     * Without query: returns most recent corrections
+     * Includes optional 'reason' field when available
+     * Only includes entries with useful information (mistake or fix non-empty)
+
+Verification:
+- 523/523 tests pass (no regressions)
+- Manual verification: build_system_prompt() correctly combines all 3 layers
+- Manual verification: corrections injection works with real LearningSystem data
+- Manual verification: few-shot examples pulled from memory.recall()
+- Manual verification: z-ai detection works (falls back to buscar_web)
+- Manual verification: SYSTEM_PROMPT still importable for backward compatibility
+- Manual verification: _build_messages() produces correct message structure
+
+Stage Summary:
+- M1 System Prompt Overhaul: COMPLETE
+- 3-layer architecture: IDENTITY → CAPABILITIES → EPISODIC
+- Real corrections (not placeholder) injected from LearningSystem
+- Few-shot examples injected from TripleMemory
+- z-ai availability detection for search tool selection
+- Full backward compatibility maintained
+- All 523 tests pass

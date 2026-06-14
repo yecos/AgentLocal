@@ -2,6 +2,8 @@
 Registro centralizado de herramientas.
 El agente importa TOOL_FUNCTIONS y TOOL_SCHEMAS desde aqui.
 
+v16.3: SkillRouter + SkillError para seleccion inteligente
+       de herramientas y errores estructurados.
 v16: Super Agente - sub-agentes con herramientas reales,
      APIs cloud como fallback, diagramas profesionales,
      documentos mejorados, gestion de tokens.
@@ -11,6 +13,10 @@ import json
 
 # Importar el registry
 from .registry import tool, register_tool, TOOL_FUNCTIONS, TOOL_SCHEMAS
+
+# Importar Skill Router y SkillError (v16.3)
+from .skill_router import SkillRouter, get_skill_router, ZAI_TO_LOCAL_FALLBACK, INTENT_TO_TOOLS
+from .skill_errors import SkillError, create_missing_dependency_error, create_timeout_error, create_bad_params_error
 
 # Importar herramientas de sub-modulos (originales)
 from .sistema import ejecutar_comando, procesos_activos, matar_proceso

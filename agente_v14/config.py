@@ -71,6 +71,7 @@ AGENT_MODEL = os.environ.get("AGENT_MODEL", "")  # Empty = auto-detect
 # LIMITES
 # ============================================================
 MAX_REACT_ITERATIONS = 6         # Max vueltas del bucle ReAct (reducido de 8 para velocidad)
+ADAPTIVE_ITERATIONS = True       # Iteraciones adaptativas segun complejidad (M2.2)
 MAX_CONVERSATION_MEMORY = 15     # Mensajes de contexto que recuerda (reducido de 20)
 MAX_CONTEXT_CHARS = 2000         # Budget de chars para contexto enriquecido (reducido de 3000)
 MAX_FILE_READ = 8000             # Max chars al leer un archivo
@@ -150,6 +151,8 @@ DEEP_THINKING_MAX_PERSISTED = 100           # Max pensamientos guardados
 # ============================================================
 # SUB-AGENTES (v15)
 # ============================================================
+TOOL_CALLING_MODEL_CACHE = {}       # Cache model->bool para tool calling (M8.2)
+
 SUBAGENT_MAX_PARALLEL = 4          # Max sub-agentes ejecutandose en paralelo
 SUBAGENT_DEFAULT_TIMEOUT = 60      # Timeout por defecto para sub-agentes (segundos)
 SUBAGENT_MAX_TASKS = 8             # Max tareas en una ejecucion paralela
@@ -388,6 +391,7 @@ def get_config_summary() -> dict:
         "SUMMARIZATION_THRESHOLD": SUMMARIZATION_THRESHOLD,
         # Limits
         "MAX_REACT_ITERATIONS": MAX_REACT_ITERATIONS,
+        "ADAPTIVE_ITERATIONS": ADAPTIVE_ITERATIONS,
         "MAX_CONVERSATION_MEMORY": MAX_CONVERSATION_MEMORY,
         "MAX_CONTEXT_CHARS": MAX_CONTEXT_CHARS,
         "MAX_FILE_READ": MAX_FILE_READ,

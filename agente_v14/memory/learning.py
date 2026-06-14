@@ -128,3 +128,46 @@ class LearningSystem:
             "patterns": len(self._load(PATTERNS_FILE, [])),
             "feedback": len(self._load(FEEDBACK_FILE, [])),
         }
+
+    def get_corrections(self, query: str = "", limit: int = 5) -> list[dict]:
+        """Obtiene correcciones aprendidas, con busqueda semantica opcional.
+
+        Metodo de acceso general para el sistema de correcciones.
+        Si se proporciona query, busca correcciones relevantes usando
+        get_corrections_for(). Si no, retorna las mas recientes.
+
+        Cada correccion tiene formato:
+            {
+                "mistake": str,  # Lo que NO se debe hacer
+                "fix": str,      # Lo que SI se debe hacer
+            }
+
+        Args:
+            query: Texto para buscar correcciones relevantes (opcional).
+                   Si es vacio, retorna las mas recientes.
+            limit: Maximo de correcciones a retornar (default 5).
+
+        Returns:
+            Lista de diccionarios con claves 'mistake' y 'fix'.
+        """
+        if query:
+            # Buscar correcciones relevantes al query
+            raw_corrections = self.get_corrections_for(query)
+        else:
+            # Retornar las mas recientes
+            raw_corrections = self._load(CORRECTIONS_FILE, [])
+            raw_corrections = raw_corrections[-limit:]
+
+        result = []
+        for c in raw_corrections[:limit]:
+            mistake = c.get("wrong_action", c.get("user_message", ""))
+            fix = c.get("correct_action", "")
+            reason = c.get("reason", "")
+            entry = {"mistake": mistake, "fix": fix}
+            if reason:
+                entry["reason"] = reason
+            # Solo incluir si hay informacion util
+            if mistake or fix:
+                result.append(entry)
+
+        return result
