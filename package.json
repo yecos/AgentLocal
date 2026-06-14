@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev -p 3000",
     "dev:log": "next dev -p 3000 2>&1 | tee dev.log",
+    "dev:log:win": "next dev -p 3000 > dev.log 2>&1 & type dev.log",
     "build": "next build",
     "start": "next start -p 3000",
     "lint": "eslint .",
