@@ -502,7 +502,11 @@ def _agent_runner(agent: ReactAgent, message: str, q: queue.Queue):
     except Exception as e:
         print(f"[ERROR] _agent_runner: {e}")
         traceback.print_exc()
-        q.put({"type": "error", "data": str(e)})
+        # Never expose raw JSON key names as error messages
+        err_msg = str(e)
+        if any(k in err_msg for k in ['pensamiento', 'accion', 'respuesta_final', 'params']):
+            err_msg = "Error procesando respuesta del modelo"
+        q.put({"type": "error", "data": err_msg})
         q.put(None)
     finally:
         _busy = False

@@ -936,7 +936,12 @@ export default function ZAIInterface() {
           try {
             const parsed = JSON.parse(data);
             if (parsed.error) {
-              fullContent += `\nError: ${parsed.error}`;
+              // v5: Filter out raw JSON key names from error messages
+              let errVal = String(parsed.error);
+              if (['"pensamiento"', '"accion"', '"respuesta_final"', '"params"'].some(k => errVal.includes(k))) {
+                errVal = 'Error procesando respuesta del modelo';
+              }
+              fullContent += `\nError: ${errVal}`;
               break;
             }
 
@@ -944,15 +949,32 @@ export default function ZAIInterface() {
             if (parsed.type) {
               if (parsed.type === "text") {
                 let content = parsed.data || "";
-                // Filter out internal JSON that the agent leaks
+                // v5: More robust filtering of internal agent JSON
                 // (pensamiento, accion, respuesta_final, params)
-                content = content.replace(/\{"?pensamiento"?\s*:/g, '');
-                content = content.replace(/\{"?accion"?\s*:/g, '');
-                content = content.replace(/\{"?respuesta_final"?\s*:/g, '');
-                if (content.trim().startsWith('{"') && (content.includes('"pensamiento"') || content.includes('"accion"') || content.includes('"respuesta_final"'))) {
-                  // Entire chunk is internal JSON - skip it
-                  continue;
+                // Check if entire content is internal JSON - try to extract useful content
+                const trimmed = content.trim();
+                if (trimmed.startsWith('{')) {
+                  try {
+                    const jsonObj = JSON.parse(trimmed);
+                    // Extract useful content: respuesta_final > pensamiento
+                    content = jsonObj.respuesta_final || jsonObj.pensamiento || '';
+                    if (!content) continue;
+                  } catch {
+                    // Partial/incomplete JSON - check if it's internal agent JSON
+                    if (trimmed.includes('"pensamiento"') || trimmed.includes('"accion"') || trimmed.includes('"respuesta_final"')) {
+                      // Don't show partial internal JSON to user
+                      continue;
+                    }
+                  }
                 }
+                // Additional cleanup: remove any residual JSON key fragments
+                content = content.replace(/"?pensamiento"?\s*:\s*"?[^",}]*"?\s*,?\s*/g, '');
+                content = content.replace(/"?accion"?\s*:\s*"?[^",}]*"?\s*,?\s*/g, '');
+                content = content.replace(/"?respuesta_final"?\s*:\s*"?[^",}]*"?\s*,?\s*/g, '');
+                // Remove literal key names that might leak through
+                content = content.replace(/"(?:pensamiento|accion|respuesta_final|params)"/g, '');
+                content = content.trim();
+                if (!content) continue;
                 if (content.includes("<think")) {
                   isThinking = true;
                 }
@@ -1012,25 +1034,37 @@ export default function ZAIInterface() {
               } else if (parsed.type === "done") {
                 // Agent finished
               } else if (parsed.type === "error") {
-                fullContent += `\nError: ${parsed.data}`;
+                // v5: Filter out raw JSON key names from error messages
+                let errMsg = String(parsed.data || '');
+                if (['"pensamiento"', '"accion"', '"respuesta_final"', '"params"'].some(k => errMsg.includes(k))) {
+                  errMsg = 'Error procesando respuesta del modelo';
+                }
+                fullContent += `\nError: ${errMsg}`;
               }
             } else {
               // Direct Ollama format (no type field)
               let content = parsed.message?.content || "";
               tokenCount++;
 
-              // Filter out internal agent JSON from direct Ollama responses
-              if (content.trim().startsWith('{"') && (content.includes('"pensamiento"') || content.includes('"accion"') || content.includes('"respuesta_final"'))) {
-                // This is internal agent JSON leaking through - try to extract respuesta_final
+              // v5: More robust filtering of internal agent JSON from direct Ollama responses
+              const directTrimmed = content.trim();
+              if (directTrimmed.startsWith('{')) {
                 try {
-                  const jsonObj = JSON.parse(content);
+                  const jsonObj = JSON.parse(directTrimmed);
+                  // Extract useful content: respuesta_final > pensamiento
                   content = jsonObj.respuesta_final || jsonObj.pensamiento || '';
                   if (!content) continue;
                 } catch {
-                  // Partial JSON - skip it entirely
-                  continue;
+                  // Partial JSON with internal keys - skip it
+                  if (directTrimmed.includes('"pensamiento"') || directTrimmed.includes('"accion"') || directTrimmed.includes('"respuesta_final"')) {
+                    continue;
+                  }
                 }
               }
+              // Additional cleanup: remove residual JSON key fragments
+              content = content.replace(/"(?:pensamiento|accion|respuesta_final|params)"/g, '');
+              content = content.trim();
+              if (!content) continue;
 
               if (content.includes("<think")) {
                 isThinking = true;

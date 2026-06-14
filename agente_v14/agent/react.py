@@ -604,11 +604,31 @@ class ReactAgent:
                             yield {"type": "tool_calls", "data": [{"name": accion, "params": parsed.get("params", {})}]}
                             yield {"type": "done", "data": False}
                             return
+                        # v5: Si hay respuesta_final o pensamiento con contenido, usarlo directamente
+                        respuesta_final = parsed.get("respuesta_final", "").strip()
+                        pensamiento = parsed.get("pensamiento", "").strip()
+                        if respuesta_final:
+                            yield {"type": "token", "data": respuesta_final}
+                            _llm_elapsed = (_time.monotonic() - _llm_start) * 1000.0
+                            get_metrics().record_llm_call(_llm_elapsed)
+                            yield {"type": "done", "data": True}
+                            return
+                        if pensamiento:
+                            # El modelo respondio en campo pensamiento - usarlo como respuesta
+                            self._log("Modelo respondio en 'pensamiento' en streaming, usando como respuesta", "info")
+                            yield {"type": "token", "data": pensamiento}
+                            _llm_elapsed = (_time.monotonic() - _llm_start) * 1000.0
+                            get_metrics().record_llm_call(_llm_elapsed)
+                            yield {"type": "done", "data": True}
+                            return
                     # Si no se pudo parsear como tool call, emitir el texto limpio
                     clean = self._clean_json_leak(full_content)
-                    if clean != full_content:
+                    if clean and clean.strip():
                         # El texto era JSON, emitir version limpia
                         yield {"type": "token", "data": clean}
+                    else:
+                        # JSON roto sin contenido util - no emitir nada vacio
+                        self._log("JSON de streaming sin contenido util, descartando", "warning")
                 _llm_elapsed = (_time.monotonic() - _llm_start) * 1000.0
                 get_metrics().record_llm_call(_llm_elapsed)
                 yield {"type": "done", "data": True}
@@ -691,14 +711,28 @@ class ReactAgent:
                     respuesta_final = parsed.get("respuesta_final", "").strip()
                     if respuesta_final:
                         return ("respond", respuesta_final)
-                return ("respond", content)
+                    # v5: Si tiene pensamiento pero no respuesta_final ni accion,
+                    # el modelo respondio en campo equivocado - usar pensamiento
+                    pensamiento = parsed.get("pensamiento", "").strip()
+                    if pensamiento:
+                        self._log("Modelo respondio en 'pensamiento' en vez de 'respuesta_final' (tool calling)", "info")
+                        return ("respond", pensamiento)
+                    # JSON sin contenido util - limpiar
+                    clean = self._clean_json_leak(content)
+                    if clean and clean.strip():
+                        return ("respond", clean)
+                    return ("respond", content)
 
             return ("error", "Respuesta vacia del modelo")
 
         except Exception as e:
             self._log(f"Error en tool calling: {e}", "error")
             self.supports_tool_calling = False
-            return ("error", str(e))
+            # Never show raw JSON key names as errors to the user
+            err_msg = str(e)
+            if any(k in err_msg for k in ['pensamiento', 'accion', 'respuesta_final', 'params']):
+                err_msg = "Error procesando respuesta del modelo"
+            return ("error", err_msg)
 
     # ----------------------------------------------------------
     # REACT CON JSON FALLBACK
@@ -760,12 +794,20 @@ class ReactAgent:
             return ("respond", clean)
 
         except Exception as e:
-            return ("error", str(e))
+            self._log(f"Error en JSON fallback: {e}", "error")
+            # Never show raw JSON key names as errors to the user
+            err_msg = str(e)
+            if any(k in err_msg for k in ['pensamiento', 'accion', 'respuesta_final', 'params']):
+                err_msg = "Error procesando respuesta del modelo"
+            return ("error", err_msg)
 
     def _clean_json_leak(self, text):
         """Limpia texto que tiene restos de formato JSON para mostrar al usuario.
-        v4: Aun mas agresivo - limpia cualquier JSON interno del agente.
+        v5: Mas robusto - maneja JSON parcial, pensamiento como respuesta, y evita dejar '"pensamiento"' literal.
         """
+        if not text or not text.strip():
+            return ""
+
         # Si el texto es JSON completo, extraer solo el contenido util
         parsed = self._parse_json(text)
         if parsed:
@@ -773,19 +815,46 @@ class ReactAgent:
             if parsed.get("respuesta_final", "").strip():
                 return parsed["respuesta_final"].strip()
             if parsed.get("pensamiento", "").strip():
+                # El modelo respondio en campo 'pensamiento' en vez de 'respuesta_final'
+                # Devolver el contenido del pensamiento como respuesta
                 return parsed["pensamiento"].strip()
             # Si es un dict con solo keys internas pero sin contenido util, devolver vacio
             internal_keys = {"pensamiento", "accion", "params", "respuesta_final", "_multi_tool_calls", "tool_calls"}
             if set(parsed.keys()).issubset(internal_keys):
                 return ""
+
         # Si no es JSON completo, intentar limpiar restos
         import re as _re
+
+        # PASO 1: Si el texto empieza con { y parece JSON parcial, intentar reconstruir
+        stripped = text.strip()
+        if stripped.startswith('{') and not stripped.endswith('}'):
+            # JSON incompleto - intentar cerrarlo y parsear
+            try:
+                attempt = stripped + '}'
+                parsed = json.loads(attempt)
+                if isinstance(parsed, dict):
+                    if parsed.get("respuesta_final", "").strip():
+                        return parsed["respuesta_final"].strip()
+                    if parsed.get("pensamiento", "").strip():
+                        return parsed["pensamiento"].strip()
+            except (json.JSONDecodeError, ValueError):
+                pass
+            # Si no se pudo parsear, es JSON roto - descartar
+            return ""
+
+        # PASO 2: Limpiar restos de JSON en texto mixto
         # Remover JSON parcial al inicio: {"pensamiento": "..." ... restos
         cleaned = _re.sub(r'^\s*\{[^}]*$', '', text).strip()
         # Remover JSON parcial al final
         cleaned = _re.sub(r'\{[^}]*$\s*$', '', cleaned).strip()
-        # v4: Remover keys de JSON interno sueltas como '"pensamiento"' o '"accion"'
-        cleaned = _re.sub(r'"?(?:pensamiento|accion|respuesta_final|params)"?\s*:\s*"?[^",}]*"?\s*,?\s*', '', cleaned)
+        # v5: Remover keys de JSON interno sueltas como '"pensamiento"' o '"accion"'
+        # Primero remover pares key:value completos
+        cleaned = _re.sub(r'"?(?:pensamiento|accion|respuesta_final|params)"?\s*:\s*"[^"\\]*(?:\\.[^"\\]*)*"\s*,?\s*', '', cleaned)
+        # Luego remover keys sin valor (con comillas)
+        cleaned = _re.sub(r'"?(?:pensamiento|accion|respuesta_final|params)"?\s*:\s*[^",}]+\s*,?\s*', '', cleaned)
+        # v5: Remover keys literales residuales como '"pensamiento"' sueltos
+        cleaned = _re.sub(r'"(?:pensamiento|accion|respuesta_final|params)"', '', cleaned)
         # Remover llaves sueltas y comas residuales
         cleaned = _re.sub(r'^\s*[\{,]\s*', '', cleaned)
         cleaned = _re.sub(r'\s*[\},]\s*$', '', cleaned)
@@ -1057,8 +1126,11 @@ class ReactAgent:
         return REPOS_DIR
 
     def _parse_json(self, text):
+        """Parsea JSON del texto del LLM. Solo retorna dicts (no lists, strings, etc)."""
         try:
-            return json.loads(text)
+            result = json.loads(text)
+            if isinstance(result, dict):
+                return result
         except Exception:
             pass
         patterns = [
@@ -1069,7 +1141,9 @@ class ReactAgent:
             match = re.search(pattern, text, re.DOTALL)
             if match:
                 try:
-                    return json.loads(match.group(1))
+                    result = json.loads(match.group(1))
+                    if isinstance(result, dict):
+                        return result
                 except Exception:
                     continue
         # Intentar parsear multiples JSONs en el texto
@@ -1133,23 +1207,24 @@ class ReactAgent:
 
     def _looks_like_tool_json(self, text):
         """Detecta si el texto parece ser JSON de tool call (no respuesta al usuario).
-        v3: Mas robusto - detecta JSON que empieza despues de whitespace o texto corto.
+        v5: Detecta cualquier JSON que empiece con { para suprimir tokens durante streaming.
+            El post-procesamiento se encarga de extraer contenido util despues.
         """
         text = text.strip()
         if not text:
             return False
-        # Si el texto empieza con { probablemente es JSON de tool call
+        # Si el texto empieza con { es JSON interno - suprimir durante streaming
         if text.startswith('{'):
             return True
         # Si despues de whitespace/newline hay {, tambien es JSON
-        # Esto captura casos donde el modelo genera: "\n{" o "  {"
         stripped = text.lstrip()
         if stripped.startswith('{'):
             return True
-        # Si contiene patrones de tool calls en cualquier parte
-        tool_indicators = ['"accion"', '"pensamiento"', '"params"', '"respuesta_final"',
-                          '"abrir_', '"ejecutar_', '"leer_', '"escribir_', '"buscar_"']
-        for indicator in tool_indicators:
+        # Si contiene patrones de JSON interno en cualquier parte
+        json_indicators = ['"accion"', '"pensamiento"', '"params"', '"respuesta_final"',
+                          '"abrir_', '"ejecutar_', '"leer_', '"escribir_', '"buscar_"',
+                          '"_multi_tool_calls"']
+        for indicator in json_indicators:
             if indicator in text:
                 return True
         # Si el texto es corto y parece inicio de JSON
