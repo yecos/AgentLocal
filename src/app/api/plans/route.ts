@@ -34,7 +34,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { goal, description, planType, userId } = body
+    const { goal, description, planType, taskType } = body
 
     if (!goal || typeof goal !== 'string') {
       return NextResponse.json(
@@ -47,8 +47,8 @@ export async function POST(request: NextRequest) {
       data: {
         goal,
         description: description || null,
-        planType: planType || 'script',
-        userId: userId || null,
+        planType: planType || taskType || 'script',
+        taskType: taskType || planType || 'general',
       },
     })
 

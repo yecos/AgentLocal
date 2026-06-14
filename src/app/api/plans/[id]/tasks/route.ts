@@ -21,7 +21,7 @@ export async function GET(
 
     const tasks = await prisma.task.findMany({
       where,
-      orderBy: { createdAt: 'asc' },
+      orderBy: { order: 'asc' },
     })
 
     return NextResponse.json({ tasks })
@@ -39,7 +39,7 @@ export async function POST(
   try {
     const { id } = await params
     const body = await request.json()
-    const { title, description, priority, dependencies, parentId } = body
+    const { title, description, priority, dependencies, parentId, order } = body
 
     if (!title || typeof title !== 'string') {
       return NextResponse.json(
@@ -53,14 +53,23 @@ export async function POST(
       return NextResponse.json({ error: 'Plan not found' }, { status: 404 })
     }
 
+    // Get the next order number if not provided
+    const maxOrderTask = await prisma.task.findFirst({
+      where: { planId: id },
+      orderBy: { order: 'desc' },
+      select: { order: true },
+    })
+    const nextOrder = order ?? (maxOrderTask ? maxOrderTask.order + 1 : 0)
+
     const task = await prisma.task.create({
       data: {
         planId: id,
         title,
         description: description || null,
         priority: priority || 'medium',
-        dependencies: dependencies || null,
+        dependencies: dependencies ? JSON.stringify(dependencies) : null,
         parentId: parentId || null,
+        order: nextOrder,
       },
     })
 

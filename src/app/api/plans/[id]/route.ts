@@ -12,8 +12,7 @@ export async function GET(
     const plan = await prisma.executionPlan.findUnique({
       where: { id },
       include: {
-        tasks: { orderBy: { createdAt: 'asc' } },
-        user: { select: { id: true, name: true, email: true } },
+        tasks: { orderBy: { order: 'asc' } },
       },
     })
 
@@ -28,7 +27,7 @@ export async function GET(
   }
 }
 
-// PATCH /api/plans/[id] - Update plan (status, progress)
+// PATCH /api/plans/[id] - Update plan (status, progress, currentTaskId)
 export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -36,7 +35,7 @@ export async function PATCH(
   try {
     const { id } = await params
     const body = await request.json()
-    const { status, progress, currentTaskId, description, goal } = body
+    const { status, progress, currentTaskId, description, goal, planType } = body
 
     const existing = await prisma.executionPlan.findUnique({ where: { id } })
     if (!existing) {
@@ -49,6 +48,7 @@ export async function PATCH(
     if (currentTaskId !== undefined) data.currentTaskId = currentTaskId
     if (description !== undefined) data.description = description
     if (goal !== undefined) data.goal = goal
+    if (planType !== undefined) data.planType = planType
 
     const plan = await prisma.executionPlan.update({
       where: { id },

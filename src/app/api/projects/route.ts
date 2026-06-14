@@ -5,10 +5,11 @@ import prisma from '@/lib/db'
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url)
-    const status = searchParams.get('status') || 'active'
+    const status = searchParams.get('status') || undefined
     const framework = searchParams.get('framework')
 
-    const where: Record<string, unknown> = { status }
+    const where: Record<string, unknown> = {}
+    if (status) where.status = status
     if (framework) where.framework = framework
 
     const projects = await prisma.project.findMany({
@@ -27,7 +28,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { name, path, description, framework, language, gitRepo, userId } = body
+    const { name, path, description, framework, language, gitRepo } = body
 
     if (!name || typeof name !== 'string') {
       return NextResponse.json(
@@ -51,7 +52,6 @@ export async function POST(request: NextRequest) {
         framework: framework || null,
         language: language || null,
         gitRepo: gitRepo || null,
-        userId: userId || null,
       },
     })
 

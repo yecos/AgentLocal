@@ -30,7 +30,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { name, description, category, isTool, cliCommand, scriptPath, enabled } = body
+    const { name, description, category, isTool, cliCommand, scriptPath, enabled, isLocal, config } = body
 
     if (!name || typeof name !== 'string') {
       return NextResponse.json(
@@ -43,11 +43,13 @@ export async function POST(request: NextRequest) {
       data: {
         name,
         description: description || null,
-        category: category || null,
+        category: category || 'general',
         isTool: isTool ?? false,
         cliCommand: cliCommand || null,
         scriptPath: scriptPath || null,
         enabled: enabled ?? true,
+        isLocal: isLocal ?? true,
+        config: config || null,
       },
     })
 
@@ -65,7 +67,7 @@ export async function POST(request: NextRequest) {
 export async function PATCH(request: NextRequest) {
   try {
     const body = await request.json()
-    const { id, name, enabled, useCount, description, category } = body
+    const { id, name, enabled, useCount, description, category, isTool, cliCommand, scriptPath, config } = body
 
     if (!id && !name) {
       return NextResponse.json(
@@ -85,6 +87,10 @@ export async function PATCH(request: NextRequest) {
     if (useCount !== undefined) data.useCount = useCount
     if (description !== undefined) data.description = description
     if (category !== undefined) data.category = category
+    if (isTool !== undefined) data.isTool = isTool
+    if (cliCommand !== undefined) data.cliCommand = cliCommand
+    if (scriptPath !== undefined) data.scriptPath = scriptPath
+    if (config !== undefined) data.config = config
     if (useCount !== undefined || enabled !== undefined) data.lastUsedAt = new Date()
 
     const skill = await prisma.skill.update({
