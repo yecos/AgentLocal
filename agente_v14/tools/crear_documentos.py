@@ -171,13 +171,17 @@ def _crear_pdf_reportlab(ruta, titulo, contenido):
 # CREACION DE DOCX (Word)
 # ============================================================
 
-def crear_docx(ruta: str, titulo: str = "", contenido: str = "") -> str:
-    """Crea un documento Word (.docx) con formato. Soporta titulos, headers, listas y parrafos.
+def crear_docx(ruta: str, titulo: str = "", contenido: str = "",
+               tabla: str = "", imagen: str = "") -> str:
+    """Crea un documento Word (.docx) con formato profesional.
+    Soporta titulos, headers, listas, tablas e imagenes.
 
     Args:
         ruta: Ruta donde guardar el .docx
         titulo: Titulo del documento
         contenido: Contenido del documento (formato Markdown basico)
+        tabla: Tabla en formato JSON: {"headers": ["col1", ...], "rows": [[val, ...], ...]}
+        imagen: Ruta de imagen para insertar en el documento
     """
     validation = validate_path(ruta)
     if validation != ruta:
@@ -211,14 +215,44 @@ def crear_docx(ruta: str, titulo: str = "", contenido: str = "") -> str:
                     doc.add_heading(line[3:], level=2)
                 elif line.startswith("### "):
                     doc.add_heading(line[4:], level=3)
+                elif line.startswith("#### "):
+                    doc.add_heading(line[5:], level=4)
                 elif line.startswith("- ") or line.startswith("* "):
                     doc.add_paragraph(line[2:], style='List Bullet')
                 elif line.startswith("1. ") or line.startswith("1) "):
                     doc.add_paragraph(line[3:], style='List Number')
+                elif line.startswith("> "):
+                    # Blockquote - estilo italic con borde
+                    p = doc.add_paragraph()
+                    p.paragraph_format.left_indent = Inches(0.5)
+                    run = p.add_run(line[2:])
+                    run.font.italic = True
+                    run.font.color.rgb = RGBColor(100, 100, 100)
+                elif line.startswith("---"):
+                    # Separador horizontal
+                    p = doc.add_paragraph()
+                    p.paragraph_format.space_before = Pt(6)
+                    p.paragraph_format.space_after = Pt(6)
+                    run = p.add_run("─" * 60)
+                    run.font.color.rgb = RGBColor(200, 200, 200)
+                elif line.startswith("**") and line.endswith("**"):
+                    # Bold text
+                    p = doc.add_paragraph()
+                    run = p.add_run(line.strip('*'))
+                    run.font.bold = True
                 elif line.strip() == "":
-                    pass  # Skip lineas vacias
+                    pass
                 else:
-                    doc.add_paragraph(line)
+                    # Parrafo normal - soporte bold inline con **texto**
+                    _add_rich_paragraph(doc, line)
+
+        # Tabla
+        if tabla:
+            _add_table_to_docx(doc, tabla)
+
+        # Imagen
+        if imagen:
+            _add_image_to_docx(doc, imagen)
 
         # Guardar
         dir_name = os.path.dirname(ruta)
@@ -239,13 +273,17 @@ def crear_docx(ruta: str, titulo: str = "", contenido: str = "") -> str:
 # CREACION DE XLSX (Excel)
 # ============================================================
 
-def crear_xlsx(ruta: str, datos: str = "", hoja: str = "Hoja1") -> str:
-    """Crea un archivo Excel (.xlsx) con datos. Los datos se pueden pasar como CSV o JSON.
+def crear_xlsx(ruta: str, datos: str = "", hoja: str = "Hoja1",
+               formulas: str = "", grafico_embebido: str = "") -> str:
+    """Crea un archivo Excel (.xlsx) profesional con datos, formulas y estilos.
+    Los datos se pueden pasar como CSV o JSON.
 
     Args:
         ruta: Ruta donde guardar el .xlsx
-        datos: Datos en formato CSV (filas separadas por newline, columnas por coma) o JSON
+        datos: Datos en formato CSV o JSON
         hoja: Nombre de la hoja (default: Hoja1)
+        formulas: Formulas en JSON: [{"celda": "C1", "formula": "=SUM(A1:B1)"}, ...]
+        grafico_embebido: Configuracion de grafico JSON: {"tipo": "bar", "rango": "A1:C5", "titulo": "Ventas"}
     """
     validation = validate_path(ruta)
     if validation != ruta:
@@ -310,8 +348,32 @@ def crear_xlsx(ruta: str, datos: str = "", hoja: str = "Hoja1") -> str:
         if dir_name:
             os.makedirs(dir_name, exist_ok=True)
 
+        # Formulas
+        if formulas:
+            _add_formulas_to_xlsx(ws, formulas)
+
+        # Grafico embebido
+        if grafico_embebido:
+            _add_chart_to_xlsx(ws, grafico_embebido, len(rows))
+
+        # Formato condicional basico - alternar colores de fila
+        alt_fill = PatternFill(start_color="D9E2F3", end_color="D9E2F3", fill_type="solid")
+        for row_idx in range(2, ws.max_row + 1):
+            if row_idx % 2 == 0:
+                for col_idx in range(1, ws.max_column + 1):
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    if not cell.fill or cell.fill.start_color.rgb == '00000000':
+                        cell.fill = alt_fill
+
+        # Freeze panes (header row)
+        ws.freeze_panes = 'A2'
+
+        # Auto-filtro
+        if ws.max_row > 1 and ws.max_column > 0:
+            ws.auto_filter.ref = f"A1:{openpyxl.utils.get_column_letter(ws.max_column)}{ws.max_row}"
+
         wb.save(ruta)
-        return f"XLSX creado: {ruta} ({os.path.getsize(ruta):,} bytes, {len(rows)} filas)"
+        return f"XLSX creado: {ruta} ({os.path.getsize(ruta):,} bytes, {len(rows)} filas, {ws.max_column} columnas)"
 
     except ImportError:
         return ("ERROR: No se pudo crear el XLSX. Instala:\n"
@@ -337,7 +399,6 @@ def _parse_datos(datos):
             parsed = json.loads(datos)
             if isinstance(parsed, list):
                 if isinstance(parsed[0], dict):
-                    # Lista de dicts -> columnas de keys, filas de values
                     headers = list(parsed[0].keys())
                     rows = [headers]
                     for item in parsed:
@@ -352,6 +413,175 @@ def _parse_datos(datos):
     # Fallback: CSV
     reader = csv.reader(io.StringIO(datos))
     return [row for row in reader]
+
+
+# ============================================================
+# FUNCIONES AUXILIARES PARA DOCX
+# ============================================================
+
+def _add_rich_paragraph(doc, text: str):
+    """Agrega un parrafo con formato rich (bold inline **texto**)."""
+    from docx.shared import Pt, RGBColor
+
+    p = doc.add_paragraph()
+    parts = text.split("**")
+    for i, part in enumerate(parts):
+        if not part:
+            continue
+        run = p.add_run(part)
+        if i % 2 == 1:  # Odd indices are between ** pairs = bold
+            run.font.bold = True
+
+
+def _add_table_to_docx(doc, tabla_json: str):
+    """Agrega una tabla formateada al documento DOCX."""
+    try:
+        from docx.shared import Pt, Inches, RGBColor
+        from docx.enum.table import WD_TABLE_ALIGNMENT
+        from docx.oxml.ns import qn
+
+        data = json.loads(tabla_json)
+        headers = data.get("headers", data.get("columnas", []))
+        rows = data.get("rows", data.get("filas", []))
+
+        if not headers and not rows:
+            return
+
+        # Crear tabla
+        num_cols = len(headers) if headers else max(len(r) for r in rows)
+        num_rows = len(rows) + (1 if headers else 0)
+
+        table = doc.add_table(rows=num_rows, cols=num_cols)
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        table.style = 'Light Grid Accent 1'
+
+        # Headers
+        if headers:
+            for i, header in enumerate(headers):
+                cell = table.rows[0].cells[i]
+                cell.text = str(header)
+                for paragraph in cell.paragraphs:
+                    paragraph.alignment = 1  # Center
+                    for run in paragraph.runs:
+                        run.font.bold = True
+                        run.font.size = Pt(10)
+
+        # Data rows
+        for row_idx, row_data in enumerate(rows):
+            table_row = table.rows[row_idx + (1 if headers else 0)]
+            for col_idx, value in enumerate(row_data):
+                if col_idx < num_cols:
+                    cell = table_row.cells[col_idx]
+                    cell.text = str(value)
+                    for paragraph in cell.paragraphs:
+                        for run in paragraph.runs:
+                            run.font.size = Pt(10)
+
+    except json.JSONDecodeError:
+        doc.add_paragraph(f"[Tabla: formato JSON invalido]")
+    except Exception as e:
+        doc.add_paragraph(f"[Error creando tabla: {e}]")
+
+
+def _add_image_to_docx(doc, imagen_path: str):
+    """Agrega una imagen al documento DOCX."""
+    try:
+        from docx.shared import Inches
+
+        if os.path.exists(imagen_path):
+            doc.add_picture(imagen_path, width=Inches(5.0))
+            # Centrar imagen
+            last_paragraph = doc.paragraphs[-1]
+            last_paragraph.alignment = 1  # Center
+        else:
+            doc.add_paragraph(f"[Imagen no encontrada: {imagen_path}]")
+    except Exception as e:
+        doc.add_paragraph(f"[Error insertando imagen: {e}]")
+
+
+# ============================================================
+# FUNCIONES AUXILIARES PARA XLSX
+# ============================================================
+
+def _add_formulas_to_xlsx(ws, formulas_json: str):
+    """Agrega formulas a celdas del Excel."""
+    try:
+        formulas = json.loads(formulas_json)
+        if isinstance(formulas, list):
+            for f in formulas:
+                celda = f.get("celda", f.get("cell", ""))
+                formula = f.get("formula", f.get("expresion", ""))
+                if celda and formula:
+                    try:
+                        ws[celda] = formula
+                    except Exception:
+                        pass
+        elif isinstance(formulas, dict):
+            # Formato: {"C1": "=SUM(A1:B1)", "C2": "=AVERAGE(A1:B1)"}
+            for celda, formula in formulas.items():
+                try:
+                    ws[celda] = str(formula)
+                except Exception:
+                    pass
+    except json.JSONDecodeError:
+        pass
+    except Exception:
+        pass
+
+
+def _add_chart_to_xlsx(ws, chart_json: str, num_rows: int):
+    """Agrega un grafico embebido al Excel."""
+    try:
+        from openpyxl.chart import BarChart, LineChart, PieChart, Reference
+
+        config = json.loads(chart_json)
+        chart_type = config.get("tipo", config.get("type", "bar"))
+        data_range = config.get("rango", config.get("range", ""))
+        title = config.get("titulo", config.get("title", ""))
+
+        if not data_range:
+            # Auto-rango si no se especifica
+            from openpyxl.utils import get_column_letter
+            max_col = ws.max_column
+            max_row = ws.max_row
+            data_range = f"A1:{get_column_letter(max_col)}{max_row}"
+
+        # Crear tipo de grafico
+        if chart_type in ("pie", "torta"):
+            chart = PieChart()
+        elif chart_type in ("line", "linea"):
+            chart = LineChart()
+        else:
+            chart = BarChart()
+
+        if title:
+            chart.title = title
+
+        # Extraer datos del rango
+        # Formato: "A1:C5" -> min_col, min_row, max_col, max_row
+        import re
+        match = re.match(r'([A-Z]+)(\d+):([A-Z]+)(\d+)', data_range)
+        if match:
+            from openpyxl.utils import column_index_from_string
+            min_col = column_index_from_string(match.group(1))
+            min_row = int(match.group(2))
+            max_col = column_index_from_string(match.group(3))
+            max_row = int(match.group(4))
+
+            data = Reference(ws, min_col=min_col, min_row=min_row,
+                           max_col=max_col, max_row=max_row)
+            cats = Reference(ws, min_col=min_col, min_row=min_row + 1,
+                           max_row=max_row)
+
+            chart.add_data(data, titles_from_data=True)
+            chart.set_categories(cats)
+
+            ws.add_chart(chart, f"{get_column_letter(max_col + 2)}1")
+
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.debug(f"Error agregando grafico a XLSX: {e}")
 
 
 # ============================================================

@@ -365,15 +365,17 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "crear_docx",
-            "description": "Crea un documento Word (.docx) con formato. Soporta Markdown basico.",
+            "description": "Crea un documento Word (.docx) profesional con formato. Soporta Markdown, tablas e imagenes.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "ruta": {"type": "string", "description": "Ruta donde guardar el .docx"},
                     "titulo": {"type": "string", "description": "Titulo del documento"},
-                    "contenido": {"type": "string", "description": "Contenido (formato Markdown: # headers, - listas)"}
+                    "contenido": {"type": "string", "description": "Contenido (Markdown: # headers, - listas, **bold**, > quotes)"},
+                    "tabla": {"type": "string", "description": "Tabla JSON: {\"headers\":[\"col1\"],\"rows\":[[\"val1\"]]}"},
+                    "imagen": {"type": "string", "description": "Ruta de imagen para insertar"}
                 },
-                "required": ["ruta", "contenido"]
+                "required": ["ruta"]
             }
         }
     },
@@ -381,13 +383,15 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "crear_xlsx",
-            "description": "Crea un archivo Excel (.xlsx) con datos. Los datos se pasan como CSV o JSON.",
+            "description": "Crea un archivo Excel (.xlsx) profesional con datos, formulas, graficos embebidos y estilos.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "ruta": {"type": "string", "description": "Ruta donde guardar el .xlsx"},
-                    "datos": {"type": "string", "description": "Datos en formato CSV (filas por newline, columnas por coma) o JSON"},
-                    "hoja": {"type": "string", "description": "Nombre de la hoja (default: Hoja1)"}
+                    "datos": {"type": "string", "description": "Datos en formato CSV o JSON"},
+                    "hoja": {"type": "string", "description": "Nombre de la hoja (default: Hoja1)"},
+                    "formulas": {"type": "string", "description": "Formulas JSON: [{\"celda\":\"C1\",\"formula\":\"=SUM(A1:B1)\"}]"},
+                    "grafico_embebido": {"type": "string", "description": "Grafico JSON: {\"tipo\":\"bar\",\"titulo\":\"Ventas\"}"}
                 },
                 "required": ["ruta", "datos"]
             }
