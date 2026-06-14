@@ -1320,4 +1320,97 @@ TOOL_SCHEMAS = [
             }
         }
     },
+    # ============================================================
+    # S5.4: FORM FILLER / DATA EXTRACTOR
+    # ============================================================
+    {
+        "type": "function",
+        "function": {
+            "name": "extraer_datos",
+            "description": "Extrae datos estructurados de documentos no estructurados (facturas, CVs, contratos, emails). Detecta automaticamente el tipo de documento y extrae campos relevantes en formato JSON.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ruta": {"type": "string", "description": "Ruta al archivo de documento (PDF, DOCX, TXT, CSV)"},
+                    "tipo_documento": {"type": "string", "description": "Tipo de documento: auto, factura, cv, contrato, email, general (default: auto)"},
+                    "campos": {"type": "string", "description": "Lista de campos a extraer separados por coma (ej: 'nombre,fecha,total'). Si vacio, extrae todos los campos detectables."},
+                    "formato_salida": {"type": "string", "description": "Formato de salida: json o tabla (default: json)"}
+                },
+                "required": ["ruta"]
+            }
+        }
+    },
+    # ============================================================
+    # S5.6: LOCAL KNOWLEDGE BASE
+    # ============================================================
+    {
+        "type": "function",
+        "function": {
+            "name": "guardar_conocimiento",
+            "description": "Guarda un fragmento de conocimiento en la base de conocimiento local. Permite almacenar notas, fragmentos de documentos, o informacion importante para buscar despues.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "titulo": {"type": "string", "description": "Titulo descriptivo del conocimiento"},
+                    "contenido": {"type": "string", "description": "Texto del conocimiento a guardar"},
+                    "etiquetas": {"type": "string", "description": "Etiquetas separadas por coma (ej: 'python,algoritmos,busqueda')"},
+                    "categoria": {"type": "string", "description": "Categoria: general, codigo, proyecto, referencia, aprendizaje (default: general)"}
+                },
+                "required": ["titulo", "contenido"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "buscar_conocimiento",
+            "description": "Busca en la base de conocimiento local por texto, etiqueta o categoria. Retorna conocimientos guardados que coincidan con la consulta.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "consulta": {"type": "string", "description": "Texto a buscar en la base de conocimiento"},
+                    "categoria": {"type": "string", "description": "Filtrar por categoria (general, codigo, proyecto, referencia, aprendizaje)"},
+                    "etiqueta": {"type": "string", "description": "Filtrar por etiqueta especifica"},
+                    "limite": {"type": "integer", "description": "Maximo de resultados (default: 5)"}
+                },
+                "required": ["consulta"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "listar_conocimiento",
+            "description": "Lista todos los conocimientos guardados en la base de conocimiento local. Permite filtrar por categoria o etiqueta.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "categoria": {"type": "string", "description": "Filtrar por categoria (opcional)"},
+                    "etiqueta": {"type": "string", "description": "Filtrar por etiqueta (opcional)"},
+                    "limite": {"type": "integer", "description": "Maximo de entradas a listar (default: 20)"}
+                },
+                "required": []
+            }
+        }
+    },
+    # ============================================================
+    # S5.7: AUDIO MEETING NOTES
+    # ============================================================
+    {
+        "type": "function",
+        "function": {
+            "name": "notas_reunion",
+            "description": "Transcribe audio de reunion y genera notas estructuradas con resumen, action items, participantes y compromisos.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ruta_audio": {"type": "string", "description": "Ruta al archivo de audio (MP3, WAV, M4A, etc.)"},
+                    "idioma": {"type": "string", "description": "Idioma de la transcripcion: es, en, fr, pt (default: es)"},
+                    "tipo_resumen": {"type": "string", "description": "Tipo de resumen: ejecutivo, detallado, puntos_clave (default: ejecutivo)"},
+                    "extraer_acciones": {"type": "boolean", "description": "Si True, extrae action items y compromisos (default: true)"}
+                },
+                "required": ["ruta_audio"]
+            }
+        }
+    },
 ]

@@ -1078,3 +1078,375 @@ def _generate_summary(content: str, tipo_resumen: str, idioma: str, filename: st
     except Exception as e:
         logger.debug(f"Error generando resumen con LLM: {e}")
         return ""
+
+
+# ============================================================
+# S5.4: FORM FILLER / DATA EXTRACTOR
+# ============================================================
+
+def extraer_datos(
+    ruta: str,
+    tipo_documento: str = "auto",
+    campos: str = "",
+    formato_salida: str = "json"
+) -> str:
+    """S5.4: Extrae datos estructurados de documentos no estructurados.
+
+    Permite extraer informacion especifica de facturas, CVs,
+    contratos, emails u otros documentos, generando una salida
+    estructurada en JSON o tabla.
+
+    Args:
+        ruta: Ruta al archivo de documento (PDF, DOCX, TXT, CSV)
+        tipo_documento: Tipo de documento: auto, factura, cv, contrato, email, general
+        campos: Lista de campos a extraer separados por coma (ej: "nombre,fecha,total").
+                Si vacio, extrae todos los campos detectables.
+        formato_salida: Formato de salida: json o tabla
+
+    Returns:
+        Datos extraidos en formato estructurado
+    """
+    validation = validate_path(ruta)
+    if validation != ruta:
+        return validation
+
+    # Leer el documento
+    ext = os.path.splitext(ruta)[1].lower()
+    try:
+        if ext == ".pdf":
+            content = leer_pdf(ruta)
+        elif ext == ".docx":
+            content = leer_docx(ruta)
+        elif ext in (".txt", ".md"):
+            with open(ruta, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        elif ext == ".csv":
+            content = leer_csv(ruta)
+        else:
+            content = leer_documento(ruta)
+    except Exception as e:
+        return f"ERROR: No se pudo leer el archivo: {e}"
+
+    if not content or len(content.strip()) < 10:
+        return "ERROR: El documento esta vacio o no contiene texto legible."
+
+    # Truncar si es muy largo
+    if len(content) > 12000:
+        content = content[:10000] + "\n... [contenido truncado]"
+
+    # Determinar tipo de documento si es auto
+    if tipo_documento == "auto":
+        content_lower = content.lower()[:2000]
+        if any(w in content_lower for w in ["factura", "invoice", "nif", "cif", "importe total", "subtotal"]):
+            tipo_documento = "factura"
+        elif any(w in content_lower for w in ["curriculum", "experiencia", "educacion", "habilidades", "cv"]):
+            tipo_documento = "cv"
+        elif any(w in content_lower for w in ["contrato", "clausula", "parte", "jurisdiccion"]):
+            tipo_documento = "contrato"
+        elif any(w in content_lower for w in ["from:", "to:", "subject:", "dear", "atentamente"]):
+            tipo_documento = "email"
+        else:
+            tipo_documento = "general"
+
+    # Construir prompt de extraccion
+    tipo_instrucciones = {
+        "factura": (
+            "Extrae los siguientes datos de esta factura: "
+            "numero_factura, fecha, emisor (nombre y NIF/CIF), "
+            "receptor (nombre y NIF/CIF), concepto, subtotal, "
+            "impuestos (IVA), total, moneda, fecha_vencimiento. "
+            "Si un campo no se encuentra, pon null."
+        ),
+        "cv": (
+            "Extrae los siguientes datos de este curriculum: "
+            "nombre_completo, email, telefono, ubicacion, "
+            "resumen_profesional, educacion (lista), "
+            "experiencia_laboral (lista con empresa, puesto, periodo), "
+            "habilidades (lista), idiomas (lista). "
+            "Si un campo no se encuentra, pon null."
+        ),
+        "contrato": (
+            "Extrae los siguientes datos de este contrato: "
+            "tipo_contrato, partes_involucradas, fecha_inicio, "
+            "fecha_fin, objeto_del_contrato, clausulas_principales (lista), "
+            "penalidades, jurisdiccion, valor. "
+            "Si un campo no se encuentra, pon null."
+        ),
+        "email": (
+            "Extrae los siguientes datos de este email: "
+            "remitente, destinatario, fecha, asunto, "
+            "accion_solicitada, urgencia (alta/media/baja), "
+            "puntos_principales (lista), fecha_limite. "
+            "Si un campo no se encuentra, pon null."
+        ),
+        "general": "Extrae todos los datos clave del documento en formato estructurado.",
+    }
+
+    instruccion = tipo_instrucciones.get(tipo_documento, tipo_instrucciones["general"])
+
+    if campos:
+        instruccion += f"\nCampos especificos solicitados: {campos}"
+
+    formato_instruccion = (
+        "Retorna SOLO un objeto JSON valido, sin markdown ni explicaciones. "
+        "Cada campo debe ser una clave del JSON."
+        if formato_salida == "json"
+        else "Retorna los datos en formato tabla con cabeceras y filas."
+    )
+
+    prompt = (
+        f"{instruccion}\n\n"
+        f"{formato_instruccion}\n\n"
+        f"TIPO DE DOCUMENTO: {tipo_documento}\n"
+        f"CONTENIDO:\n{content}"
+    )
+
+    try:
+        from llm import ollama
+        messages = [{"role": "user", "content": prompt}]
+        response = ollama.generate_chat(messages)
+        result = str(response).strip()
+
+        if not result:
+            return "ERROR: No se pudieron extraer datos del documento."
+
+        # Limpiar markdown si el LLM lo agrego
+        if result.startswith("```"):
+            result = result.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+        return result
+
+    except Exception as e:
+        logger.debug(f"Error extrayendo datos con LLM: {e}")
+        return f"ERROR: No se pudo procesar el documento con IA: {e}"
+
+
+# ============================================================
+# S5.6: LOCAL KNOWLEDGE BASE
+# ============================================================
+
+# Directorio para la base de conocimiento
+_KB_DIR = os.path.join(REPOS_DIR, "knowledge_base")
+
+def guardar_conocimiento(
+    titulo: str,
+    contenido: str,
+    etiquetas: str = "",
+    categoria: str = "general"
+) -> str:
+    """S5.6: Guarda un fragmento de conocimiento en la base de conocimiento local.
+
+    Almacena notas, fragmentos de documentos importantes, o cualquier
+    informacion que el usuario quiera recuperar despues por busqueda
+    semantica o por etiquetas.
+
+    Args:
+        titulo: Titulo descriptivo del conocimiento
+        contenido: Texto del conocimiento a guardar
+        etiquetas: Etiquetas separadas por coma (ej: "python,algoritmos,busqueda")
+        categoria: Categoria del conocimiento: general, codigo, proyecto, referencia, aprendizaje
+
+    Returns:
+        Confirmacion con ID del conocimiento guardado
+    """
+    import json as _json
+    from datetime import datetime as _dt
+
+    # Asegurar directorio
+    os.makedirs(_KB_DIR, exist_ok=True)
+
+    # Generar ID unico
+    entry_id = _dt.now().strftime("%Y%m%d_%H%M%S")
+    entry_file = os.path.join(_KB_DIR, f"{entry_id}.json")
+
+    # Parsear etiquetas
+    tag_list = [t.strip().lower() for t in etiquetas.split(",") if t.strip()] if etiquetas else []
+
+    entry = {
+        "id": entry_id,
+        "titulo": titulo[:200],
+        "contenido": contenido[:5000],
+        "etiquetas": tag_list,
+        "categoria": categoria,
+        "timestamp": _dt.now().isoformat(),
+        "accesos": 0,
+    }
+
+    try:
+        with open(entry_file, "w", encoding="utf-8") as f:
+            _json.dump(entry, f, ensure_ascii=False, indent=2)
+
+        # Tambien guardar en la memoria de largo plazo del agente
+        try:
+            from memory.triple_memory import learning
+            learning.add_correction(
+                f"Conocimiento: {titulo}",
+                contenido[:300],
+                source="knowledge_base"
+            )
+        except Exception:
+            pass  # No bloquear si la memoria no esta disponible
+
+        return (
+            f"Conocimiento guardado exitosamente.\n"
+            f"ID: {entry_id}\n"
+            f"Titulo: {titulo}\n"
+            f"Etiquetas: {', '.join(tag_list) if tag_list else '(sin etiquetas)'}\n"
+            f"Categoria: {categoria}"
+        )
+
+    except Exception as e:
+        return f"ERROR: No se pudo guardar el conocimiento: {e}"
+
+
+def buscar_conocimiento(
+    consulta: str,
+    categoria: str = "",
+    etiqueta: str = "",
+    limite: int = 5
+) -> str:
+    """S5.6: Busca en la base de conocimiento local por texto, etiqueta o categoria.
+
+    Realiza busqueda semantica en los conocimientos guardados,
+    priorizando coincidencias por titulo, etiquetas y contenido.
+
+    Args:
+        consulta: Texto a buscar en la base de conocimiento
+        categoria: Filtrar por categoria (general, codigo, proyecto, referencia, aprendizaje)
+        etiqueta: Filtrar por etiqueta especifica
+        limite: Maximo de resultados a retornar
+
+    Returns:
+        Lista de conocimientos encontrados con su contenido
+    """
+    import json as _json
+
+    if not os.path.exists(_KB_DIR):
+        return "No hay conocimientos guardados aun. Usa guardar_conocimiento para agregar entradas."
+
+    consulta_lower = consulta.lower()
+    entries = []
+
+    try:
+        for fname in os.listdir(_KB_DIR):
+            if not fname.endswith(".json"):
+                continue
+            fpath = os.path.join(_KB_DIR, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    entry = _json.load(f)
+            except Exception:
+                continue
+
+            # Filtrar por categoria
+            if categoria and entry.get("categoria", "") != categoria:
+                continue
+
+            # Filtrar por etiqueta
+            if etiqueta:
+                entry_tags = [t.lower() for t in entry.get("etiquetas", [])]
+                if etiqueta.lower() not in entry_tags:
+                    continue
+
+            # Calcular score de relevancia
+            score = 0
+            titulo = entry.get("titulo", "").lower()
+            contenido = entry.get("contenido", "").lower()
+            entry_tags = [t.lower() for t in entry.get("etiquetas", [])]
+
+            # Coincidencia en titulo (peso mayor)
+            for word in consulta_lower.split():
+                if word in titulo:
+                    score += 3
+                if word in contenido:
+                    score += 1
+                if word in entry_tags:
+                    score += 2
+
+            if score > 0:
+                entry["_score"] = score
+                entries.append(entry)
+
+    except Exception as e:
+        return f"ERROR: Error buscando en base de conocimiento: {e}"
+
+    if not entries:
+        return f"No se encontraron conocimientos para: '{consulta}'"
+
+    # Ordenar por score
+    entries.sort(key=lambda x: x.get("_score", 0), reverse=True)
+    results = entries[:limite]
+
+    # Formatear resultados
+    output_lines = [f"Encontrados {len(entries)} resultado(s), mostrando {len(results)}:\n"]
+    for i, entry in enumerate(results, 1):
+        output_lines.append(f"--- Resultado {i} (relevancia: {entry.get('_score', 0)}) ---")
+        output_lines.append(f"ID: {entry.get('id', '?')}")
+        output_lines.append(f"Titulo: {entry.get('titulo', '?')}")
+        output_lines.append(f"Categoria: {entry.get('categoria', '?')}")
+        output_lines.append(f"Etiquetas: {', '.join(entry.get('etiquetas', []))}")
+        output_lines.append(f"Contenido: {entry.get('contenido', '')[:500]}")
+        output_lines.append(f"Fecha: {entry.get('timestamp', '?')}")
+        output_lines.append("")
+
+    return "\n".join(output_lines)
+
+
+def listar_conocimiento(
+    categoria: str = "",
+    etiqueta: str = "",
+    limite: int = 20
+) -> str:
+    """S5.6: Lista todos los conocimientos guardados en la base de conocimiento.
+
+    Args:
+        categoria: Filtrar por categoria (opcional)
+        etiqueta: Filtrar por etiqueta (opcional)
+        limite: Maximo de entradas a listar
+
+    Returns:
+        Lista de titulos y metadatos de los conocimientos guardados
+    """
+    import json as _json
+
+    if not os.path.exists(_KB_DIR):
+        return "No hay conocimientos guardados aun."
+
+    entries = []
+    try:
+        for fname in sorted(os.listdir(_KB_DIR), reverse=True):
+            if not fname.endswith(".json"):
+                continue
+            fpath = os.path.join(_KB_DIR, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    entry = _json.load(f)
+            except Exception:
+                continue
+
+            if categoria and entry.get("categoria", "") != categoria:
+                continue
+            if etiqueta:
+                entry_tags = [t.lower() for t in entry.get("etiquetas", [])]
+                if etiqueta.lower() not in entry_tags:
+                    continue
+
+            entries.append(entry)
+
+    except Exception as e:
+        return f"ERROR: Error listando base de conocimiento: {e}"
+
+    if not entries:
+        return "No hay conocimientos guardados con esos filtros."
+
+    entries = entries[:limite]
+    output_lines = [f"Base de conocimiento: {len(entries)} entrada(s)\n"]
+    for entry in entries:
+        tags = ", ".join(entry.get("etiquetas", []))
+        output_lines.append(
+            f"- [{entry.get('id', '?')}] {entry.get('titulo', '?')} "
+            f"({entry.get('categoria', '?')}) "
+            f"{f'[tags: {tags}]' if tags else ''}"
+        )
+
+    return "\n".join(output_lines)

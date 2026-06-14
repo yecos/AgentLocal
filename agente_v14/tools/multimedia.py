@@ -828,3 +828,120 @@ def _parse_json(s, default=None):
         return json.loads(s)
     except (json.JSONDecodeError, TypeError):
         return default if default is not None else {}
+
+
+# ============================================================
+# S5.7: AUDIO MEETING NOTES
+# ============================================================
+
+def notas_reunion(
+    ruta_audio: str,
+    idioma: str = "es",
+    tipo_resumen: str = "ejecutivo",
+    extraer_acciones: bool = True
+) -> str:
+    """S5.7: Transcribe audio de reunion y genera notas estructuradas.
+
+    Transcribe la grabacion de audio, extrae action items,
+    identifica temas clave, participantes, y genera un
+    resumen ejecutivo de la reunion.
+
+    Args:
+        ruta_audio: Ruta al archivo de audio (MP3, WAV, M4A, etc.)
+        idioma: Idioma de la transcripcion: es, en, fr, pt
+        tipo_resumen: Tipo de resumen: ejecutivo, detallado, puntos_clave
+        extraer_acciones: Si True, extrae action items y compromisos
+
+    Returns:
+        Notas estructuradas de la reunion con transcripcion, resumen y acciones
+    """
+    from utils.security import validate_path
+
+    validation = validate_path(ruta_audio)
+    if validation != ruta_audio:
+        return validation
+
+    # Paso 1: Transcribir audio
+    try:
+        from .percepcion import transcribir_audio
+        transcripcion = transcribir_audio(ruta_audio, idioma=idioma)
+    except Exception as e:
+        return f"ERROR: No se pudo transcribir el audio: {e}"
+
+    if not transcripcion or "ERROR" in transcripcion:
+        return f"ERROR: La transcripcion fallo: {transcripcion[:200]}"
+
+    # Truncar transcripcion si es muy larga para el LLM
+    full_transcription = transcripcion
+    if len(transcripcion) > 15000:
+        transcripcion = transcripcion[:12000] + "\n... [transcripcion truncada]"
+
+    # Paso 2: Analizar con LLM para generar notas estructuradas
+    lang_name = {"es": "espanol", "en": "english", "fr": "frances", "pt": "portugues"}.get(idioma, "espanol")
+
+    type_prompts = {
+        "ejecutivo": (
+            "Genera un resumen ejecutivo conciso de esta reunion. "
+            "Incluye: tema principal, decisiones tomadas, y proximos pasos."
+        ),
+        "detallado": (
+            "Genera un resumen detallado de esta reunion. "
+            "Incluye: temas tratados, discusiones clave, puntos de acuerdo y desacuerdo, "
+            "decisiones tomadas con responsables, y compromisos adquiridos."
+        ),
+        "puntos_clave": (
+            "Extrae los puntos clave de esta reunion en formato de lista. "
+            "Para cada punto: tema, decision o conclusion, responsable (si aplica)."
+        ),
+    }
+
+    summary_instruction = type_prompts.get(tipo_resumen, type_prompts["ejecutivo"])
+
+    acciones_instruction = ""
+    if extraer_acciones:
+        acciones_instruction = (
+            "\n\nACCIONES: Identifica y lista todos los action items mencionados. "
+            "Para cada accion indica: que hacer, quien es responsable (si se menciono), "
+            "y fecha limite (si se menciono). Formato: "
+            "- [ ] Accion | Responsable | Fecha limite"
+        )
+
+    participantes_instruction = (
+        "\n\nPARTICIPANTES: Si se mencionan nombres de personas, listalos como participantes."
+    )
+
+    prompt = (
+        f"{summary_instruction}"
+        f"{acciones_instruction}"
+        f"{participantes_instruction}"
+        f"\n\nIdioma del resumen: {lang_name}"
+        f"\n\nTRANSCRIPCION DE LA REUNION:\n{transcripcion}"
+    )
+
+    try:
+        from llm import ollama
+        messages = [{"role": "user", "content": prompt}]
+        response = ollama.generate_chat(messages)
+        analysis = str(response).strip() if response else "No se pudo generar el analisis."
+    except Exception as e:
+        analysis = f"Error generando analisis: {e}"
+
+    # Formatear salida completa
+    filename = os.path.basename(ruta_audio)
+    output = (
+        f"== NOTAS DE REUNION ==\n"
+        f"Archivo: {filename}\n"
+        f"Tipo de resumen: {tipo_resumen}\n"
+        f"Idioma: {lang_name}\n"
+        f"{'=' * 40}\n\n"
+        f"{analysis}\n\n"
+        f"{'=' * 40}\n"
+        f"TRANSCRIPCION COMPLETA ({len(full_transcription)} caracteres):\n"
+        f"{'=' * 40}\n"
+        f"{full_transcription[:3000]}"
+    )
+
+    if len(full_transcription) > 3000:
+        output += f"\n... [transcripcion truncada, {len(full_transcription)} caracteres totales]"
+
+    return output

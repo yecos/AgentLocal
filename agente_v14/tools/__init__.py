@@ -34,7 +34,8 @@ from .web import buscar_web, recall_search_facts
 from .documentos import (
     leer_pdf, leer_docx, leer_xlsx, leer_pptx,
     leer_csv, leer_archivo_comprimido, consultar_sqlite,
-    leer_epub, leer_documento, resumir_documento
+    leer_epub, leer_documento, resumir_documento,
+    extraer_datos, guardar_conocimiento, buscar_conocimiento, listar_conocimiento
 )
 from .crear_documentos import crear_pdf, crear_docx, crear_xlsx, crear_grafico, crear_pptx
 
@@ -61,7 +62,7 @@ from .datos import (
 )
 from .multimedia import (
     texto_a_voz, generar_imagen, editar_imagen,
-    buscar_imagenes, analizar_video
+    buscar_imagenes, analizar_video, notas_reunion
 )
 from .subagentes import (
     ejecutar_subagente, ejecutar_paralelo, orquestar,
@@ -194,6 +195,12 @@ def _register_submodule_tools():
         "query_natural_language": query_natural_language,
         "review_code": review_code,
         "resumir_documento": resumir_documento,
+        # v17.2 Skills nuevos (S5.4, S5.6, S5.7)
+        "extraer_datos": extraer_datos,
+        "guardar_conocimiento": guardar_conocimiento,
+        "buscar_conocimiento": buscar_conocimiento,
+        "listar_conocimiento": listar_conocimiento,
+        "notas_reunion": notas_reunion,
     }
 
     for name, func in submod_tools.items():
