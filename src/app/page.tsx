@@ -1577,9 +1577,17 @@ function GitPanel({ onExecuteTool }: { onExecuteTool: (toolName: string, args: R
     { op: "log", label: "LOG", icon: <GitCommit size={11} /> },
     { op: "diff", label: "DIFF", icon: <FileCode size={11} /> },
     { op: "branch", label: "BRANCH", icon: <GitBranch size={11} /> },
+    { op: "add .", label: "ADD ALL", icon: <Plus size={11} /> },
     { op: "pull", label: "PULL", icon: <ArrowDown size={11} /> },
     { op: "push", label: "PUSH", icon: <ArrowUp size={11} /> },
   ];
+
+  const commitChanges = async () => {
+    const message = prompt("Commit message:");
+    if (!message) return;
+    await runGitOp("add", { ruta: "." });
+    await runGitOp("commit", { mensaje: message });
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -1599,6 +1607,10 @@ function GitPanel({ onExecuteTool }: { onExecuteTool: (toolName: string, args: R
         {statusCounts.untracked > 0 && <Badge variant="outline" className="text-[8px] px-1.5 h-4 border-[#888] text-[#888]">{statusCounts.untracked}U</Badge>}
         <button onClick={clearOutput} className="p-1 text-[var(--zai-text-dim)] hover:text-[var(--zai-text)] transition-colors" title="Clear output">
           <Trash2 size={11} />
+        </button>
+        <button onClick={commitChanges} className="flex items-center gap-1 px-2 py-0.5 border border-[var(--zai-border-accent)] text-[9px] text-[var(--zai-accent)] hover:bg-[var(--zai-accent-dim)] transition-colors tracking-wider" title="Stage all and commit">
+          <GitCommit size={9} />
+          COMMIT
         </button>
       </div>
 
@@ -1883,6 +1895,23 @@ function TaskPlannerPanel({ onExecuteTool }: { onExecuteTool: (toolName: string,
     }
   };
 
+  const deleteTask = async (taskId: string) => {
+    // Optimistic update
+    setTasks((prev) => prev.filter((t) => t.id !== taskId));
+
+    // Try to persist
+    try {
+      const task = tasks.find((t) => t.id === taskId);
+      if (task?.planId) {
+        await fetch(`/api/plans/${task.planId}/tasks/${taskId}`, {
+          method: "DELETE",
+        });
+      }
+    } catch {
+      toast.error("Failed to delete task");
+    }
+  };
+
   const columns = [
     { id: "pending", label: "PENDING", color: "border-[#888]" },
     { id: "in_progress", label: "IN PROGRESS", color: "border-[#00d4ff]" },
@@ -1975,6 +2004,13 @@ function TaskPlannerPanel({ onExecuteTool }: { onExecuteTool: (toolName: string,
                               {col.id === "pending" ? "START →" : "DONE →"}
                             </button>
                           )}
+                          <button
+                            onClick={() => deleteTask(task.id)}
+                            className="text-[8px] text-[var(--zai-text-dim)] hover:text-[var(--zai-red)] px-1 border border-[var(--zai-border)] transition-colors ml-auto"
+                            aria-label="Delete task"
+                          >
+                            <Trash2 size={8} />
+                          </button>
                         </div>
                       </div>
                     ))}

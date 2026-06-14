@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/db'
+import { BRIDGE_BASE, bridgeHeaders } from '@/lib/bridge'
 
 // GET /api/config - Get all config values (also merges with bridge config)
 export async function GET() {
@@ -11,11 +12,8 @@ export async function GET() {
     // Also try to get bridge config for a unified view
     let bridgeConfig = null;
     try {
-      const token = process.env.BRIDGE_TOKEN;
-      const headers: Record<string, string> = {};
-      if (token) headers["Authorization"] = `Bearer ${token}`;
-      const bridgeRes = await fetch("http://localhost:8000/api/config", {
-        headers,
+      const bridgeRes = await fetch(`${BRIDGE_BASE}/api/config`, {
+        headers: bridgeHeaders(),
         signal: AbortSignal.timeout(3000),
       });
       if (bridgeRes.ok) bridgeConfig = await bridgeRes.json();
