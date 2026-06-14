@@ -26,6 +26,7 @@ from agent.schemas import SYSTEM_PROMPT, JSON_TOOLS_PROMPT
 from agent.metacognition import Metacognition
 from agent.deep_thinking import DeepThinking
 from utils.metrics import get_metrics
+from utils.token_manager import TokenManager, estimate_tokens
 
 
 class ReactAgent:
@@ -44,6 +45,7 @@ class ReactAgent:
         self._models_cache = None  # Cache de modelos para no llamar API cada vez
         self._tool_call_counts = {}  # Rate limiting por herramienta
         self._total_tool_calls = 0   # Total de tool calls en esta conversacion
+        self.token_manager = TokenManager(model_name=ollama.model or "default")  # Gestion de tokens
 
     def _log(self, message, category="info"):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -394,12 +396,15 @@ class ReactAgent:
 
                 self._log("Respuesta final generada (streaming)", "success")
                 self._save_interaction(user_message, full_text)
+                # Registrar tokens de respuesta
+                self.token_manager.add_response(full_text)
                 yield {
                     "type": "done",
                     "data": full_text,
                     "thinking_log": self.thinking_log,
                     "meta_status": self.metacognition.get_status(),
                     "deep_thinking_stats": self.deep_thinking.stats(),
+                    "token_stats": self.token_manager.stats(),
                 }
                 return
 
@@ -926,15 +931,39 @@ class ReactAgent:
             knowledge_text = "\n".join([f"- {k['content']}" for k in relevant_knowledge[:3]])
             system_content += f"\n\nConocimiento adicional:\n{knowledge_text}"
 
+        # Registrar tokens del system prompt
+        self.token_manager.add_system(system_content)
+
         messages = [{"role": "system", "content": system_content}]
 
         # Historial desde TripleMemory (unica fuente)
         recent_history = self.memory.short_term[-MAX_CONVERSATION_MEMORY:]
         for msg in recent_history:
             messages.append({"role": msg["role"], "content": msg["content"]})
+            self.token_manager.add_context(msg["content"], description=f"History ({msg['role']})")
 
         # Mensaje actual
         messages.append({"role": "user", "content": new_message})
+        self.token_manager.add_context(new_message, description="User message")
+
+        # Registrar tokens de tool schemas
+        tools_text = json.dumps(TOOL_SCHEMAS, ensure_ascii=False)
+        self.token_manager.add_tools(tools_text)
+
+        # Comprimir contexto si excede el presupuesto de tokens
+        if self.token_manager.needs_compression():
+            level = self.token_manager.compression_level()
+            self._log(f"Comprimiendo contexto (nivel: {level})", "warning")
+            messages = self.token_manager.compress(messages, level=level)
+            self._log(f"Contexto comprimido: {len(messages)} mensajes", "info")
+
+        # Log de stats de tokens
+        token_stats = self.token_manager.stats()
+        self._log(
+            f"Tokens: {token_stats['used']:,}/{token_stats['context_size']:,} "
+            f"({token_stats['utilization_pct']}%)",
+            "info"
+        )
 
         return messages
 

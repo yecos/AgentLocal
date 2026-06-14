@@ -172,6 +172,10 @@ def _register_submodule_tools():
         # v16 Super Agente - Cloud APIs
         "configurar_api_key": configurar_api_key,
         "listar_api_keys": listar_api_keys,
+        "buscar_web_cloud": buscar_web_cloud,
+        "generar_imagen_cloud": generar_imagen_cloud,
+        "analizar_imagen_cloud": analizar_imagen_cloud,
+        "llm_cloud_chat": llm_cloud_chat,
     }
 
     for name, func in submod_tools.items():

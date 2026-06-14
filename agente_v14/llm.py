@@ -445,6 +445,7 @@ class OllamaClient:
         
         try:
             import base64
+            import urllib.request
             with open(image_path, "rb") as f:
                 image_data = base64.b64encode(f.read()).decode("utf-8")
             

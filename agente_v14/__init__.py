@@ -1,2 +1,2 @@
-"""Agente Local Autonomo v14 - Arquitectura Modular."""
-__version__ = "14.0.0"
+"""Agente Local Autonomo v16 - Super Agente con Cloud APIs."""
+__version__ = "16.2.0"

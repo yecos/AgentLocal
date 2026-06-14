@@ -64,6 +64,7 @@ def get_agent() -> ReactAgent:
         if not AGENT_AVAILABLE:
             raise HTTPException(status_code=503, detail="Agente no disponible. Verifica que Ollama esté corriendo.")
         memory = TripleMemory()
+        memory.load_session()  # Cargar sesión persistente
         _agent = ReactAgent(memory=memory)
     return _agent
 
@@ -245,6 +246,20 @@ async def _stream_agent_threaded(agent: ReactAgent, message: str):
                 }
                 yield f"data: {json.dumps(result_info, ensure_ascii=False)}\n\n"
 
+            elif event_type == "thinking":
+                # Evento de pensamiento profundo (deep thinking)
+                thinking_info = {
+                    "type": "thinking",
+                    "data": {
+                        "reasoning": event_data.get("reasoning", "") if isinstance(event_data, dict) else str(event_data),
+                        "plan": event_data.get("plan", []) if isinstance(event_data, dict) else [],
+                        "complexity": event_data.get("complexity", 0) if isinstance(event_data, dict) else 0,
+                        "query_type": event_data.get("query_type", "") if isinstance(event_data, dict) else "",
+                        "depth": event_data.get("depth", 0) if isinstance(event_data, dict) else 0,
+                    }
+                }
+                yield f"data: {json.dumps(thinking_info, ensure_ascii=False)}\n\n"
+
             elif event_type == "meta":
                 meta_info = {
                     "type": "meta",
@@ -258,6 +273,8 @@ async def _stream_agent_threaded(agent: ReactAgent, message: str):
                     "data": event_data if isinstance(event_data, str) else "",
                     "thinking_log": event.get("thinking_log", []),
                     "meta_status": event.get("meta_status", {}),
+                    "deep_thinking_stats": event.get("deep_thinking_stats", {}),
+                    "token_stats": event.get("token_stats", {}),
                 }
                 yield f"data: {json.dumps(done_info, ensure_ascii=False)}\n\n"
 

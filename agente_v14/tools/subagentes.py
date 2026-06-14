@@ -315,11 +315,11 @@ class SubAgentReAct:
                 # Llamar al LLM con herramientas
                 if hasattr(ollama, '_try_chat_http'):
                     response = self._call_llm_with_tools_http(messages, schemas)
-                elif hasattr(ollama, 'chat'):
-                    response = ollama.chat(
+                elif hasattr(ollama, 'generate'):
+                    # Usar generate() que soporta tools via HTTP nativo
+                    response = ollama.generate(
                         messages=messages,
                         tools=schemas if schemas else None,
-                        stream=False,
                     )
                 else:
                     return None
@@ -554,13 +554,9 @@ class SubAgentReAct:
         try:
             from llm import ollama
 
-            if hasattr(ollama, 'chat'):
-                response = ollama.chat(messages=messages, stream=False)
-                if isinstance(response, dict):
-                    return response.get("message", {}).get("content", str(response))
-                elif isinstance(response, str):
-                    return response
-                return str(response)
+            if hasattr(ollama, 'generate_chat'):
+                # generate_chat() es el metodo dedicado para chat con mensajes
+                return ollama.generate_chat(messages)
             elif hasattr(ollama, 'generate'):
                 # Concatenar mensajes en un solo prompt
                 parts = []
@@ -865,14 +861,10 @@ def _synthesize_results(results: dict) -> str:
 
         if hasattr(ollama, 'generate'):
             return ollama.generate(prompt)
-        elif hasattr(ollama, 'chat'):
-            response = ollama.chat(
-                messages=[{"role": "user", "content": prompt}],
-                stream=False,
+        elif hasattr(ollama, 'generate_chat'):
+            return ollama.generate_chat(
+                messages=[{"role": "user", "content": prompt}]
             )
-            if isinstance(response, dict):
-                return response.get("message", {}).get("content", "")
-            return str(response)
 
     except Exception as e:
         logger.debug(f"Sintesis fallo: {e}")
@@ -936,12 +928,10 @@ Maximo {max_subagentes} subtareas. Cada subtarea debe ser independiente o tener 
 
         if hasattr(ollama, 'generate'):
             response = ollama.generate(prompt)
-        elif hasattr(ollama, 'chat'):
-            resp = ollama.chat(
-                messages=[{"role": "user", "content": prompt}],
-                stream=False,
+        elif hasattr(ollama, 'generate_chat'):
+            response = ollama.generate_chat(
+                messages=[{"role": "user", "content": prompt}]
             )
-            response = resp.get("message", {}).get("content", "") if isinstance(resp, dict) else str(resp)
         else:
             return []
 

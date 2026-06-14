@@ -1176,4 +1176,71 @@ TOOL_SCHEMAS = [
             }
         }
     },
+    # ============================================================
+    # v16 CLOUD APIs - Herramientas directas
+    # ============================================================
+    {
+        "type": "function",
+        "function": {
+            "name": "buscar_web_cloud",
+            "description": "Busqueda web usando APIs cloud (Google Custom Search o Bing). Retorna resultados mas relevantes que la busqueda local. Requiere API key configurada via configurar_api_key. Fallback automatico a busqueda local si no hay API key.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "consulta": {"type": "string", "description": "Termino de busqueda"},
+                    "num_resultados": {"type": "integer", "description": "Numero maximo de resultados (1-20, default 8)"}
+                },
+                "required": ["consulta"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generar_imagen_cloud",
+            "description": "Genera una imagen usando APIs cloud (DALL-E, Stability AI, Replicate). Requiere API key configurada. Retorna la ruta de la imagen generada o URL.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "descripcion": {"type": "string", "description": "Descripcion detallada de la imagen a generar"},
+                    "ruta": {"type": "string", "description": "Ruta donde guardar la imagen (opcional)"},
+                    "tamano": {"type": "string", "description": "Tamano: 256x256, 512x512, 1024x1024 (default 512x512)"},
+                    "estilo": {"type": "string", "description": "Estilo: natural, vivid, anime, photographic (default natural)"}
+                },
+                "required": ["descripcion"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analizar_imagen_cloud",
+            "description": "Analiza una imagen usando APIs cloud de vision (OpenAI Vision, Google Vision). Mayor precision que el analisis local. Requiere API key configurada.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ruta": {"type": "string", "description": "Ruta de la imagen a analizar"},
+                    "pregunta": {"type": "string", "description": "Pregunta sobre la imagen (default: describe la imagen)"}
+                },
+                "required": ["ruta"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "llm_cloud_chat",
+            "description": "Chat con LLMs cloud (OpenAI GPT-4, Anthropic Claude, Google Gemini). Usar cuando se necesite razonamiento avanzado o el modelo local no sea suficiente. Requiere API key configurada.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mensajes": {"type": "string", "description": "JSON string con la lista de mensajes: [{\"role\": \"user\", \"content\": \"...\"}]"},
+                    "modelo": {"type": "string", "description": "Modelo a usar: auto, gpt-4, claude-3, gemini-pro (default auto)"},
+                    "temperatura": {"type": "number", "description": "Temperatura 0.0-2.0 (default 0.7)"},
+                    "max_tokens": {"type": "integer", "description": "Maximo tokens de respuesta (default 2048)"}
+                },
+                "required": ["mensajes"]
+            }
+        }
+    },
 ]
