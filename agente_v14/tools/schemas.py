@@ -1252,4 +1252,21 @@ TOOL_SCHEMAS = [
             }
         }
     },
+    # ============================================================
+    # PLANIFICADOR DE TAREAS
+    # ============================================================
+    {
+        "type": "function",
+        "function": {
+            "name": "planificar_tarea",
+            "description": "Descompone una tarea compleja en subtareas ejecutables con dependencias. Genera un plan paso a paso. Usar ANTES de ejecutar tareas complejas como crear apps, proyectos, o analisis multi-paso.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tarea": {"type": "string", "description": "Descripcion de la tarea compleja a planificar"}
+                },
+                "required": ["tarea"]
+            }
+        }
+    },
 ]

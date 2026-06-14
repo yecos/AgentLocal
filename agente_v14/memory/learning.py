@@ -13,7 +13,7 @@ from datetime import datetime
 
 from config import (
     CORRECTIONS_FILE, FEEDBACK_FILE, PATTERNS_FILE,
-    KNOWLEDGE_FILE, logger
+    KNOWLEDGE_FILE, LEARN_DIR, logger
 )
 
 
@@ -171,3 +171,57 @@ class LearningSystem:
                 result.append(entry)
 
         return result
+
+
+class UserPreferenceLearner:
+    """M5.3: Learns implicit user preferences from interactions."""
+
+    PREFERENCE_SIGNALS = {
+        "idioma": [("en inglés", "en"), ("en español", "es"), ("in english", "en")],
+        "formato": [("en tabla", "table"), ("en lista", "list"), ("con gráfico", "chart"), ("en código", "code")],
+        "longitud": [("más corto", "short"), ("más detallado", "detailed"), ("en resumen", "brief"), ("explicación completa", "full")],
+        "estilo_doc": [("profesional", "professional"), ("informal", "casual"), ("técnico", "technical")],
+    }
+
+    _PREFS_FILE = os.path.join(LEARN_DIR, "user_preferences.json")
+
+    def __init__(self):
+        self._preferences: dict[str, str] = {}
+        self._load()
+
+    def extract_and_store(self, user_message: str) -> dict:
+        """Extract preferences from user message and store them."""
+        msg_lower = user_message.lower()
+        new_prefs = {}
+        for pref_type, signals in self.PREFERENCE_SIGNALS.items():
+            for signal, value in signals:
+                if signal in msg_lower:
+                    self._preferences[pref_type] = value
+                    new_prefs[pref_type] = value
+        if new_prefs:
+            self._save()
+        return new_prefs
+
+    def get_preferences(self) -> dict:
+        return dict(self._preferences)
+
+    def get_preference(self, key: str, default: str = None) -> str | None:
+        return self._preferences.get(key, default)
+
+    def _load(self):
+        """Load preferences from disk."""
+        try:
+            if os.path.exists(self._PREFS_FILE):
+                with open(self._PREFS_FILE, "r", encoding="utf-8") as f:
+                    self._preferences = json.load(f)
+        except Exception as e:
+            logger.debug(f"Error cargando preferencias: {e}")
+
+    def _save(self):
+        """Save preferences to disk."""
+        try:
+            os.makedirs(os.path.dirname(self._PREFS_FILE), exist_ok=True)
+            with open(self._PREFS_FILE, "w", encoding="utf-8") as f:
+                json.dump(self._preferences, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"Error guardando preferencias: {e}")

@@ -165,6 +165,74 @@ class ReactAgent:
 
         return False
 
+    # ----------------------------------------------------------
+    # M4: AUTO-ACTIVACION DEL PLANIFICADOR
+    # ----------------------------------------------------------
+    def _should_use_planner(self, user_message: str) -> bool:
+        """M4: Detect if task requires planning before execution.
+
+        Uses pattern matching and message length heuristics to decide
+        whether the task is complex enough to warrant automatic
+        decomposition by the TaskPlanner.
+
+        Args:
+            user_message: The user's request
+
+        Returns:
+            True if the task should be auto-planned
+        """
+        msg_lower = user_message.lower()
+
+        # Complex creation patterns
+        complex_patterns = [
+            r"crea.*app", r"crea.*aplicaci[oó]n", r"construye.*sistema",
+            r"desarrolla.*proyecto", r"implementa.*m[oó]dulo",
+            # Multi-step analysis
+            r"analiza.*y.*genera", r"busca.*y.*crea", r"investiga.*y.*escribe",
+            # Explicit planning cues
+            r"paso a paso", r"todo el proyecto", r"completo",
+            r"plan", r"planifica", r"organiza",
+        ]
+
+        score = sum(1 for p in complex_patterns if re.search(p, msg_lower))
+
+        # Also check message length (long requests tend to be complex)
+        if len(user_message) > 200:
+            score += 1
+
+        return score >= 2
+
+    def _auto_plan(self, user_message: str) -> str | None:
+        """M4: Automatically create a plan for complex tasks.
+
+        Invokes the planificar_tarea tool (if available) to decompose
+        the user's request into an actionable step-by-step plan, then
+        returns the plan text for injection into the conversation.
+
+        Args:
+            user_message: The user's request
+
+        Returns:
+            Plan text string if successful, None otherwise
+        """
+        if "planificar_tarea" not in TOOL_FUNCTIONS:
+            self._log("Planificador no disponible", "planning")
+            return None
+
+        try:
+            self._log("Tarea compleja detectada → activando planificador", "planning")
+            plan_result = TOOL_FUNCTIONS["planificar_tarea"](tarea=user_message)
+
+            if plan_result and "ERROR" not in str(plan_result):
+                self._log(f"Plan generado ({len(plan_result)} chars)", "planning")
+                return plan_result
+            else:
+                self._log("Planificador no produjo resultado útil", "planning")
+                return None
+        except Exception as e:
+            self._log(f"Error en planificación automática: {e}", "planning")
+            return None
+
     def _get_max_iterations(self, user_message: str) -> int:
         """Determina el maximo de iteraciones segun complejidad de la tarea (M2.2)."""
         if not ADAPTIVE_ITERATIONS:
@@ -200,6 +268,7 @@ class ReactAgent:
         self._tool_call_counts = {}
         self._total_tool_calls = 0
         self._tool_failures.clear()  # M2.3: Reset failure history for new conversation
+        self._last_user_message = user_message  # M5.2: Store for SkillMemory integration
         self._log(f"Mensaje del usuario: {user_message}", "input")
 
         messages = self._build_messages(user_message)
@@ -213,6 +282,15 @@ class ReactAgent:
 
         max_iter = self._get_max_iterations(user_message)
         self._log(f"Iteraciones adaptativas: {max_iter} (complejidad detectada)", "react")
+
+        # M4: Auto-planning for complex tasks
+        if self._should_use_planner(user_message):
+            plan = self._auto_plan(user_message)
+            if plan:
+                # Inject plan into the conversation context
+                plan_context = f"\n\n[PLAN AUTOMÁTICO GENERADO]\n{plan}\n[FIN DEL PLAN - Ejecuta paso a paso]"
+                # Add as a system message before the user's message
+                messages.insert(-1, {"role": "system", "content": plan_context})
 
         # M7.2: Native thinking para Qwen3 en primera iteracion de tareas complejas
         if self._should_use_native_thinking(0, user_message):
@@ -437,6 +515,7 @@ class ReactAgent:
         self._tool_call_counts = {}
         self._total_tool_calls = 0
         self._tool_failures.clear()  # M2.3: Reset failure history for new conversation
+        self._last_user_message = user_message  # M5.2: Store for SkillMemory integration
         self._log(f"Mensaje del usuario: {user_message}", "input")
 
         # Emitir evento thinking: recibiendo pregunta
@@ -461,6 +540,15 @@ class ReactAgent:
 
         max_iter = self._get_max_iterations(user_message)
         self._log(f"Iteraciones adaptativas: {max_iter} (complejidad detectada)", "react")
+
+        # M4: Auto-planning for complex tasks (streaming)
+        if self._should_use_planner(user_message):
+            yield {"type": "planning", "data": {"phase": "decomposition", "status": "generating"}}
+            plan = self._auto_plan(user_message)
+            if plan:
+                yield {"type": "planning", "data": {"phase": "complete", "plan_preview": plan[:200]}}
+                plan_context = f"\n\n[PLAN AUTOMÁTICO GENERADO]\n{plan}\n[FIN DEL PLAN - Ejecuta paso a paso]"
+                messages.insert(-1, {"role": "system", "content": plan_context})
 
         # M7.2: Native thinking para Qwen3 en primera iteracion de tareas complejas
         if self._should_use_native_thinking(0, user_message):
@@ -1257,6 +1345,22 @@ class ReactAgent:
                 metadata={"type": "tool_result", "tool": tool_name}
             )
 
+        # M5.2/C4: Record skill output in SkillMemory for file-producing skills
+        try:
+            from memory.skill_memory import get_skill_memory, FILE_PRODUCING_SKILLS
+            if tool_name in FILE_PRODUCING_SKILLS and "ERROR" not in str(tool_result):
+                output_path = self._extract_file_path(tool_result)
+                if output_path:
+                    get_skill_memory().record(
+                        skill_name=tool_name,
+                        params=tool_params if isinstance(tool_params, dict) else {},
+                        output_path=output_path,
+                        description=f"Generado para: {getattr(self, '_last_user_message', '')[:80]}",
+                        user_request=getattr(self, '_last_user_message', ''),
+                    )
+        except Exception as e:
+            pass  # No bloquear ejecucion si SkillMemory falla
+
         return tool_result
 
     def _validate_tool_params(self, tool_name, params):
@@ -1718,6 +1822,29 @@ class ReactAgent:
     # ----------------------------------------------------------
     # HELPERS
     # ----------------------------------------------------------
+
+    @staticmethod
+    def _extract_file_path(result: str) -> str | None:
+        """M5.2: Extract a file path from tool output text."""
+        if not result:
+            return None
+        # Common patterns for file paths in tool output
+        # Match /path/to/file.ext or C:\path\to\file.ext
+        import re as _re
+        # Unix absolute paths
+        matches = _re.findall(r'(?:/home/|/tmp/|/var/|/opt/|/usr/|/root/)[\w/.+\-]+\.\w{1,10}', result)
+        if matches:
+            return matches[0]
+        # Windows paths
+        matches = _re.findall(r'[A-Z]:\\[\w\\.\-]+\.\w{1,10}', result)
+        if matches:
+            return matches[0]
+        # Relative paths with common output dirs
+        matches = _re.findall(r'(?:download|output|repos|tmp)[/\\][\w/.+\-]+\.\w{1,10}', result)
+        if matches:
+            return matches[0]
+        return None
+
     def _resolve_params(self, params):
         resolved = {}
         for key, value in params.items():

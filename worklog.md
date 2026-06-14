@@ -1271,3 +1271,106 @@ Stage Summary:
 - M7.3 COMPLETE: Selective post-response reflection (skips simple interactions)
 - All 566 tests pass (was 544, now 566 = +22 new tests)
 - Zero regressions
+
+---
+Task ID: r3a
+Agent: Sub-Agent (general-purpose)
+Task: Implement M5 (Memoria mejorada) + C4 (SkillMemory)
+
+Work Log:
+- Read worklog, triple_memory.py, learning.py, __init__.py, react.py
+- Analyzed existing code structure and integration points
+
+M5.1 — Clasificación de importancia antes de guardar:
+- Added IMPORTANCE_LOW_PATTERNS, IMPORTANCE_HIGH_PATTERNS, IMPORTANCE_CRITICAL_PATTERNS constants at module level in triple_memory.py
+- Added _classify_importance(text, metadata) method returning: ephemeral, normal, important, critical
+- Modified add_conversation() to classify importance before saving
+  - ephemeral messages: only saved to short-term, skipped in long-term
+  - critical/important: saved to both + metadata["decay_boost"] = True
+  - normal: standard behavior
+- Each short-term entry now includes "importance" field
+
+M5.2 — Memoria episódica para skills (C4):
+- Created NEW file: memory/skill_memory.py
+- SkillMemory class with record(), search(), get_recent() methods
+- Singleton pattern via get_skill_memory()
+- FILE_PRODUCING_SKILLS set for auto-registration
+- Persists to LEARN_DIR/skill_outputs.json (max 100 entries)
+
+M5.3 — Aprendizaje de preferencias del usuario:
+- Added UserPreferenceLearner class to memory/learning.py
+- PREFERENCE_SIGNALS dict for idioma, formato, longitud, estilo_doc
+- extract_and_store(user_message) → scans for preference signals and persists
+- get_preferences() / get_preference(key) for retrieval
+- Persists to LEARN_DIR/user_preferences.json
+
+M5.4 — Limpieza proactiva de memoria:
+- Added cleanup_stale_memories(days_threshold=30) to TripleMemory
+- Removes conversation/task entries older than threshold
+- Permanently keeps knowledge, correction, lesson types
+- Added _is_stale_entry() and _is_stale_long_term() static helpers
+- Supports both simple VectorStore._entries and vector stores with remove_stale()
+
+Integration in react.py:
+- Added _extract_file_path(result) static method for path extraction from tool output
+- Added _last_user_message attribute set in both run() and run_stream()
+- After successful tool execution of file-producing skills, auto-registers in SkillMemory
+- All integration wrapped in try/except to never block execution
+
+Updated memory/__init__.py:
+- Added exports: UserPreferenceLearner, SkillMemory, get_skill_memory, FILE_PRODUCING_SKILLS
+
+Stage Summary:
+- M5.1 COMPLETE: Importance classification (ephemeral/normal/important/critical) before saving
+- M5.2/C4 COMPLETE: SkillMemory with record/search/get_recent, persisted to disk
+- M5.3 COMPLETE: UserPreferenceLearner with signal extraction and persistence
+- M5.4 COMPLETE: cleanup_stale_memories with type-aware retention policy
+- Integration COMPLETE: react.py records skill outputs, extracts file paths
+- All 566 tests pass — zero regressions
+
+---
+Task ID: r3b
+Agent: Sub Agent
+Task: M4 — Activación automática del planificador (Auto-activate TaskPlanner)
+
+Work Log:
+- Read react.py (1925 lines), task_planner.py (955 lines), schemas.py, tools/__init__.py
+- Identified that `planificar_tarea` was referenced in schemas/prompts but NOT registered in TOOL_FUNCTIONS — dead code
+- Created `planificar_tarea` tool function in tools/__init__.py that wraps TaskPlanner.smart_decompose()
+  - Formats plan as readable text with priority icons and dependency info
+  - Validates plan via planner.validate_plan() and includes warnings
+- Added `planificar_tarea` schema to tools/schemas.py for function calling support
+- Added `_should_use_planner(self, user_message: str) -> bool` to ReactAgent (lines ~171-203)
+  - Pattern matching: complex creation, multi-step analysis, explicit planning cues (13 regex patterns)
+  - Length heuristic: +1 score if message > 200 chars
+  - Threshold: score >= 2 triggers auto-planning
+- Added `_auto_plan(self, user_message: str) -> str | None` to ReactAgent (lines ~205-234)
+  - Checks if planificar_tarea is in TOOL_FUNCTIONS (graceful if unavailable)
+  - Calls planificar_tarea(tarea=user_message) to generate plan
+  - Returns plan text if successful and no ERROR, None otherwise
+  - All paths logged with "planning" category
+- Integrated auto-planning in `run()` (lines ~285-292):
+  - After _build_messages and _get_max_iterations, BEFORE the ReAct loop
+  - Injects plan as system message via `messages.insert(-1, ...)` (before user message)
+  - Format: `[PLAN AUTOMÁTICO GENERADO]\n{plan}\n[FIN DEL PLAN - Ejecuta paso a paso]`
+- Integrated auto-planning in `run_stream()` (lines ~543-550):
+  - Yields `{"type": "planning", "data": {"phase": "decomposition", "status": "generating"}}` before planning
+  - Yields `{"type": "planning", "data": {"phase": "complete", "plan_preview": plan[:200]}}` after
+  - Same message injection as run()
+
+Verification:
+- All 566 existing tests pass (zero regressions)
+- Manual tests pass:
+  - _should_use_planner: correctly triggers for complex tasks, rejects simple queries
+  - _auto_plan: returns plan when tool available, None when unavailable/error
+  - planificar_tarea: registered in TOOL_FUNCTIONS, callable with template-based plans
+  - run() integration: plan injected into messages for complex tasks
+  - run_stream() integration: planning events emitted correctly
+  - Simple messages do NOT trigger planner
+
+Stage Summary:
+- M4 COMPLETE: TaskPlanner auto-activation for complex tasks
+- New tool: planificar_tarea registered and functional
+- New methods: _should_use_planner() + _auto_plan() in ReactAgent
+- Integration: both run() and run_stream() auto-plan before ReAct loop
+- All 566 tests pass — zero regressions

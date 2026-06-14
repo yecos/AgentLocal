@@ -330,6 +330,66 @@ def crear_nota(titulo: str, contenido: str) -> str:
 @tool(schema={
     "type": "function",
     "function": {
+        "name": "planificar_tarea",
+        "description": "Descompone una tarea compleja en subtareas ejecutables con dependencias. Genera un plan paso a paso. Usar ANTES de ejecutar tareas complejas como crear apps, proyectos, o analisis multi-paso.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tarea": {"type": "string", "description": "Descripcion de la tarea compleja a planificar"}
+            },
+            "required": ["tarea"]
+        }
+    }
+})
+def planificar_tarea(tarea: str) -> str:
+    """Descompone una tarea compleja en un plan de subtareas ejecutables."""
+    from tools.task_planner import get_planner
+
+    try:
+        planner = get_planner()
+        plan = planner.smart_decompose(tarea)
+
+        if not plan or not plan.tasks:
+            return "ERROR: No se pudo generar un plan para esta tarea."
+
+        # Formatear plan como texto legible
+        lines = [f"PLAN: {plan.goal}", f"Total de pasos: {len(plan.tasks)}", ""]
+
+        for i, (task_id, task) in enumerate(plan.tasks.items(), 1):
+            priority_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(
+                task.priority.value, "⚪"
+            )
+            dep_str = ""
+            if task.dependencies:
+                # Find index of dependency tasks
+                dep_indices = []
+                for j, (tid, _) in enumerate(plan.tasks.items(), 1):
+                    if tid in task.dependencies:
+                        dep_indices.append(str(j))
+                if dep_indices:
+                    dep_str = f" (depende de paso {', '.join(dep_indices)})"
+
+            lines.append(f"  {i}. {priority_icon} {task.title}{dep_str}")
+            if task.description:
+                lines.append(f"     → {task.description}")
+
+        # Validate plan
+        validation = planner.validate_plan(plan)
+        if validation["warnings"]:
+            lines.append("")
+            lines.append("AVISOS:")
+            for w in validation["warnings"]:
+                lines.append(f"  ⚠ {w}")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"ERROR: No se pudo planificar la tarea: {e}"
+
+
+@tool(schema={
+    "type": "function",
+    "function": {
         "name": "ver_notas",
         "description": "Lista las notas guardadas del usuario. Usar cuando el usuario pide ver sus notas o recordar lo que anoto.",
         "parameters": {

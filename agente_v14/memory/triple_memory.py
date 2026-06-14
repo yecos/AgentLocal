@@ -28,6 +28,11 @@ from llm import embed_cache
 
 learning = LearningSystem()
 
+# M5.1: Patrones de clasificación de importancia
+IMPORTANCE_LOW_PATTERNS = ["hola", "gracias", "ok", "entendido", "bien", "sí", "no"]
+IMPORTANCE_HIGH_PATTERNS = ["def ", "function ", "class ", "```", "ERROR", "resultado"]
+IMPORTANCE_CRITICAL_PATTERNS = ["código generado", "archivo creado", "importante", "no olvides"]
+
 # Decaimiento diferenciado por tipo de contenido (en dias half-life)
 DECAY_HALF_LIFE_BY_TYPE = {
     "knowledge": 365,     # Conocimiento factual: decae muy lentamente (1 año)
@@ -87,21 +92,35 @@ class TripleMemory:
         self._auto_cleanup()
 
     def add_conversation(self, role, content):
-        """Agrega un mensaje a la memoria a corto plazo."""
+        """Agrega un mensaje a la memoria a corto plazo.
+
+        M5.1: Usa _classify_importance() para decidir si guarda en largo plazo.
+        """
+        importance = self._classify_importance(content, metadata=None)
+
         self.short_term.append({
             "role": role,
             "content": content,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "importance": importance,
         })
         # Mantener ventana deslizante
         if len(self.short_term) > MAX_CONVERSATION_MEMORY * 2:
             removed = self.short_term[:len(self.short_term) - MAX_CONVERSATION_MEMORY * 2]
             for msg in removed:
+                msg_importance = msg.get("importance", "normal")
+                # M5.1: ephemeral → solo corto plazo, NO guardar en largo plazo
+                if msg_importance == "ephemeral":
+                    continue
                 if msg["role"] == "assistant" and len(msg["content"]) > 50:
                     try:
+                        meta = {"type": "conversation", "role": msg["role"]}
+                        # M5.1: critical/important → boost decay (larger half-life)
+                        if msg_importance in ("critical", "important"):
+                            meta["decay_boost"] = True
                         self.long_term.add(
                             msg["content"][:500],
-                            metadata={"type": "conversation", "role": msg["role"]},
+                            metadata=meta,
                             skip_embedding=SKIP_EMBED_ON_INTERACTION
                         )
                     except Exception as e:
@@ -134,6 +153,32 @@ class TripleMemory:
         except Exception as e:
             logger.warning(f"Error guardando en memoria a largo plazo (no critico): {e}")
             return None
+
+    def _classify_importance(self, text, metadata=None):
+        """M5.1: Classify importance before saving.
+
+        Returns: 'ephemeral', 'normal', 'important', 'critical'
+        """
+        if not text:
+            return "normal"
+
+        text_lower = text.lower()[:200]
+
+        # Saludos y confirmaciones → no guardar en largo plazo
+        if any(word in text_lower for word in IMPORTANCE_LOW_PATTERNS) and len(text) < 50:
+            return "ephemeral"
+
+        # Código generado → muy importante
+        if any(p in text for p in IMPORTANCE_CRITICAL_PATTERNS):
+            return "critical"
+
+        # Resultados de herramientas → importante
+        if metadata and metadata.get("type") == "tool_result":
+            return "important"
+        if any(p in text for p in IMPORTANCE_HIGH_PATTERNS):
+            return "important"
+
+        return "normal"
 
     def _infer_content_type(self, text):
         """Infiere el tipo de contenido a partir del texto.
@@ -399,6 +444,87 @@ class TripleMemory:
         if removed > 0:
             logger.info(f"Cleanup de memoria: eliminadas {removed} entradas viejas ({before} -> {after})")
         return removed
+
+    def cleanup_stale_memories(self, days_threshold=30):
+        """M5.4: Remove conversation/task entries older than days_threshold.
+
+        Keeps 'knowledge', 'correction', 'lesson' types permanently.
+        Only cleans 'conversation' and 'task' types.
+        """
+        cleaned = 0
+        try:
+            cutoff = datetime.now().timestamp() - (days_threshold * 86400)
+            # Clean short-term: remove old conversation/task entries
+            original_st = len(self.short_term)
+            self.short_term = [
+                msg for msg in self.short_term
+                if not self._is_stale_entry(msg, cutoff)
+            ]
+            cleaned_st = original_st - len(self.short_term)
+
+            # Clean long-term via vector store if it supports removal
+            cleaned_lt = 0
+            if hasattr(self.long_term, 'remove_stale'):
+                cleaned_lt = self.long_term.remove_stale(
+                    cutoff_ts=cutoff,
+                    removable_types=("conversation", "task"),
+                )
+            elif hasattr(self.long_term, '_entries'):
+                # Fallback for simple VectorStore
+                before = len(self.long_term._entries)
+                self.long_term._entries = [
+                    e for e in self.long_term._entries
+                    if not self._is_stale_long_term(e, cutoff)
+                ]
+                cleaned_lt = before - len(self.long_term._entries)
+                if cleaned_lt > 0 and hasattr(self.long_term, '_flush'):
+                    self.long_term._flush()
+
+            cleaned = cleaned_st + cleaned_lt
+            if cleaned > 0:
+                logger.info(
+                    f"cleanup_stale_memories: {cleaned_st} short-term + "
+                    f"{cleaned_lt} long-term entries removed (threshold={days_threshold}d)"
+                )
+        except Exception as e:
+            logger.warning(f"cleanup_stale_memories error (no critico): {e}")
+        return cleaned
+
+    @staticmethod
+    def _is_stale_entry(msg, cutoff_ts):
+        """Check if a short-term message is stale and removable."""
+        msg_type = msg.get("importance", "normal")
+        if msg_type in ("critical", "important"):
+            return False
+        ts_str = msg.get("timestamp", "")
+        if not ts_str:
+            return False
+        try:
+            msg_ts = datetime.fromisoformat(ts_str).timestamp()
+            return msg_ts < cutoff_ts
+        except (ValueError, TypeError):
+            return False
+
+    @staticmethod
+    def _is_stale_long_term(entry, cutoff_ts):
+        """Check if a long-term entry is stale and removable."""
+        meta = entry.get("metadata", {}) if isinstance(entry, dict) else {}
+        entry_type = meta.get("type", "")
+        # Keep knowledge, correction, lesson permanently
+        if entry_type in ("knowledge", "correction", "lesson"):
+            return False
+        # Only clean conversation and task
+        if entry_type not in ("conversation", "task"):
+            return False
+        # Check age
+        ts_str = meta.get("timestamp", "") or meta.get("created", "")
+        if not ts_str:
+            return False
+        try:
+            entry_ts = datetime.fromisoformat(ts_str).timestamp()
+            return entry_ts < cutoff_ts
+        except (ValueError, TypeError):
+            return False
 
     def _auto_cleanup(self):
         """Auto-cleanup al iniciar si la memoria esta llena."""
