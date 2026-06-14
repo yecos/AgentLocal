@@ -1,12 +1,6 @@
 import type { Metadata } from "next";
-import { Geist_Mono } from "next/font/google";
 import { ThemeProvider } from "next-themes";
 import "./globals.css";
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
 
 export const metadata: Metadata = {
   title: "AgentLocal — Agente IA Local",
@@ -24,8 +18,8 @@ export default function RootLayout({
   return (
     <html lang="es" suppressHydrationWarning>
       <body
-        className={`${geistMono.variable} mono antialiased bg-[#000000] text-[#e0e0e0] dark:bg-[#000000] dark:text-[#e0e0e0]`}
-        style={{ fontFamily: "var(--font-geist-mono), 'JetBrains Mono', 'Fira Code', ui-monospace, monospace" }}
+        className="mono antialiased bg-[#000000] text-[#e0e0e0] dark:bg-[#000000] dark:text-[#e0e0e0]"
+        style={{ fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', 'Consolas', ui-monospace, monospace" }}
       >
         <ThemeProvider
           attribute="class"
