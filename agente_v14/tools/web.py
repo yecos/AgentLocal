@@ -9,6 +9,11 @@ v14.5: Migracion a duckduckgo-search con retry, cache y fallback.
        - Fallback multi-engine (DDG -> Instant Answer -> Wikipedia)
        - Metadatos enriquecidos (fecha, tipo)
        - Filtrado de baja calidad
+v14.8: Seguridad mejorada
+       - Validacion de URLs con bloqueo de IPs privadas
+       - Limite de tamano de respuesta HTTP (5MB)
+       - Timeout configurable (30s por defecto)
+       - User-Agent consistente
 =============================================================
 """
 
@@ -16,9 +21,161 @@ import json
 import time
 import hashlib
 import logging
+import ipaddress
+import socket
+import re
+from urllib.parse import urlparse
 
 from config import WEB_TIMEOUT, logger
 from utils.security import sanitize_input, validate_url
+
+# ============================================================
+# CONSTANTES DE SEGURIDAD WEB
+# ============================================================
+WEB_USER_AGENT = "AgentLocal/1.0 (compatible; web-search-tool)"
+WEB_RESPONSE_MAX_SIZE = 5 * 1024 * 1024  # 5MB max response body
+WEB_DEFAULT_TIMEOUT = 30  # 30 seconds default timeout
+
+# Schemes explicitly blocked
+BLOCKED_SCHEMES = {"file", "ftp", "data", "javascript", "vbscript", "blob"}
+
+# Private/internal IP ranges to block
+PRIVATE_NETWORKS = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),    # IPv6 unique-local
+    ipaddress.ip_network("fe80::/10"),   # IPv6 link-local
+]
+
+
+def _is_private_ip(hostname: str) -> bool:
+    """Check if a hostname resolves to a private/internal IP address.
+
+    Blocks SSRF attacks by preventing requests to internal networks.
+    """
+    try:
+        # Try parsing as IP directly first
+        try:
+            ip = ipaddress.ip_address(hostname)
+            for network in PRIVATE_NETWORKS:
+                if ip in network:
+                    logger.warning(f"Blocked request to private IP: {hostname}")
+                    return True
+            return False
+        except ValueError:
+            pass  # Not a direct IP, try DNS resolution
+
+        # Resolve hostname via DNS
+        addr_infos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        for family, _, _, _, sockaddr in addr_infos:
+            ip_str = sockaddr[0]
+            ip = ipaddress.ip_address(ip_str)
+            for network in PRIVATE_NETWORKS:
+                if ip in network:
+                    logger.warning(f"Blocked request to private IP (resolved): {hostname} -> {ip_str}")
+                    return True
+    except (socket.gaierror, OSError, ValueError):
+        # Cannot resolve - let it through (will fail at connection time anyway)
+        pass
+    return False
+
+
+def _validate_web_url(url: str) -> tuple[bool, str]:
+    """Validate a URL for web requests with enhanced security.
+
+    Returns:
+        (is_valid, error_message) tuple. If valid, error_message is empty.
+    """
+    if not url or not url.strip():
+        return False, "URL vacia"
+
+    url = url.strip()
+
+    # Check scheme - only http and https allowed
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False, f"URL con formato invalido: {url[:100]}"
+
+    scheme = parsed.scheme.lower()
+    if not scheme:
+        return False, f"URL sin esquema: {url[:100]}"
+
+    if scheme in BLOCKED_SCHEMES:
+        logger.warning(f"Blocked URL with forbidden scheme: {scheme}:// in {url[:100]}")
+        return False, f"Esquema bloqueado: {scheme}://. Solo se permite http:// y https://"
+
+    if scheme not in ("http", "https"):
+        return False, f"Esquema no permitido: {scheme}://. Solo se permite http:// y https://"
+
+    # Check for embedded dangerous schemes
+    dangerous_patterns = [r"javascript\s*:", r"data\s*:", r"file\s*:", r"vbscript\s*:"]
+    for pattern in dangerous_patterns:
+        if re.search(pattern, url, re.IGNORECASE):
+            logger.warning(f"Blocked URL with embedded dangerous scheme: {url[:100]}")
+            return False, f"URL contiene esquema peligroso embebido"
+
+    # Check hostname
+    hostname = parsed.hostname
+    if not hostname:
+        return False, f"URL sin hostname valido: {url[:100]}"
+
+    # Block private/internal IPs (SSRF protection)
+    if _is_private_ip(hostname):
+        return False, f"URL apunta a IP privada/interna bloqueada: {hostname}"
+
+    return True, ""
+
+
+def _safe_urlopen(url: str, timeout: int = None) -> bytes:
+    """Make a safe HTTP request with URL validation, size limit, and timeout.
+
+    Args:
+        url: URL to request (must be http:// or https://)
+        timeout: Request timeout in seconds (default: WEB_DEFAULT_TIMEOUT)
+
+    Returns:
+        Response body as bytes
+
+    Raises:
+        ValueError: If URL is invalid or blocked
+        RuntimeError: If response exceeds size limit
+    """
+    import urllib.request
+
+    # Validate URL
+    is_valid, error = _validate_web_url(url)
+    if not is_valid:
+        raise ValueError(f"URL bloqueada: {error}")
+
+    actual_timeout = timeout or WEB_DEFAULT_TIMEOUT
+
+    req = urllib.request.Request(url, headers={
+        "User-Agent": WEB_USER_AGENT,
+    })
+
+    with urllib.request.urlopen(req, timeout=actual_timeout) as resp:
+        # Read with size limit
+        chunks = []
+        total_size = 0
+        while True:
+            chunk = resp.read(65536)  # 64KB chunks
+            if not chunk:
+                break
+            total_size += len(chunk)
+            if total_size > WEB_RESPONSE_MAX_SIZE:
+                raise RuntimeError(
+                    f"Respuesta HTTP excede el limite de 5MB "
+                    f"({total_size / (1024*1024):.1f}MB recibidos)"
+                )
+            chunks.append(chunk)
+
+        return b"".join(chunks)
+
 
 # ============================================================
 # CACHE DE RESULTADOS WEB
@@ -174,15 +331,14 @@ def _search_ddg_scraping(consulta: str) -> str:
     try:
         import urllib.request
         import urllib.parse
-        import re
 
         encoded = urllib.parse.quote(consulta)
         search_url = f"https://html.duckduckgo.com/html/?q={encoded}"
         req = urllib.request.Request(search_url, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            "User-Agent": WEB_USER_AGENT,
         })
-        with urllib.request.urlopen(req, timeout=WEB_TIMEOUT) as resp:
-            html = resp.read().decode("utf-8", errors="replace")
+        data = _safe_urlopen(search_url, timeout=WEB_DEFAULT_TIMEOUT)
+        html = data.decode("utf-8", errors="replace")
 
         link_pattern = r'<a rel="nofollow" class="result__a" href="([^"]+)">(.*?)</a>'
         snippet_pattern = r'<a class="result__snippet"[^>]*>(.*?)</a>'
@@ -209,6 +365,8 @@ def _search_ddg_scraping(consulta: str) -> str:
                 if snippet_text:
                     results.append(f"   {snippet_text[:150]}")
                 results.append(f"   {actual_url}")
+    except (ValueError, RuntimeError) as e:
+        logger.warning(f"DDG scraping bloqueado por seguridad: {e}")
     except Exception as e:
         logger.debug(f"DDG HTML scraping fallo: {e}")
 
@@ -224,23 +382,24 @@ def _search_ddg_instant(consulta: str) -> str:
 
         encoded = urllib.parse.quote(consulta)
         url = f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=WEB_TIMEOUT) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        data = _safe_urlopen(url, timeout=WEB_DEFAULT_TIMEOUT)
+        data_json = json.loads(data.decode("utf-8"))
 
-        if data.get("AbstractText"):
-            source_url = data.get("AbstractURL", "")
-            results.append(f"\U0001f4c4 Resumen: {data['AbstractText']}")
+        if data_json.get("AbstractText"):
+            source_url = data_json.get("AbstractURL", "")
+            results.append(f"\U0001f4c4 Resumen: {data_json['AbstractText']}")
             if source_url:
                 results.append(f"   Fuente: {source_url}")
-        if data.get("Answer"):
-            results.append(f"\U0001f4a1 Respuesta: {data['Answer']}")
-        for r in data.get("RelatedTopics", [])[:3]:
+        if data_json.get("Answer"):
+            results.append(f"\U0001f4a1 Respuesta: {data_json['Answer']}")
+        for r in data_json.get("RelatedTopics", [])[:3]:
             if isinstance(r, dict) and r.get("Text"):
                 topic_url = r.get("FirstURL", "")
                 results.append(f"- {r['Text']}")
                 if topic_url:
                     results.append(f"  Link: {topic_url}")
+    except (ValueError, RuntimeError) as e:
+        logger.warning(f"DDG Instant Answer bloqueado por seguridad: {e}")
     except Exception as e:
         logger.debug(f"DDG Instant Answer fallo: {e}")
 
@@ -258,18 +417,19 @@ def _search_wikipedia(consulta: str) -> str:
         for lang in ["es", "en"]:
             encoded = urllib.parse.quote(consulta)
             search_url = f"https://{lang}.wikipedia.org/w/api.php?action=opensearch&search={encoded}&limit=3&format=json"
-            req = urllib.request.Request(search_url, headers={"User-Agent": "AgentLocal/1.0"})
-            with urllib.request.urlopen(req, timeout=WEB_TIMEOUT) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+            data = _safe_urlopen(search_url, timeout=WEB_DEFAULT_TIMEOUT)
+            data_json = json.loads(data.decode("utf-8"))
 
-            if data and len(data) >= 4 and data[1]:
+            if data_json and len(data_json) >= 4 and data_json[1]:
                 results.append(f"\U0001f4da Wikipedia ({lang.upper()}):")
-                for i, title in enumerate(data[1][:3]):
-                    url = data[3][i] if i < len(data[3]) else ""
+                for i, title in enumerate(data_json[1][:3]):
+                    url = data_json[3][i] if i < len(data_json[3]) else ""
                     results.append(f"  {i+1}. {title}")
                     if url:
                         results.append(f"     {url}")
                 break  # Si encuentra en ES, no busca en EN
+    except (ValueError, RuntimeError) as e:
+        logger.warning(f"Wikipedia search bloqueado por seguridad: {e}")
     except Exception as e:
         logger.debug(f"Wikipedia search fallo: {e}")
 

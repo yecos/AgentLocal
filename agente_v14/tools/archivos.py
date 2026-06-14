@@ -5,15 +5,24 @@ AGENTE v14 - Herramientas de Archivos (Mejoradas)
 leer_archivo, escribir_archivo, listar_archivos, buscar_en_archivos
 v14.5: ripgrep como motor primario (10-100x mas rapido que grep).
        Extensiones ampliadas, exclusiones inteligentes.
+v14.8: Seguridad mejorada
+       - Proteccion contra path traversal con verificacion de path real
+       - Bloqueo de symlinks que escapan del directorio permitido
+       - Log de intentos bloqueados
+       - Validacion de tamano de archivo (max 50MB para lectura)
 =============================================================
 """
 
 import os
 import platform
+import logging
 
-from config import REPOS_DIR, MAX_FILE_READ, MAX_TOOL_OUTPUT, IS_WINDOWS
+from config import REPOS_DIR, MAX_FILE_READ, MAX_TOOL_OUTPUT, IS_WINDOWS, logger
 from utils.security import validate_path, sanitize_input
 from tools.sistema import ejecutar_comando
+
+# Max file size for reading (50MB)
+MAX_FILE_READ_SIZE = 50 * 1024 * 1024  # 50MB
 
 # Extensiones soportadas (ampliadas)
 SEARCH_EXTENSIONS = [
@@ -41,11 +50,73 @@ EXCLUDE_DIRS = [
 ]
 
 
+def _check_real_path(ruta: str, allowed_dirs: list) -> tuple[bool, str]:
+    """Check that the real (resolved) path stays within allowed directories.
+
+    This catches symlinks and other path manipulations that escape the
+    allowed directory after resolution.
+
+    Args:
+        ruta: File path to check
+        allowed_dirs: List of allowed base directories
+
+    Returns:
+        (is_safe, reason) tuple. If safe, reason is empty.
+    """
+    try:
+        real_path = os.path.realpath(ruta)
+
+        # Check if it's a symlink
+        if os.path.islink(ruta):
+            # Resolve the symlink target
+            link_target = os.path.realpath(ruta)
+            target_allowed = False
+            for allowed in allowed_dirs:
+                real_allowed = os.path.realpath(allowed)
+                if link_target.startswith(real_allowed + os.sep) or link_target == real_allowed:
+                    target_allowed = True
+                    break
+
+            if not target_allowed:
+                reason = (f"Symlink '{ruta}' apunta a '{link_target}' que esta fuera "
+                         f"de los directorios permitidos")
+                logger.warning(f"BLOCKED: {reason}")
+                return False, reason
+
+        # Also check the real path itself
+        real_allowed = False
+        for allowed in allowed_dirs:
+            real_allowed_dir = os.path.realpath(allowed)
+            if real_path.startswith(real_allowed_dir + os.sep) or real_path == real_allowed_dir:
+                real_allowed = True
+                break
+
+        if not real_allowed:
+            reason = (f"Ruta resuelta '{real_path}' esta fuera de los "
+                     f"directorios permitidos")
+            logger.warning(f"BLOCKED: {reason}")
+            return False, reason
+
+    except (OSError, ValueError) as e:
+        reason = f"Error al resolver ruta real: {e}"
+        logger.warning(f"BLOCKED: {reason}")
+        return False, reason
+
+    return True, ""
+
+
 def leer_archivo(ruta: str) -> str:
     """Lee el contenido de un archivo con validacion de path traversal."""
     validation = validate_path(ruta)
     if validation != ruta:
         return validation
+
+    allowed_dirs = [REPOS_DIR]
+    try:
+        from config import LEARN_DIR
+        allowed_dirs.append(LEARN_DIR)
+    except ImportError:
+        pass
 
     rutas_posibles = [ruta]
     if not os.path.isabs(ruta):
@@ -58,6 +129,24 @@ def leer_archivo(ruta: str) -> str:
 
     for r in rutas_posibles:
         if os.path.exists(r) and os.path.isfile(r):
+            # Check real path (catches symlinks escaping allowed dirs)
+            is_safe, reason = _check_real_path(r, allowed_dirs)
+            if not is_safe:
+                logger.warning(f"Path traversal blocked: {reason}")
+                return f"ACCESO DENEGADO: {reason}"
+
+            # Check file size before reading
+            try:
+                file_size = os.path.getsize(r)
+                if file_size > MAX_FILE_READ_SIZE:
+                    size_mb = file_size / (1024 * 1024)
+                    max_mb = MAX_FILE_READ_SIZE / (1024 * 1024)
+                    return (f"ERROR: El archivo es demasiado grande para leer "
+                           f"({size_mb:.1f}MB). Limite maximo: {max_mb:.0f}MB. "
+                           f"Usa comandos como 'head' o 'tail' para leer partes del archivo.")
+            except OSError as e:
+                return f"ERROR verificando tamano: {e}"
+
             try:
                 with open(r, "r", encoding="utf-8", errors="replace") as f:
                     contenido = f.read()
@@ -74,6 +163,20 @@ def escribir_archivo(ruta: str, contenido: str) -> str:
     validation = validate_path(ruta)
     if validation != ruta:
         return validation
+
+    allowed_dirs = [REPOS_DIR]
+    try:
+        from config import LEARN_DIR
+        allowed_dirs.append(LEARN_DIR)
+    except ImportError:
+        pass
+
+    # If file exists, check real path for symlink safety
+    if os.path.exists(ruta):
+        is_safe, reason = _check_real_path(ruta, allowed_dirs)
+        if not is_safe:
+            logger.warning(f"Path traversal blocked on write: {reason}")
+            return f"ACCESO DENEGADO: {reason}"
 
     try:
         dir_name = os.path.dirname(ruta)
@@ -96,6 +199,19 @@ def listar_archivos(ruta: str = None) -> str:
             ruta = alt
         else:
             return f"Directorio no existe: {ruta}"
+
+    allowed_dirs = [REPOS_DIR]
+    try:
+        from config import LEARN_DIR
+        allowed_dirs.append(LEARN_DIR)
+    except ImportError:
+        pass
+
+    # Check real path for directory too
+    is_safe, reason = _check_real_path(ruta, allowed_dirs)
+    if not is_safe:
+        return f"ACCESO DENEGADO: {reason}"
+
     try:
         items = os.listdir(ruta)
         carpetas = sorted([f for f in items if os.path.isdir(os.path.join(ruta, f))])

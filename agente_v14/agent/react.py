@@ -15,11 +15,14 @@ import json
 import logging
 from datetime import datetime
 
+import time as _time_module
+
 from config import (
     REPOS_DIR, MAX_REACT_ITERATIONS, MAX_CONVERSATION_MEMORY, logger,
-    USER_PROFILE_FILE
+    USER_PROFILE_FILE, CONTEXT_WINDOW_TOKENS, SUMMARIZATION_THRESHOLD,
 )
 from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS
+from tools.registry import get_tool_metadata
 from memory.triple_memory import TripleMemory, learning
 from llm import ollama
 from agent.schemas import SYSTEM_PROMPT, JSON_TOOLS_PROMPT
@@ -34,6 +37,10 @@ class ReactAgent:
     MAX_SAME_TOOL_CALLS = 5
     MAX_TOTAL_TOOL_CALLS = 12
 
+    # LLM Retry configuration for transient failures
+    LLM_MAX_RETRIES = 2
+    LLM_RETRY_DELAYS = [1, 2]  # Exponential backoff in seconds
+
     def __init__(self, memory=None):
         self.memory = memory or TripleMemory()
         self.thinking_log = []
@@ -42,6 +49,8 @@ class ReactAgent:
         self._models_cache = None  # Cache de modelos para no llamar API cada vez
         self._tool_call_counts = {}  # Rate limiting por herramienta
         self._total_tool_calls = 0   # Total de tool calls en esta conversacion
+        self._conversation_token_count = 0  # Approximate token count of conversation
+        self._summarization_triggered = False  # Track if summarization was triggered
 
     def _log(self, message, category="info"):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -1014,6 +1023,273 @@ class ReactAgent:
 
     # SECURITY: Parametros que NUNCA el LLM puede setear (solo la UI del usuario)
     _LLM_BLOCKED_PARAMS = {"confirmar_peligroso", "force", "skip_safety"}
+
+    def _validate_tool_call(self, tool_name, params):
+        """
+        Validate a tool call from the LLM before execution.
+        
+        Checks:
+        - Tool name exists in TOOL_FUNCTIONS
+        - Required parameters are present
+        - Parameter types match schema (where possible)
+        - Strips any _LLM_BLOCKED_PARAMS
+        
+        Returns:
+            (validated_params, error_msg_or_None)
+        """
+        # 1. Check tool name exists
+        if tool_name not in TOOL_FUNCTIONS:
+            return {}, f"Unknown tool: '{tool_name}'"
+
+        # 2. Ensure params is a dict
+        if not isinstance(params, dict):
+            params = {}
+
+        # 3. Strip blocked params
+        for blocked in self._LLM_BLOCKED_PARAMS:
+            if blocked in params:
+                self._log(f"SECURITY: Blocked param '{blocked}' stripped from {tool_name}", "warning")
+                del params[blocked]
+
+        # 4. Validate against schema if available
+        metadata = get_tool_metadata(tool_name)
+        if metadata and metadata.get("schema"):
+            schema = metadata["schema"]
+            # Extract the function parameters schema
+            func_schema = schema
+            if "type" in schema and "function" in schema:
+                func_schema = schema["function"]
+            
+            parameters = func_schema.get("parameters", {})
+            required = parameters.get("required", [])
+            properties = parameters.get("properties", {})
+
+            # 4a. Check required parameters
+            missing = []
+            for req_param in required:
+                if req_param not in params or params[req_param] is None:
+                    missing.append(req_param)
+            if missing:
+                return params, f"Missing required params for {tool_name}: {missing}"
+
+            # 4b. Basic type validation for provided params
+            type_map = {
+                "string": str,
+                "integer": int,
+                "number": (int, float),
+                "boolean": bool,
+                "array": list,
+                "object": dict,
+            }
+            for key, value in params.items():
+                if key in properties:
+                    expected_type = properties[key].get("type", "string")
+                    python_type = type_map.get(expected_type)
+                    if python_type and value is not None:
+                        # bool is subclass of int in Python, handle explicitly
+                        if expected_type == "boolean" and not isinstance(value, bool):
+                            # Try to convert string "true"/"false" to bool
+                            if isinstance(value, str):
+                                params[key] = value.lower() in ("true", "1", "yes")
+                            elif isinstance(value, int):
+                                params[key] = bool(value)
+                        elif expected_type == "integer" and isinstance(value, str):
+                            try:
+                                params[key] = int(value)
+                            except (ValueError, TypeError):
+                                pass
+                        elif expected_type == "number" and isinstance(value, str):
+                            try:
+                                params[key] = float(value)
+                            except (ValueError, TypeError):
+                                pass
+                        elif python_type and not isinstance(value, python_type):
+                            # Type mismatch but not auto-convertible - log warning
+                            logger.debug(
+                                f"Type mismatch for {tool_name}.{key}: "
+                                f"expected {expected_type}, got {type(value).__name__}"
+                            )
+
+        return params, None
+
+    def _call_llm_with_retry(self, messages, tools=None, stream=False):
+        """
+        Call LLM with retry logic for transient failures.
+        
+        If LLM returns empty/garbage response, retries up to LLM_MAX_RETRIES times
+        with exponential backoff.
+        
+        Args:
+            messages: List of message dicts for the LLM
+            tools: Optional tool schemas for function calling
+            stream: Whether to use streaming
+        
+        Returns:
+            LLM response (str or dict), or None if all retries fail
+        """
+        last_error = None
+        
+        for attempt in range(self.LLM_MAX_RETRIES + 1):
+            try:
+                if stream:
+                    # Streaming calls handled separately via _stream_llm_with_tools
+                    return ollama.generate_stream(messages, tools=tools)
+                
+                if tools:
+                    response = ollama.generate(messages, tools=tools)
+                else:
+                    response = ollama.generate_chat(messages)
+                
+                # Check for empty/garbage response
+                if response is None or response == "":
+                    last_error = "Empty response from LLM"
+                    if attempt < self.LLM_MAX_RETRIES:
+                        delay = self.LLM_RETRY_DELAYS[attempt]
+                        self._log(
+                            f"LLM returned empty response, retrying in {delay}s "
+                            f"(attempt {attempt + 1}/{self.LLM_MAX_RETRIES})",
+                            "warning"
+                        )
+                        _time_module.sleep(delay)
+                        continue
+                    return None
+                
+                # Check for garbage response (very short, no useful content)
+                if isinstance(response, str) and len(response.strip()) < 2:
+                    last_error = "Garbage response from LLM (too short)"
+                    if attempt < self.LLM_MAX_RETRIES:
+                        delay = self.LLM_RETRY_DELAYS[attempt]
+                        self._log(
+                            f"LLM returned garbage response, retrying in {delay}s "
+                            f"(attempt {attempt + 1}/{self.LLM_MAX_RETRIES})",
+                            "warning"
+                        )
+                        _time_module.sleep(delay)
+                        continue
+                
+                # Success - return response
+                return response
+                
+            except Exception as e:
+                last_error = str(e)
+                err_str = str(e).lower()
+                is_transient = any(
+                    keyword in err_str
+                    for keyword in ["timeout", "connection", "reset", "broken pipe", "refused"]
+                )
+                
+                if is_transient and attempt < self.LLM_MAX_RETRIES:
+                    delay = self.LLM_RETRY_DELAYS[attempt]
+                    self._log(
+                        f"Transient LLM error: {e}, retrying in {delay}s "
+                        f"(attempt {attempt + 1}/{self.LLM_MAX_RETRIES})",
+                        "warning"
+                    )
+                    _time_module.sleep(delay)
+                    continue
+                else:
+                    # Non-transient or out of retries
+                    raise
+        
+        # All retries exhausted
+        self._log(f"LLM all retries exhausted: {last_error}", "error")
+        return None
+
+    def _estimate_token_count(self, text):
+        """
+        Estimate token count for a text string.
+        Uses rough heuristic: ~4 chars per token for English, ~2-3 for code/other.
+        """
+        if not text:
+            return 0
+        # Rough estimation: 1 token ≈ 4 characters for mixed content
+        return max(1, len(text) // 4)
+
+    def _update_conversation_token_count(self, messages):
+        """
+        Update the approximate token count of the conversation history.
+        Also triggers summarization if approaching context limit.
+        """
+        total_tokens = 0
+        for msg in messages:
+            content = msg.get("content", "")
+            if content:
+                total_tokens += self._estimate_token_count(content)
+            # Tool call arguments also consume tokens
+            tool_calls = msg.get("tool_calls", [])
+            for tc in tool_calls:
+                args = tc.get("function", {}).get("arguments", {})
+                if isinstance(args, dict):
+                    total_tokens += self._estimate_token_count(str(args))
+        
+        self._conversation_token_count = total_tokens
+        
+        # Check if we need to trigger summarization
+        threshold = int(CONTEXT_WINDOW_TOKENS * SUMMARIZATION_THRESHOLD)
+        if total_tokens > threshold and not self._summarization_triggered:
+            self._log(
+                f"Conversation approaching context limit: ~{total_tokens} tokens "
+                f"(threshold: {threshold}). Triggering summarization.",
+                "warning"
+            )
+            self._summarization_triggered = True
+            self._summarize_conversation(messages)
+        
+        return total_tokens
+
+    def _summarize_conversation(self, messages):
+        """
+        Summarize conversation history to reduce token count.
+        Replaces older messages with a compact summary.
+        """
+        if len(messages) <= 4:
+            return  # Not enough to summarize
+        
+        # Keep system message (index 0) and last 3 messages
+        system_msg = messages[0]
+        recent = messages[-3:]
+        older = messages[1:-3]
+        
+        if not older:
+            return
+        
+        # Build summary of older messages
+        summary_parts = []
+        for msg in older:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")[:200]
+            if content:
+                summary_parts.append(f"{role}: {content}")
+        
+        if not summary_parts:
+            return
+        
+        summary_text = " ".join(summary_parts)
+        if len(summary_text) > 1500:
+            summary_text = summary_text[:1500] + "..."
+        
+        summary_message = {
+            "role": "user",
+            "content": (
+                f"[RESUMEN DE CONVERSACION ANTERIOR]:\n{summary_text}\n\n"
+                f"Esta es una version resumida de la conversacion anterior. "
+                f"Continua como si hubieras leido todo."
+            )
+        }
+        
+        # Replace messages with: system + summary + recent
+        messages.clear()
+        messages.append(system_msg)
+        messages.append(summary_message)
+        messages.extend(recent)
+        
+        # Recalculate token count
+        new_count = self._update_conversation_token_count(messages)
+        self._log(
+            f"Conversation summarized: reduced from ~{self._conversation_token_count} "
+            f"to ~{new_count} tokens",
+            "info"
+        )
 
     def _execute_tool(self, tool_name, params):
         """Ejecuta una herramienta por nombre."""

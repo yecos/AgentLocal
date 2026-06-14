@@ -8,16 +8,17 @@ El agente "piensa sobre su propio pensamiento":
 3. Deteccion de bucles: Estoy repitiendo lo mismo?
 4. Reflexion post-accion: Lo logre? Que aprendi?
 
-Se integra en el bucle ReAct como un "check" entre iteraciones.
+v14.8: Confidence calibration + strategy suggestion
 =============================================================
 """
 
 import json
+import os
 import logging
 from datetime import datetime
 from collections import Counter
 
-from config import MAX_REACT_ITERATIONS, logger
+from config import MAX_REACT_ITERATIONS, LEARN_DIR, logger
 
 
 class Metacognition:
@@ -30,6 +31,8 @@ class Metacognition:
     - loop_detection: detecta cuando el agente esta en espiral
     - plan_revision: sugiere cambiar de estrategia si no avanza
     - reflection: post-evaluacion de resultados
+    - calibration: adjusts confidence based on historical accuracy
+    - strategy_suggestion: recommends strategies based on task type
     """
 
     # Umbrales de configuracion
@@ -39,6 +42,16 @@ class Metacognition:
     STUCK_THRESHOLD = 4         # Iteraciones sin progreso = atascado
     MIN_IMPROVEMENT = 0.05      # Minima mejora esperada entre iteraciones
 
+    # Strategy types for task classification
+    STRATEGY_SEQUENTIAL = "sequential"   # Step-by-step tool execution
+    STRATEGY_EXPLORATORY = "exploratory"  # Search and gather info first
+    STRATEGY_DIRECT = "direct"           # Direct response, no tools
+    STRATEGY_DECOMPOSE = "decompose"     # Break into sub-tasks
+
+    # File path for persistent calibration data
+    _CALIBRATION_FILE = os.path.join(LEARN_DIR, "confidence_calibration.json")
+    _STRATEGY_FILE = os.path.join(LEARN_DIR, "strategy_performance.json")
+
     def __init__(self):
         self.confidence = 0.7  # Empezamos con confianza moderada
         self.iteration_history = []  # Historial de cada iteracion
@@ -47,6 +60,15 @@ class Metacognition:
         self.success_count = 0 # Exitos acumulados
         self.plan_changes = 0  # Veces que se cambio de plan
         self._last_evaluation = None
+        
+        # Confidence calibration: track how well our confidence predicts outcomes
+        self._calibration_data = self._load_calibration_data()
+        
+        # Strategy performance tracking
+        self._strategy_data = self._load_strategy_data()
+        
+        # Current task info for strategy suggestion
+        self._current_task_type = None
 
     def record_iteration(self, iteration, action_type, tool_name=None,
                          result_summary=None, had_error=False):
@@ -332,15 +354,301 @@ Si tu respuesta es incompleta, mencionalo y sugiere que puede hacer el usuario.
         self.success_count = 0
         self.plan_changes = 0
         self._last_evaluation = None
+        self._current_task_type = None
 
     def get_status(self):
         """Retorna el estado actual de la metacognicion (para debugging/UI)."""
         return {
             "confidence": round(self.confidence, 2),
+            "calibrated_confidence": round(self.get_calibrated_confidence(), 2),
+            "calibration_offset": round(self._calibration_data.get("offset", 0.0), 3),
             "errors": self.error_count,
             "successes": self.success_count,
             "plan_changes": self.plan_changes,
             "iterations": len(self.iteration_history),
             "tools_used": len(self.tool_history),
             "assessment": self._last_evaluation["assessment"] if self._last_evaluation else "pending",
+            "suggested_strategy": self._current_task_type or "auto",
         }
+
+    # ----------------------------------------------------------
+    # CONFIDENCE CALIBRATION
+    # ----------------------------------------------------------
+    def _load_calibration_data(self):
+        """Load historical calibration data from persistent storage."""
+        try:
+            if os.path.exists(self._CALIBRATION_FILE):
+                with open(self._CALIBRATION_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    # Validate expected keys
+                    if "records" in data and isinstance(data["records"], list):
+                        return data
+        except Exception as e:
+            logger.debug(f"Error loading calibration data: {e}")
+        return {"records": [], "offset": 0.0, "total_samples": 0}
+
+    def _save_calibration_data(self):
+        """Persist calibration data to disk."""
+        try:
+            with open(self._CALIBRATION_FILE, "w", encoding="utf-8") as f:
+                json.dump(self._calibration_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.debug(f"Error saving calibration data: {e}")
+
+    def record_calibration_sample(self, confidence_before, actual_success):
+        """
+        Record a calibration sample: confidence before action vs actual outcome.
+        
+        Args:
+            confidence_before: Confidence score (0-1) before the action was taken
+            actual_success: Whether the action actually succeeded (bool)
+        """
+        record = {
+            "confidence": round(confidence_before, 2),
+            "outcome": 1.0 if actual_success else 0.0,
+            "timestamp": datetime.now().isoformat(),
+        }
+        
+        # Keep last 200 samples for rolling calibration
+        records = self._calibration_data["records"]
+        records.append(record)
+        if len(records) > 200:
+            records[:] = records[-200:]
+        
+        # Recalculate calibration offset
+        self._recalculate_calibration_offset()
+        self._save_calibration_data()
+        
+        logger.info(
+            f"Calibration sample: confidence={confidence_before:.2f} "
+            f"outcome={'success' if actual_success else 'failure'} "
+            f"offset={self._calibration_data['offset']:.3f}"
+        )
+
+    def _recalculate_calibration_offset(self):
+        """
+        Recalculate the calibration offset based on historical data.
+        
+        The offset is the difference between predicted confidence and actual
+        success rate. If we're consistently overconfident (confidence > success),
+        offset is negative. If underconfident, offset is positive.
+        """
+        records = self._calibration_data["records"]
+        if not records:
+            return
+        
+        # Calculate average predicted confidence vs actual success rate
+        recent = records[-50:]  # Use last 50 samples
+        avg_confidence = sum(r["confidence"] for r in recent) / len(recent)
+        avg_outcome = sum(r["outcome"] for r in recent) / len(recent)
+        
+        # Offset to add to future confidence estimates
+        # If overconfident (avg_confidence > avg_outcome), offset is negative
+        offset = avg_outcome - avg_confidence
+        
+        # Weight new offset with existing (exponential moving average)
+        alpha = 0.3  # Learning rate
+        old_offset = self._calibration_data.get("offset", 0.0)
+        self._calibration_data["offset"] = round(old_offset * (1 - alpha) + offset * alpha, 4)
+        self._calibration_data["total_samples"] = len(records)
+
+    def get_calibrated_confidence(self):
+        """
+        Get the confidence score adjusted by historical calibration.
+        
+        Returns:
+            Calibrated confidence (0.0-1.0)
+        """
+        offset = self._calibration_data.get("offset", 0.0)
+        total_samples = self._calibration_data.get("total_samples", 0)
+        
+        if total_samples < 5:
+            # Not enough data for calibration - use raw confidence
+            return self.confidence
+        
+        calibrated = self.confidence + offset
+        return max(0.0, min(1.0, calibrated))
+
+    # ----------------------------------------------------------
+    # STRATEGY SUGGESTION
+    # ----------------------------------------------------------
+    def _load_strategy_data(self):
+        """Load historical strategy performance data."""
+        try:
+            if os.path.exists(self._STRATEGY_FILE):
+                with open(self._STRATEGY_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict) and "task_types" in data:
+                        return data
+        except Exception as e:
+            logger.debug(f"Error loading strategy data: {e}")
+        return {"task_types": {}}
+
+    def _save_strategy_data(self):
+        """Persist strategy performance data to disk."""
+        try:
+            with open(self._STRATEGY_FILE, "w", encoding="utf-8") as f:
+                json.dump(self._strategy_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.debug(f"Error saving strategy data: {e}")
+
+    def classify_task_type(self, user_message):
+        """
+        Classify the type of task based on the user message.
+        
+        Returns one of: "code", "search", "file_operation", "conversation", "system", "multi_step"
+        """
+        msg_lower = user_message.lower()
+        
+        # Code-related tasks
+        code_indicators = [
+            "codigo", "code", "programa", "script", "funcion", "function",
+            "genera", "crea un", "desarrolla", "implementa", "python", "javascript",
+            "html", "css", "api", "debug", "depura", "refactor", "compila"
+        ]
+        if any(ind in msg_lower for ind in code_indicators):
+            self._current_task_type = "code"
+            return "code"
+        
+        # Search/information tasks
+        search_indicators = [
+            "busca", "search", "encuentra", "informa", "que es", "what is",
+            "quien", "donde", "cuando", "como se", "investiga", "wikipedia",
+            "internet", "web"
+        ]
+        if any(ind in msg_lower for ind in search_indicators):
+            self._current_task_type = "search"
+            return "search"
+        
+        # File operations
+        file_indicators = [
+            "archivo", "file", "leer", "read", "escribir", "write",
+            "listar", "directorio", "carpeta", "folder", "documento",
+            "pdf", "docx", "xlsx", "csv"
+        ]
+        if any(ind in msg_lower for ind in file_indicators):
+            self._current_task_type = "file_operation"
+            return "file_operation"
+        
+        # System operations
+        system_indicators = [
+            "ejecuta", "command", "comando", "terminal", "consola",
+            "instala", "install", "proceso", "docker", "git", "servidor"
+        ]
+        if any(ind in msg_lower for ind in system_indicators):
+            self._current_task_type = "system"
+            return "system"
+        
+        # Multi-step tasks (longer, more complex requests)
+        if len(user_message) > 150 or "," in msg_lower and any(
+            w in msg_lower for w in [" y ", " y luego ", " entonces ", " despues ", " and ", " then "]
+        ):
+            self._current_task_type = "multi_step"
+            return "multi_step"
+        
+        # Default: conversation
+        self._current_task_type = "conversation"
+        return "conversation"
+
+    def suggest_strategy(self, user_message):
+        """
+        Suggest the best strategy for the given task.
+        
+        Based on task type and past performance of strategies, returns
+        the recommended approach.
+        
+        Args:
+            user_message: The user's message/task
+        
+        Returns:
+            dict with keys:
+                - strategy: one of STRATEGY_SEQUENTIAL, STRATEGY_EXPLORATORY, etc.
+                - reason: why this strategy is recommended
+                - confidence: confidence in this recommendation
+        """
+        task_type = self.classify_task_type(user_message)
+        
+        # Strategy mapping by task type
+        default_strategies = {
+            "code": (self.STRATEGY_SEQUENTIAL, "Code tasks benefit from step-by-step execution"),
+            "search": (self.STRATEGY_EXPLORATORY, "Search tasks need exploration before responding"),
+            "file_operation": (self.STRATEGY_SEQUENTIAL, "File operations are sequential by nature"),
+            "conversation": (self.STRATEGY_DIRECT, "Conversational tasks usually need direct responses"),
+            "system": (self.STRATEGY_SEQUENTIAL, "System commands should be executed step by step"),
+            "multi_step": (self.STRATEGY_DECOMPOSE, "Complex tasks benefit from decomposition"),
+        }
+        
+        # Check if we have historical performance data for this task type
+        task_perf = self._strategy_data["task_types"].get(task_type, {})
+        best_strategy = None
+        best_score = -1
+        
+        for strategy_name, perf in task_perf.items():
+            if isinstance(perf, dict) and perf.get("count", 0) >= 3:
+                # Only consider strategies with enough samples
+                score = perf.get("success_rate", 0)
+                if score > best_score:
+                    best_score = score
+                    best_strategy = strategy_name
+        
+        # Use historical best if available, otherwise use default
+        if best_strategy and best_score > 0.5:
+            reason = f"Historical data shows {best_strategy} works best for {task_type} tasks (success: {best_score:.0%})"
+            confidence = min(0.9, best_score)
+        else:
+            strategy, reason = default_strategies.get(
+                task_type, (self.STRATEGY_SEQUENTIAL, "Default sequential strategy")
+            )
+            best_strategy = strategy
+            confidence = 0.5
+        
+        return {
+            "strategy": best_strategy,
+            "task_type": task_type,
+            "reason": reason,
+            "confidence": confidence,
+        }
+
+    def record_strategy_outcome(self, task_type, strategy, success, iterations_used):
+        """
+        Record the outcome of using a particular strategy for a task type.
+        
+        Args:
+            task_type: The classified task type
+            strategy: The strategy that was used
+            success: Whether the task completed successfully
+            iterations_used: Number of iterations used
+        """
+        if task_type not in self._strategy_data["task_types"]:
+            self._strategy_data["task_types"][task_type] = {}
+        
+        task_strategies = self._strategy_data["task_types"][task_type]
+        
+        if strategy not in task_strategies:
+            task_strategies[strategy] = {
+                "count": 0,
+                "successes": 0,
+                "success_rate": 0.0,
+                "avg_iterations": 0.0,
+            }
+        
+        entry = task_strategies[strategy]
+        entry["count"] += 1
+        if success:
+            entry["successes"] += 1
+        
+        # Update rolling success rate
+        entry["success_rate"] = round(entry["successes"] / entry["count"], 3)
+        
+        # Update average iterations (exponential moving average)
+        alpha = 0.3
+        old_avg = entry.get("avg_iterations", iterations_used)
+        entry["avg_iterations"] = round(old_avg * (1 - alpha) + iterations_used * alpha, 2)
+        
+        self._save_strategy_data()
+        
+        logger.info(
+            f"Strategy outcome: task_type={task_type} strategy={strategy} "
+            f"success={success} iterations={iterations_used} "
+            f"success_rate={entry['success_rate']:.2f}"
+        )

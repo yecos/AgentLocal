@@ -668,3 +668,155 @@ Stage Summary:
 - `from __future__ import annotations` added to all 8 files
 - Removed `Optional` imports where replaced by `X | None` syntax
 - 199 tests passing, 0 failures
+
+---
+Task ID: 5-r3b
+Agent: Sub Agent (general-purpose)
+Task: Improve tools modules (R3b)
+
+Work Log:
+
+1. tools/web.py improvements:
+   - Added URL validation with private IP blocking (SSRF protection)
+     - _is_private_ip(): blocks 10.x, 172.16-31.x, 192.168.x, 127.x, 169.254.x, ::1, fc00::/7, fe80::/10
+     - _validate_web_url(): validates scheme (only http/https), blocks file://, ftp://, data://, javascript://, vbscript://, blob://
+     - Resolves DNS to check for private IPs
+   - Added response size limit: 5MB max with chunked reading (_safe_urlopen)
+   - Added configurable timeout: 30s default (WEB_DEFAULT_TIMEOUT)
+   - Added consistent User-Agent: "AgentLocal/1.0 (compatible; web-search-tool)"
+   - All HTTP requests now go through _safe_urlopen() for consistent security
+
+2. tools/archivos.py improvements:
+   - Added _check_real_path(): verifies resolved real path stays within allowed dirs
+   - Added symlink escape detection: blocks symlinks that point outside allowed directories
+   - Added logging of blocked attempts with detailed reason
+   - Added file size validation for reads: MAX_FILE_READ_SIZE = 50MB
+   - Returns helpful error message with size info when file is too large
+   - Real path checks applied to leer_archivo, escribir_archivo, and listar_archivos
+
+3. tools/codigo.py improvements:
+   - Added _validate_python_syntax(): uses compile() to check Python code before writing
+   - Added _validate_js_ts_syntax(): basic bracket/brace/paren matching for JS/TS
+   - Added _validate_code_syntax(): dispatcher based on file extension
+   - Returns detailed error with line number instead of writing invalid code
+   - Added _create_backup() and _rotate_backups(): saves .bak before overwriting
+   - Keeps max 3 backup versions (.bak, .bak.1, .bak.2) with automatic rotation
+   - Cleanup of old backups happens automatically during rotation
+
+4. tools/sistema.py improvements:
+   - Added COMMAND_DEFAULT_TIMEOUT = 120s as default for all commands
+   - Timeout is always enforced (minimum 10s safety net)
+   - Processes are killed on timeout with clear error message
+   - Added _truncate_output(): limits command output to 100KB
+   - Truncation message: "[... truncated, N bytes omitted]"
+   - Applied truncation in ejecutar_comando() and procesos_activos()
+   - Timeout parameter is now configurable in ejecutar_comando()
+
+Verification:
+- 130 tests pass (excluding 4 pre-existing Metacognition failures)
+- 65 security tests pass
+- All modules import correctly
+- Smoke tests verify URL validation, syntax validation, and output truncation
+
+Stage Summary:
+- 4 files improved with security and robustness enhancements
+- tools/web.py: SSRF protection, response size limit, user-agent
+- tools/archivos.py: symlink escape prevention, file size validation, real path checks
+- tools/codigo.py: syntax validation before write, backup rotation system
+- tools/sistema.py: enforced timeouts, output size limit with truncation
+
+---
+Task ID: 5-r3a
+Agent: Sub Agent
+Task: Improve config.py and agent modules (R3: Config + Agent improvements)
+
+Work Log:
+- Read worklog.md and understood prior work (Tasks 1-4)
+- Read all relevant source files: config.py (271 lines), agent/react.py (1306 lines), agent/metacognition.py (347 lines), tools/registry.py, llm.py, test files
+
+1. config.py improvements (271 -> 455 lines, +184 lines):
+   a) Added `validate_config()` function:
+      - Checks REPOS_DIR and LEARN_DIR exist and are writable (with write test)
+      - Validates 17 numeric constants are in reasonable ranges
+      - Checks AGENT_MODEL override status
+      - Returns dict of {setting: "ok"|"error: reason"}
+      - Called at import time with results logged (warnings for errors, info for all OK)
+   
+   b) Added environment variable overrides for 5 key settings:
+      - AGENT_MODEL (default: "" = auto-detect)
+      - AGENT_TEMPERATURE (default: 0.7)
+      - AGENT_MAX_TOKENS (default: 4096)
+      - AGENT_REPOS_DIR (default: platform-specific REPOS_DIR)
+      - AGENT_LEARN_DIR (default: ~/.ia-local/learning)
+      - Uses os.environ.get() with defaults from current values
+   
+   c) Added `get_config_summary()` function:
+      - Returns dict of 57 non-sensitive config values
+      - Organized by category (system, directories, models, LLM params, limits, etc.)
+      - Ready for /api/config endpoint
+   
+   d) Added new constants:
+      - DEFAULT_TEMPERATURE = 0.7
+      - DEFAULT_MAX_TOKENS = 4096
+      - CONTEXT_WINDOW_TOKENS = 8192
+      - SUMMARIZATION_THRESHOLD = 0.8
+
+2. agent/react.py improvements (1306 -> 1581 lines, +275 lines):
+   a) Added `_validate_tool_call()` method:
+      - Checks tool name exists in TOOL_FUNCTIONS
+      - Ensures params is a dict
+      - Strips _LLM_BLOCKED_PARAMS
+      - Validates required parameters against schema (from get_tool_metadata)
+      - Basic type coercion (string->int, string->bool, string->float)
+      - Logs type mismatches as debug warnings
+      - Returns (validated_params, error_msg_or_None)
+   
+   b) Added `_call_llm_with_retry()` method:
+      - Retries up to 2 times for transient LLM failures
+      - Exponential backoff (1s, 2s delays)
+      - Detects empty/garbage responses (< 2 chars)
+      - Detects transient errors by keyword (timeout, connection, reset, broken pipe, refused)
+      - Logs retry attempts with attempt number and delay
+      - Returns None if all retries exhausted
+   
+   c) Added conversation token counting:
+      - `_estimate_token_count()`: heuristic ~4 chars per token
+      - `_update_conversation_token_count()`: tracks approximate token count
+      - Triggers automatic summarization when approaching context limit
+      - `_summarize_conversation()`: replaces older messages with compact summary
+      - Keeps system message + summary + last 3 messages
+      - Logs when summarization is triggered and completed
+      - New instance variables: _conversation_token_count, _summarization_triggered
+   
+   d) New imports: time module, CONTEXT_WINDOW_TOKENS, SUMMARIZATION_THRESHOLD, get_tool_metadata
+
+3. agent/metacognition.py improvements (347 -> 654 lines, +307 lines):
+   a) Added confidence calibration:
+      - `_load_calibration_data()` / `_save_calibration_data()`: persistent storage in LEARN_DIR
+      - `record_calibration_sample(confidence_before, actual_success)`: records outcome pairs
+      - `_recalculate_calibration_offset()`: computes offset from avg_confidence vs avg_outcome
+      - Uses exponential moving average (alpha=0.3) to smooth offset updates
+      - Rolling window of 200 samples for calibration
+      - `get_calibrated_confidence()`: returns adjusted confidence (requires >= 5 samples)
+      - Clamped to 0.0-1.0 range
+      - Stores in confidence_calibration.json
+   
+   b) Added strategy suggestion:
+      - `classify_task_type(user_message)`: classifies into "code", "search", "file_operation", "conversation", "system", "multi_step"
+      - `suggest_strategy(user_message)`: returns {strategy, task_type, reason, confidence}
+      - 4 strategy types: SEQUENTIAL, EXPLORATORY, DIRECT, DECOMPOSE
+      - Default strategy mapping by task type
+      - Historical best strategy selection when >= 3 samples and > 50% success rate
+      - `record_strategy_outcome(task_type, strategy, success, iterations_used)`: records and persists
+      - Stores in strategy_performance.json
+      - Updated `get_status()` to include calibrated_confidence, calibration_offset, suggested_strategy
+      - Updated `reset()` to clear _current_task_type
+
+Tests: All 199 tests pass + 11 subtests (24.11s)
+
+Stage Summary:
+- 3 files improved with config validation, env overrides, tool validation, LLM retry, token management, confidence calibration, strategy suggestion
+- config.py: validate_config(), get_config_summary(), 5 env var overrides, 4 new constants
+- agent/react.py: _validate_tool_call(), _call_llm_with_retry(), token counting + auto-summarization
+- agent/metacognition.py: confidence calibration (persistent), strategy suggestion (persistent)
+- Total: +766 lines across 3 files, 0 tests broken

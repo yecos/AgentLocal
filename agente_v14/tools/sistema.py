@@ -3,6 +3,10 @@
 AGENTE v14 - Herramientas del Sistema
 =============================================================
 ejecutar_comando, procesos_activos, matar_proceso
+v14.8: Seguridad mejorada
+       - Timeout obligatorio para todos los comandos (default 120s)
+       - Kill del proceso si se excede el timeout
+       - Limite de tamano de salida (100KB) con truncado
 =============================================================
 """
 
@@ -10,11 +14,18 @@ import subprocess
 import shlex
 import platform
 import logging
+import signal
 
 from config import (
     REPOS_DIR, IS_WINDOWS, DEFAULT_TIMEOUT, LONG_TIMEOUT, MAX_TOOL_OUTPUT, logger
 )
 from utils.security import is_dangerous_command, sanitize_input
+
+# Max command output size (100KB)
+MAX_COMMAND_OUTPUT_SIZE = 100 * 1024  # 100KB
+
+# Default timeout for all commands (120 seconds)
+COMMAND_DEFAULT_TIMEOUT = 120
 
 # Procesos del sistema que NUNCA se deben matar (pueden causar inestabilidad)
 PROCESOS_CRITICOS = {
@@ -56,11 +67,38 @@ PROCESOS_CRITICOS = {
 }
 
 
-def ejecutar_comando(comando: str, cwd: str = None, confirmar_peligroso: bool = False) -> str:
+def _truncate_output(output: str, max_size: int = MAX_COMMAND_OUTPUT_SIZE) -> str:
+    """Truncate output if it exceeds max_size with informative message.
+
+    Args:
+        output: Command output string
+        max_size: Maximum size in bytes (default: 100KB)
+
+    Returns:
+        Truncated output with size info if truncated, or original output
+    """
+    output_bytes = output.encode('utf-8', errors='replace')
+    if len(output_bytes) <= max_size:
+        return output
+
+    truncated = output_bytes[:max_size].decode('utf-8', errors='replace')
+    omitted = len(output_bytes) - max_size
+    truncated += f"\n[... truncated, {omitted} bytes omitted]"
+    return truncated
+
+
+def ejecutar_comando(comando: str, cwd: str = None, confirmar_peligroso: bool = False,
+                     timeout: int = None) -> str:
     """Ejecuta un comando en la terminal con VALIDACION de seguridad.
     
     NOTA: confirmar_peligroso solo puede ser True si el USUARIO lo confirma
     directamente en la UI, NO via tool call del LLM.
+
+    Args:
+        comando: Command string to execute
+        cwd: Working directory
+        confirmar_peligroso: Whether user confirmed a dangerous command
+        timeout: Command timeout in seconds (default: COMMAND_DEFAULT_TIMEOUT)
     """
     # Sanitizar input del usuario
     comando = sanitize_input(comando)
@@ -74,10 +112,14 @@ def ejecutar_comando(comando: str, cwd: str = None, confirmar_peligroso: bool = 
         return (f"COMANDO PELIGROSO detectado.\n"
                 f"Si estas seguro, confirma desde la interfaz de usuario.")
 
-    # Timeout adaptativo
-    timeout = DEFAULT_TIMEOUT
-    if any(w in cmd_lower for w in ["install", "build", "compile", "docker", "pull"]):
-        timeout = LONG_TIMEOUT
+    # Timeout: use provided value, or adapt based on command type
+    if timeout is None:
+        timeout = COMMAND_DEFAULT_TIMEOUT
+        if any(w in cmd_lower for w in ["install", "build", "compile", "docker", "pull"]):
+            timeout = LONG_TIMEOUT
+
+    # Ensure timeout is always set (safety net)
+    timeout = max(timeout, 10)  # Minimum 10 seconds
 
     try:
         # SECURITY: Evitar shell=True siempre que sea posible
@@ -111,13 +153,17 @@ def ejecutar_comando(comando: str, cwd: str = None, confirmar_peligroso: bool = 
         if not output:
             output = "(sin salida)"
 
-        # Truncar si es muy largo
+        # Truncate if output exceeds 100KB
+        output = _truncate_output(output)
+
+        # Additional truncation for MAX_TOOL_OUTPUT (backward compat)
         if len(output) > MAX_TOOL_OUTPUT:
             output = output[:MAX_TOOL_OUTPUT] + "\n... [truncado]"
         return output
 
     except subprocess.TimeoutExpired:
-        return f"ERROR_TIMEOUT: Comando cancelado (>{timeout}s)"
+        return (f"ERROR_TIMEOUT: Comando cancelado (excedio {timeout}s). "
+                f"El proceso fue terminado automaticamente.")
     except Exception as e:
         return f"ERROR: {e}"
 
@@ -193,7 +239,7 @@ def _run_piped_command(comando: str, timeout: int, cwd: str) -> subprocess.Compl
             p.wait()
         return subprocess.CompletedProcess(
             args=comando, returncode=-1,
-            stdout="", stderr="TIMEOUT"
+            stdout="", stderr=f"TIMEOUT: Comando cancelado (excedio {timeout}s)"
         )
     
     # Esperar todos los procesos
@@ -222,6 +268,7 @@ def procesos_activos(filtro: str = "") -> str:
         else:
             cmd = 'ps aux'
     result = ejecutar_comando(cmd)
+    result = _truncate_output(result)
     if len(result) > MAX_TOOL_OUTPUT:
         result = result[:MAX_TOOL_OUTPUT] + "\n... [truncado]"
     return result

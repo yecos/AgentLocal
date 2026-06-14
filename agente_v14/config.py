@@ -4,6 +4,8 @@ AGENTE LOCAL AUTONOMO v14 - Configuracion Centralizada
 =============================================================
 Todas las constantes y configuracion en un solo lugar.
 Los demas modulos importan desde aqui.
+
+v14.8: validate_config(), env var overrides, get_config_summary()
 =============================================================
 """
 
@@ -42,11 +44,15 @@ IS_LINUX = platform.system() == "Linux"
 # DIRECTORIOS
 # ============================================================
 if IS_WINDOWS:
-    REPOS_DIR = os.path.join(os.path.expanduser("~"), "Documents")
+    _DEFAULT_REPOS_DIR = os.path.join(os.path.expanduser("~"), "Documents")
 else:
-    REPOS_DIR = os.path.join(os.path.expanduser("~"), "repos")
+    _DEFAULT_REPOS_DIR = os.path.join(os.path.expanduser("~"), "repos")
 
-LEARN_DIR = os.path.join(os.path.expanduser("~"), ".ia-local", "learning")
+_DEFAULT_LEARN_DIR = os.path.join(os.path.expanduser("~"), ".ia-local", "learning")
+
+# Environment variable overrides for directories
+REPOS_DIR = os.environ.get("AGENT_REPOS_DIR", _DEFAULT_REPOS_DIR)
+LEARN_DIR = os.environ.get("AGENT_LEARN_DIR", _DEFAULT_LEARN_DIR)
 
 os.makedirs(REPOS_DIR, exist_ok=True)
 os.makedirs(LEARN_DIR, exist_ok=True)
@@ -59,6 +65,9 @@ CHAT_MODEL_PATTERNS = ["llama3.1:8b", "qwen2.5-coder:7b", "qwen3:4b", "mistral:7
 CODE_MODEL_PATTERNS = ["qwen2.5:14b", "qwen2.5-coder:7b", "qwen3-coder", "qwen3:30b-a3b"]  # Modelos potentes para codigo
 EMBED_MODEL_CANDIDATES = ["nomic-embed-text", "mxbai-embed-large", "all-minilm"]
 
+# Environment variable override for model
+AGENT_MODEL = os.environ.get("AGENT_MODEL", "")  # Empty = auto-detect
+
 # ============================================================
 # LIMITES
 # ============================================================
@@ -70,6 +79,18 @@ MAX_TOOL_OUTPUT = 3000           # Max chars en salida de herramienta
 MAX_EMBED_CACHE = 200            # Maximo entradas en cache de embeddings
 MAX_VECTORS_IN_MEMORY = 500      # Maximo vectores cargados en RAM
 CONNECTION_CACHE_DAYS = 7        # Dias que se guarda la conexion Ollama cacheada
+
+# ============================================================
+# LLM PARAMETERS (with env var overrides)
+# ============================================================
+DEFAULT_TEMPERATURE = 0.7
+DEFAULT_MAX_TOKENS = 4096
+CONTEXT_WINDOW_TOKENS = 8192     # Approximate context window for token management
+SUMMARIZATION_THRESHOLD = 0.8   # Fraction of context window before summarizing
+
+# Environment variable overrides for LLM parameters
+AGENT_TEMPERATURE = float(os.environ.get("AGENT_TEMPERATURE", str(DEFAULT_TEMPERATURE)))
+AGENT_MAX_TOKENS = int(os.environ.get("AGENT_MAX_TOKENS", str(DEFAULT_MAX_TOKENS)))
 
 # ============================================================
 # RENDIMIENTO
@@ -268,3 +289,167 @@ CODE_EXT_MAP = {
     "markdown": ".md",
     "texto": ".txt",
 }
+
+
+# ============================================================
+# CONFIGURATION VALIDATION
+# ============================================================
+
+def validate_config() -> dict:
+    """
+    Validate all configuration settings and return a report.
+    
+    Checks:
+    - REPOS_DIR exists and is writable (creates if not)
+    - LEARN_DIR exists and is writable
+    - Numeric constants are in reasonable ranges
+    
+    Returns:
+        dict of {setting_name: "ok" | "error: reason"} for each check
+    """
+    results = {}
+    
+    # --- Directory checks ---
+    for dir_name, dir_path in [("REPOS_DIR", REPOS_DIR), ("LEARN_DIR", LEARN_DIR)]:
+        try:
+            os.makedirs(dir_path, exist_ok=True)
+            # Test write permission
+            test_file = os.path.join(dir_path, ".agent_write_test")
+            with open(test_file, "w") as f:
+                f.write("test")
+            os.remove(test_file)
+            results[dir_name] = "ok"
+        except OSError as e:
+            results[dir_name] = f"error: {e}"
+    
+    # --- Numeric range checks ---
+    numeric_checks = [
+        ("AGENT_TEMPERATURE", AGENT_TEMPERATURE, 0.0, 2.0),
+        ("AGENT_MAX_TOKENS", AGENT_MAX_TOKENS, 1, None),
+        ("MAX_REACT_ITERATIONS", MAX_REACT_ITERATIONS, 1, 50),
+        ("MAX_CONVERSATION_MEMORY", MAX_CONVERSATION_MEMORY, 1, 100),
+        ("MAX_CONTEXT_CHARS", MAX_CONTEXT_CHARS, 100, None),
+        ("MAX_FILE_READ", MAX_FILE_READ, 100, None),
+        ("MAX_TOOL_OUTPUT", MAX_TOOL_OUTPUT, 100, None),
+        ("DEFAULT_TIMEOUT", DEFAULT_TIMEOUT, 1, 3600),
+        ("LONG_TIMEOUT", LONG_TIMEOUT, 1, 3600),
+        ("LLM_TIMEOUT_SMALL", LLM_TIMEOUT_SMALL, 1, 600),
+        ("LLM_TIMEOUT_LARGE", LLM_TIMEOUT_LARGE, 1, 600),
+        ("EMBED_TIMEOUT", EMBED_TIMEOUT, 1, 120),
+        ("WEB_TIMEOUT", WEB_TIMEOUT, 1, 120),
+        ("CONTEXT_WINDOW_TOKENS", CONTEXT_WINDOW_TOKENS, 100, None),
+        ("SUMMARIZATION_THRESHOLD", SUMMARIZATION_THRESHOLD, 0.1, 1.0),
+        ("SUBAGENT_MAX_PARALLEL", SUBAGENT_MAX_PARALLEL, 1, 16),
+        ("SUBAGENT_DEFAULT_TIMEOUT", SUBAGENT_DEFAULT_TIMEOUT, 1, 600),
+    ]
+    
+    for name, value, min_val, max_val in numeric_checks:
+        if min_val is not None and value < min_val:
+            results[name] = f"error: {value} is below minimum {min_val}"
+        elif max_val is not None and value > max_val:
+            results[name] = f"error: {value} is above maximum {max_val}"
+        else:
+            results[name] = "ok"
+    
+    # --- Model override check ---
+    if AGENT_MODEL:
+        results["AGENT_MODEL"] = f"ok (override: {AGENT_MODEL})"
+    else:
+        results["AGENT_MODEL"] = "ok (auto-detect)"
+    
+    return results
+
+
+def get_config_summary() -> dict:
+    """
+    Return a dict of all non-sensitive config values.
+    Used by /api/config endpoint to expose current configuration.
+    
+    Returns:
+        dict of config_name -> config_value (excludes sensitive data)
+    """
+    return {
+        # System
+        "IS_WINDOWS": IS_WINDOWS,
+        "IS_MAC": IS_MAC,
+        "IS_LINUX": IS_LINUX,
+        # Directories
+        "REPOS_DIR": REPOS_DIR,
+        "LEARN_DIR": LEARN_DIR,
+        # Models
+        "PREFERRED_MODELS": PREFERRED_MODELS,
+        "CHAT_MODEL_PATTERNS": CHAT_MODEL_PATTERNS,
+        "CODE_MODEL_PATTERNS": CODE_MODEL_PATTERNS,
+        "EMBED_MODEL_CANDIDATES": EMBED_MODEL_CANDIDATES,
+        "AGENT_MODEL": AGENT_MODEL or "(auto-detect)",
+        # LLM Parameters
+        "AGENT_TEMPERATURE": AGENT_TEMPERATURE,
+        "AGENT_MAX_TOKENS": AGENT_MAX_TOKENS,
+        "CONTEXT_WINDOW_TOKENS": CONTEXT_WINDOW_TOKENS,
+        "SUMMARIZATION_THRESHOLD": SUMMARIZATION_THRESHOLD,
+        # Limits
+        "MAX_REACT_ITERATIONS": MAX_REACT_ITERATIONS,
+        "MAX_CONVERSATION_MEMORY": MAX_CONVERSATION_MEMORY,
+        "MAX_CONTEXT_CHARS": MAX_CONTEXT_CHARS,
+        "MAX_FILE_READ": MAX_FILE_READ,
+        "MAX_TOOL_OUTPUT": MAX_TOOL_OUTPUT,
+        "MAX_EMBED_CACHE": MAX_EMBED_CACHE,
+        "MAX_VECTORS_IN_MEMORY": MAX_VECTORS_IN_MEMORY,
+        # Performance
+        "SKIP_EMBED_ON_INTERACTION": SKIP_EMBED_ON_INTERACTION,
+        "USE_STREAMING": USE_STREAMING,
+        "GPU_CHECK_ON_START": GPU_CHECK_ON_START,
+        # Hybrid Search
+        "USE_HYBRID_SEARCH": USE_HYBRID_SEARCH,
+        "USE_RERANKER": USE_RERANKER,
+        "BM25_K1": BM25_K1,
+        "BM25_B": BM25_B,
+        "RRF_K": RRF_K,
+        "HYBRID_MIN_SIMILARITY": HYBRID_MIN_SIMILARITY,
+        # Web Search
+        "WEB_SEARCH_MAX_RETRIES": WEB_SEARCH_MAX_RETRIES,
+        "WEB_SEARCH_CACHE_TTL": WEB_SEARCH_CACHE_TTL,
+        "WEB_SEARCH_FALLBACK_WIKI": WEB_SEARCH_FALLBACK_WIKI,
+        # File Search
+        "USE_RIPGREP": USE_RIPGREP,
+        "FILE_SEARCH_MAX_DEPTH": FILE_SEARCH_MAX_DEPTH,
+        "FILE_SEARCH_MAX_RESULTS": FILE_SEARCH_MAX_RESULTS,
+        # Deep Thinking
+        "DEEP_THINKING_MODE": DEEP_THINKING_MODE,
+        "DEEP_THINKING_MIN_COMPLEXITY": DEEP_THINKING_MIN_COMPLEXITY,
+        "DEEP_THINKING_MAX_THINKING_TOKENS": DEEP_THINKING_MAX_THINKING_TOKENS,
+        "DEEP_THINKING_REFLECT_ON_ERRORS": DEEP_THINKING_REFLECT_ON_ERRORS,
+        "DEEP_THINKING_SHOW_THOUGHTS": DEEP_THINKING_SHOW_THOUGHTS,
+        # Sub-agents
+        "SUBAGENT_MAX_PARALLEL": SUBAGENT_MAX_PARALLEL,
+        "SUBAGENT_DEFAULT_TIMEOUT": SUBAGENT_DEFAULT_TIMEOUT,
+        "SUBAGENT_MAX_TASKS": SUBAGENT_MAX_TASKS,
+        "ORCHESTRATOR_MAX_SUBAGENTS": ORCHESTRATOR_MAX_SUBAGENTS,
+        "ORCHESTRATOR_AUTO_STRATEGY": ORCHESTRATOR_AUTO_STRATEGY,
+        # Timeouts
+        "DEFAULT_TIMEOUT": DEFAULT_TIMEOUT,
+        "LONG_TIMEOUT": LONG_TIMEOUT,
+        "LLM_TIMEOUT_SMALL": LLM_TIMEOUT_SMALL,
+        "LLM_TIMEOUT_LARGE": LLM_TIMEOUT_LARGE,
+        "EMBED_TIMEOUT": EMBED_TIMEOUT,
+        "WEB_TIMEOUT": WEB_TIMEOUT,
+        # Multimedia
+        "TTS_DEFAULT_VOICE": TTS_DEFAULT_VOICE,
+        "TTS_DEFAULT_SPEED": TTS_DEFAULT_SPEED,
+        "TTS_MAX_TEXT_LENGTH": TTS_MAX_TEXT_LENGTH,
+        "IMAGE_DEFAULT_SIZE": IMAGE_DEFAULT_SIZE,
+        "VIDEO_FRAME_INTERVAL": VIDEO_FRAME_INTERVAL,
+    }
+
+
+# ============================================================
+# AUTO-VALIDATE AT IMPORT TIME
+# ============================================================
+_validation_results = validate_config()
+_errors = [k for k, v in _validation_results.items() if v != "ok"]
+if _errors:
+    for _setting, _result in _validation_results.items():
+        if _result != "ok":
+            logger.warning(f"Config validation: {_setting} -> {_result}")
+else:
+    logger.info("Config validation: all settings OK")
