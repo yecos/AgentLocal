@@ -1160,22 +1160,46 @@ function MemoryViewerDialog({
   const [entries, setEntries] = useState<MemoryEntryItem[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [loading, setLoading] = useState(false);
+  const [filterType, setFilterType] = useState<string>("all");
+  const [expandedEntry, setExpandedEntry] = useState<string | null>(null);
+
+  const memoryTypes = ["all", "short_term", "long_term", "working", "episodic", "preference"];
 
   useEffect(() => {
     if (open) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setLoading(true);
-      fetch(`/api/memory?limit=100${searchQuery ? `&keyword=${encodeURIComponent(searchQuery)}` : ""}`)
+      const typeParam = filterType !== "all" ? `&type=${filterType}` : "";
+      fetch(`/api/memory?limit=100${searchQuery ? `&keyword=${encodeURIComponent(searchQuery)}` : ""}${typeParam}`)
         .then((res) => res.ok ? res.json() : { entries: [] })
         .then((data) => setEntries(data.entries || []))
         .catch(() => setEntries([]))
         .finally(() => setLoading(false));
     }
-  }, [open, searchQuery]);
+  }, [open, searchQuery, filterType]);
+
+  const deleteEntry = async (id: string) => {
+    try {
+      const res = await fetch(`/api/memory?id=${id}`, { method: "DELETE" });
+      if (res.ok) {
+        setEntries((prev) => prev.filter((e) => e.id !== id));
+        toast.success("Memory entry deleted");
+      }
+    } catch {
+      toast.error("Failed to delete entry");
+    }
+  };
+
+  const typeColor: Record<string, string> = {
+    short_term: "text-[#00d4ff] border-[rgba(0,212,255,0.3)]",
+    long_term: "text-[#ffd93d] border-[rgba(255,217,61,0.3)]",
+    working: "text-[#00ff88] border-[rgba(0,255,136,0.3)]",
+    episodic: "text-[#a855f7] border-[rgba(168,85,247,0.3)]",
+    preference: "text-[#ff8800] border-[rgba(255,136,0,0.3)]",
+  };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[560px] bg-[var(--zai-bg-subtle)] border-[var(--zai-border)] text-[var(--zai-text)] max-h-[85vh] flex flex-col" style={{ fontFamily: "inherit" }}>
+      <DialogContent className="sm:max-w-[600px] bg-[var(--zai-bg-subtle)] border-[var(--zai-border)] text-[var(--zai-text)] max-h-[85vh] flex flex-col" style={{ fontFamily: "inherit" }}>
         <DialogHeader>
           <DialogTitle className="text-[13px] tracking-[0.15em] text-[var(--zai-text)]">
             MEMORY ENTRIES
@@ -1184,33 +1208,50 @@ function MemoryViewerDialog({
             {entries.length} entries stored in agent memory
           </DialogDescription>
         </DialogHeader>
-        <div className="relative mt-2">
-          <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--zai-text-dim)]" />
-          <Input
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search memory..."
-            className="pl-8 h-8 text-[11px] bg-[var(--zai-bg)] border-[var(--zai-border)] text-[var(--zai-text)] placeholder:text-[var(--zai-text-dim)]"
+        <div className="flex gap-2 mt-2">
+          <div className="relative flex-1">
+            <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--zai-text-dim)]" />
+            <Input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search memory..."
+              className="pl-8 h-8 text-[11px] bg-[var(--zai-bg)] border-[var(--zai-border)] text-[var(--zai-text)] placeholder:text-[var(--zai-text-dim)]"
+              style={{ fontFamily: "inherit" }}
+            />
+          </div>
+          <select
+            value={filterType}
+            onChange={(e) => setFilterType(e.target.value)}
+            className="h-8 px-2 text-[10px] bg-[var(--zai-bg)] border border-[var(--zai-border)] text-[var(--zai-text)] outline-none cursor-pointer"
             style={{ fontFamily: "inherit" }}
-          />
+            aria-label="Filter by memory type"
+          >
+            {memoryTypes.map((t) => (
+              <option key={t} value={t} className="bg-[var(--zai-bg-subtle)]">
+                {t === "all" ? "All Types" : t.replace("_", " ").toUpperCase()}
+              </option>
+            ))}
+          </select>
         </div>
         <div className="flex-1 overflow-y-auto mt-3 space-y-1.5 min-h-0 max-h-[50vh]">
           {loading ? (
             <div className="text-[10px] text-[var(--zai-text-dim)] text-center py-4">Loading...</div>
           ) : entries.length === 0 ? (
-            <div className="text-[10px] text-[var(--zai-text-dim)] text-center py-4">No memory entries found</div>
+            <div className="text-[10px] text-[var(--zai-text-dim)] text-center py-4">
+              {searchQuery ? "No entries match your search" : "No memory entries found"}
+            </div>
           ) : (
             entries.map((entry) => (
               <div
                 key={entry.id}
-                className="px-3 py-2 border border-[var(--zai-border)] bg-[var(--zai-bg)]"
+                className="px-3 py-2 border border-[var(--zai-border)] bg-[var(--zai-bg)] hover:border-[var(--zai-border-accent)] transition-colors group"
               >
                 <div className="flex items-center gap-2 mb-1">
                   <Badge
                     variant="outline"
-                    className="text-[8px] px-1.5 py-0 h-4 border-[var(--zai-border-accent)] text-[var(--zai-accent)]"
+                    className={`text-[8px] px-1.5 py-0 h-4 ${typeColor[entry.type] || "border-[var(--zai-border)] text-[var(--zai-text-dim)]"}`}
                   >
-                    {entry.type}
+                    {entry.type.replace("_", " ").toUpperCase()}
                   </Badge>
                   {entry.category && (
                     <span className="text-[8px] text-[var(--zai-text-dim)]">{entry.category}</span>
@@ -1218,10 +1259,38 @@ function MemoryViewerDialog({
                   <span className="text-[8px] text-[var(--zai-text-dim)] ml-auto">
                     {Math.round(entry.confidence * 100)}%
                   </span>
+                  <button
+                    onClick={() => setExpandedEntry(expandedEntry === entry.id ? null : entry.id)}
+                    className="text-[8px] text-[var(--zai-text-dim)] hover:text-[var(--zai-accent)] transition-colors"
+                    aria-label={expandedEntry === entry.id ? "Collapse entry" : "Expand entry"}
+                  >
+                    {expandedEntry === entry.id ? "▲" : "▼"}
+                  </button>
+                  <button
+                    onClick={() => deleteEntry(entry.id)}
+                    className="text-[8px] text-[var(--zai-text-dim)] hover:text-[var(--zai-red)] transition-colors opacity-0 group-hover:opacity-100"
+                    aria-label="Delete memory entry"
+                  >
+                    <Trash2 size={9} />
+                  </button>
                 </div>
-                <div className="text-[10px] text-[var(--zai-text)] leading-[1.5] line-clamp-2">
+                <div className={`text-[10px] text-[var(--zai-text)] leading-[1.5] ${expandedEntry === entry.id ? "" : "line-clamp-2"}`}>
                   {entry.content}
                 </div>
+                {expandedEntry === entry.id && entry.context && (
+                  <div className="text-[9px] text-[var(--zai-text-dim)] mt-1 border-t border-[var(--zai-border)] pt-1">
+                    <span className="font-bold">Context:</span> {entry.context}
+                  </div>
+                )}
+                {expandedEntry === entry.id && entry.tags && (
+                  <div className="flex gap-1 mt-1 flex-wrap">
+                    {JSON.parse(entry.tags || "[]").map((tag: string, i: number) => (
+                      <span key={i} className="text-[8px] px-1 py-0.5 bg-[var(--zai-bg-elevated)] text-[var(--zai-text-dim)]">
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                )}
                 <div className="text-[8px] text-[var(--zai-text-dim)] mt-1">
                   {entry.source && <span>{entry.source} · </span>}
                   {formatDate(entry.createdAt)}
