@@ -827,24 +827,108 @@ def analyze_usage_gaps() -> dict:
     }
 
 
+def _analyze_feedback_patterns() -> dict:
+    """M9.2: Analyze user feedback to find tools/skills that need improvement.
+    
+    Reads the UserFeedbackTracker history and identifies:
+    - Tools with consistent negative feedback (thumbs down, low ratings)
+    - Categories of problems reported by users
+    - Specific feedback patterns that indicate systemic issues
+    
+    Returns:
+        Dict with:
+        - negative_tools: tools with high negative feedback ratio
+        - problem_categories: most common feedback problem categories
+        - recent_corrections: recent correction-type feedback for context
+    """
+    try:
+        from tools.user_feedback import UserFeedbackTracker
+        tracker = UserFeedbackTracker()
+        
+        # Get recent feedback history
+        history = tracker._history[-100:]  # Last 100 entries
+        
+        # Count negative feedback per tool
+        tool_feedback = {}
+        category_counts = {}
+        recent_corrections = []
+        
+        for entry in history:
+            fb_type = entry.get("type", "")
+            tool = entry.get("tool_name", "unknown")
+            category = entry.get("category", "general")
+            
+            if tool not in tool_feedback:
+                tool_feedback[tool] = {"positive": 0, "negative": 0, "total": 0}
+            
+            tool_feedback[tool]["total"] += 1
+            
+            if fb_type in ("thumbs_down", "correction"):
+                tool_feedback[tool]["negative"] += 1
+                category_counts[category] = category_counts.get(category, 0) + 1
+                
+                if fb_type == "correction" and entry.get("details"):
+                    recent_corrections.append({
+                        "tool": tool,
+                        "correction": entry["details"][:200],
+                        "category": category,
+                    })
+            elif fb_type in ("thumbs_up",):
+                tool_feedback[tool]["positive"] += 1
+            elif fb_type == "rating":
+                rating = entry.get("rating", 3)
+                if rating <= 2:
+                    tool_feedback[tool]["negative"] += 1
+                else:
+                    tool_feedback[tool]["positive"] += 1
+        
+        # Find tools with high negative ratio
+        negative_tools = []
+        for tool, counts in tool_feedback.items():
+            if counts["total"] >= 2:  # Need at least 2 feedback points
+                ratio = counts["negative"] / counts["total"]
+                if ratio > 0.4:  # >40% negative
+                    negative_tools.append({
+                        "tool": tool,
+                        "negative_ratio": ratio,
+                        "total_feedback": counts["total"],
+                    })
+        
+        negative_tools.sort(key=lambda x: x["negative_ratio"], reverse=True)
+        
+        return {
+            "negative_tools": negative_tools[:10],
+            "problem_categories": dict(sorted(category_counts.items(), key=lambda x: x[1], reverse=True)[:5]),
+            "recent_corrections": recent_corrections[-5:],
+        }
+    except Exception as e:
+        logger.debug(f"[AutoEvolve] Error analyzing feedback: {e}")
+        return {"negative_tools": [], "problem_categories": {}, "recent_corrections": []}
+
+
 def get_evolution_suggestions() -> list[dict]:
     """M9: Generate evolution suggestions based on usage and feedback.
     
     Combina datos de uso (analyze_usage_gaps) con el historial de
-    feedback para generar sugerencias de evolucion accionables:
+    feedback del usuario (M9.2) para generar sugerencias de evolucion
+    accionables:
     - Mejorar herramientas con alta tasa de error
+    - Mejorar herramientas con feedback negativo consistente
     - Considerar remover herramientas nunca usadas
+    - Ajustar comportamiento basado en correcciones del usuario
     
     Returns:
         Lista de dicts con sugerencias de evolucion, cada una con:
-        - type: "improve_tool" o "consider_removing"
+        - type: "improve_tool", "consider_removing", "fix_from_feedback"
         - tool: nombre de la herramienta
         - reason: razon de la sugerencia
         - priority: "high", "medium" o "low"
     """
     gaps = analyze_usage_gaps()
+    feedback_analysis = _analyze_feedback_patterns()
     suggestions = []
     
+    # From usage metrics: high error tools
     for tool_info in gaps["high_error_tools"]:
         suggestions.append({
             "type": "improve_tool",
@@ -853,6 +937,35 @@ def get_evolution_suggestions() -> list[dict]:
             "priority": "high" if tool_info["error_rate"] > 0.5 else "medium",
         })
     
+    # M9.2: From user feedback: tools with consistent negative feedback
+    for fb_tool in feedback_analysis["negative_tools"]:
+        # Check if already suggested from usage metrics
+        already_suggested = any(s["tool"] == fb_tool["tool"] for s in suggestions)
+        if not already_suggested:
+            suggestions.append({
+                "type": "fix_from_feedback",
+                "tool": fb_tool["tool"],
+                "reason": f"User negative feedback ratio: {fb_tool['negative_ratio']*100:.0f}% ({fb_tool['total_feedback']} reports)",
+                "priority": "high" if fb_tool["negative_ratio"] > 0.7 else "medium",
+            })
+        else:
+            # Boost priority if both metrics and feedback agree
+            for s in suggestions:
+                if s["tool"] == fb_tool["tool"]:
+                    s["reason"] += f" + negative feedback ({fb_tool['negative_ratio']*100:.0f}%)"
+                    if fb_tool["negative_ratio"] > 0.6:
+                        s["priority"] = "high"
+    
+    # M9.2: From user corrections: specific improvements
+    for correction in feedback_analysis["recent_corrections"]:
+        suggestions.append({
+            "type": "fix_from_feedback",
+            "tool": correction["tool"],
+            "reason": f"User correction: {correction['correction'][:100]}",
+            "priority": "medium",
+        })
+    
+    # Never-used tools: consider removing
     for tool_name in gaps["never_used_tools"][:5]:
         suggestions.append({
             "type": "consider_removing",
@@ -861,7 +974,16 @@ def get_evolution_suggestions() -> list[dict]:
             "priority": "low",
         })
     
-    return suggestions
+    # Deduplicate by tool+type
+    seen = set()
+    deduped = []
+    for s in suggestions:
+        key = (s["tool"], s["type"])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(s)
+    
+    return deduped
 
 
 # ============================================================

@@ -564,13 +564,21 @@ class TestEscalationStrategy:
         result = fresh_meta.get_escalation_strategy(1, 6)
         assert result is None
 
-    def test_change_tool_when_stuck(self, fresh_meta):
-        """Should suggest change_tool when stuck on same tool."""
+    def test_change_params_when_stuck_early(self, fresh_meta):
+        """M3.3 Level 1: Should suggest change_params when stuck on same tool early."""
         for i in range(3):
             fresh_meta.record_iteration(i, "tool_call", "same_tool", had_error=True)
         result = fresh_meta.get_escalation_strategy(3, 10)
         assert result is not None
-        assert result["strategy"] == "change_tool"
+        assert result["strategy"] == "change_params"
+
+    def test_alternative_tool_when_stuck_later(self, fresh_meta):
+        """M3.3 Level 2: Should suggest alternative_tool when stuck after iteration 3."""
+        for i in range(4):
+            fresh_meta.record_iteration(i, "tool_call", "same_tool", had_error=True)
+        result = fresh_meta.get_escalation_strategy(4, 10)
+        assert result is not None
+        assert result["strategy"] == "alternative_tool"
 
     def test_decompose_when_degrading(self, fresh_meta):
         """Should suggest decompose when degrading and past 60% iterations."""

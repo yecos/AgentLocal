@@ -442,6 +442,12 @@ Si tu respuesta es incompleta, mencionalo y sugiere que puede hacer el usuario.
         """
         M3.3: Retorna estrategia de escalada cuando el agente esta atascado.
 
+        4 niveles de escalada progresiva:
+          NIVEL 1 (iteration ~3, stuck): Cambiar parametros de la misma herramienta
+          NIVEL 2 (iteration ~4, stuck): Usar herramienta alternativa
+          NIVEL 3 (iteration ~5, stuck): Dividir la tarea en subtareas
+          NIVEL 4 (iteration ~6+, stuck): Pedir clarificacion al usuario
+
         Args:
             iteration: Iteracion actual
             max_iterations: Maximo de iteraciones permitidas
@@ -454,25 +460,36 @@ Si tu respuesta es incompleta, mencionalo y sugiere que puede hacer el usuario.
         if progress == "progressing":
             return None
 
-        if progress == "stuck_same_tool":
+        # NIVEL 1: Cambiar parametros (stuck pero temprano)
+        if progress == "stuck_same_tool" and iteration <= 3:
             return {
-                "strategy": "change_tool",
-                "reason": "Misma herramienta repetida sin exito",
-                "action": "Usa una herramienta alternativa"
+                "strategy": "change_params",
+                "reason": "Misma herramienta repetida sin exito, variar parametros",
+                "action": "Cambia los parametros de la herramienta actual (consulta, filtro, formato)"
             }
 
-        if progress == "degrading" and iteration >= max_iterations * 0.6:
+        # NIVEL 2: Usar herramienta alternativa (stuck despues de intento 1)
+        if progress == "stuck_same_tool" and iteration > 3:
+            return {
+                "strategy": "alternative_tool",
+                "reason": "Misma herramienta sigue fallando, cambiar a alternativa",
+                "action": "Usa una herramienta diferente que cumpla la misma funcion"
+            }
+
+        # NIVEL 3: Descomponer tarea (errores acumulados, >60% de iteraciones)
+        if progress in ("degrading", "declining") and iteration >= max_iterations * 0.6:
             return {
                 "strategy": "decompose",
-                "reason": "Errores acumulados, descomponer tarea",
-                "action": "Divide la tarea en subtareas mas simples"
+                "reason": "Errores acumulados, descomponer tarea en partes mas simples",
+                "action": "Divide la tarea en subtareas mas simples y ejecutalas una por una"
             }
 
-        if progress == "declining" and iteration >= max_iterations * 0.8:
+        # NIVEL 4: Pedir ayuda al usuario (ya intentaste todo, >80% de iteraciones)
+        if progress in ("degrading", "declining", "stuck_same_tool") and iteration >= max_iterations * 0.8:
             return {
                 "strategy": "ask_user",
-                "reason": "No se puede progresar automaticamente",
-                "action": "Pide clarificacion al usuario"
+                "reason": "No se puede progresar automaticamente despues de multiples intentos",
+                "action": "Pide clarificacion o ayuda al usuario explicando que se intento"
             }
 
         return None

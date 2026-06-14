@@ -239,6 +239,108 @@ class ReactAgent:
             self._log(f"Error en planificación automática: {e}", "planning")
             return None
 
+    # ----------------------------------------------------------
+    # C2: SKILL ROUTING INTELIGENTE
+    # ----------------------------------------------------------
+    def _resolve_best_tool(self, tool_name: str) -> str:
+        """
+        C2: Dado el nombre de una herramienta, retorna la mejor
+        alternativa disponible si la original no funciona.
+
+        Prioriza:
+        1. Si z-ai esta disponible, usar la herramienta original
+        2. Si no, usar fallback local equivalente
+        3. Si no hay fallback, intentar la original (puede dar error claro)
+
+        Args:
+            tool_name: Nombre de la herramienta solicitada
+
+        Returns:
+            Nombre de la mejor herramienta disponible
+        """
+        from tools.skill_errors import SKILL_FALLBACK_MAP
+
+        # Si la herramienta existe y no requiere z-ai, usarla directo
+        if tool_name in TOOL_FUNCTIONS:
+            # Verificar si es un skill que requiere z-ai
+            try:
+                from tools.skill_router import get_skill_router
+                router = get_skill_router()
+                if not router._requires_zai(tool_name):
+                    return tool_name
+            except Exception:
+                return tool_name  # Si no se puede verificar, intentar original
+
+            # Requiere z-ai: verificar si esta disponible
+            try:
+                from tools.skill_loader import is_zai_available
+                if is_zai_available():
+                    return tool_name  # z-ai disponible, usar original
+            except Exception:
+                pass
+
+        # Buscar fallback en SKILL_FALLBACK_MAP
+        fallback = SKILL_FALLBACK_MAP.get(tool_name)
+        if fallback and fallback in TOOL_FUNCTIONS:
+            self._log(f"Tool routing: {tool_name} -> {fallback} (fallback)", "routing")
+            return fallback
+
+        # Ultimo recurso: intentar la original
+        return tool_name
+
+    def _enhance_tool_params(self, tool_name: str, params: dict) -> dict:
+        """
+        C2: Enriquece los parametros de una herramienta con defaults
+        inteligentes y valores del pipeline de artifacts.
+
+        Aplica:
+        1. Smart defaults para herramientas comunes
+        2. Resolucion de referencias a artifacts del pipeline
+        3. Validacion de parametros requeridos
+
+        Args:
+            tool_name: Nombre de la herramienta
+            params: Parametros originales
+
+        Returns:
+            Parametros enriquecidos
+        """
+        enhanced = dict(params) if isinstance(params, dict) else {}
+
+        # Defaults inteligentes por herramienta
+        SMART_DEFAULTS = {
+            "buscar_web": {
+                "consulta": enhanced.get("consulta", ""),
+            },
+            "buscar_web_api": {
+                "num_resultados": enhanced.get("num_resultados", 5),
+            },
+            "crear_pdf": {
+                "ruta": enhanced.get("ruta", f"~/repos/output_{int(_time_module.time())}.pdf"),
+            },
+            "ejecutar_codigo": {
+                "language": enhanced.get("language", "python"),
+                "timeout": enhanced.get("timeout", 30),
+            },
+            "git_operacion": {
+                "operacion": enhanced.get("operacion", "status"),
+            },
+            "crear_grafico": {
+                "auto_tipo": enhanced.get("auto_tipo", True),
+            },
+        }
+
+        if tool_name in SMART_DEFAULTS:
+            for key, default in SMART_DEFAULTS[tool_name].items():
+                if key not in enhanced or enhanced[key] in (None, "", 0, False):
+                    enhanced[key] = default
+
+        # Resolver referencias a artifacts del pipeline
+        if hasattr(self, 'pipeline') and self.pipeline:
+            enhanced = self.pipeline.resolve_params(enhanced)
+
+        return enhanced
+
     def _get_max_iterations(self, user_message: str) -> int:
         """Determina el maximo de iteraciones segun complejidad de la tarea (M2.2)."""
         if not ADAPTIVE_ITERATIONS:
@@ -1297,6 +1399,15 @@ class ReactAgent:
         import time as _time
         tool_name = tc["name"]
         tool_params = tc["params"]
+
+        # C2: Resolve best available tool (z-ai -> local fallback)
+        resolved_name = self._resolve_best_tool(tool_name)
+        if resolved_name != tool_name:
+            self._log(f"C2 routing: {tool_name} -> {resolved_name}", "routing")
+            tool_name = resolved_name
+
+        # C2: Enhance params with smart defaults and pipeline artifacts
+        tool_params = self._enhance_tool_params(tool_name, tool_params)
 
         # M2.3: Check if this tool already failed with similar params
         if self._tool_failures.has_failed_with_similar_params(tool_name, tool_params):

@@ -14,6 +14,26 @@ v16.3: SkillError con sugerencias de recuperacion,
 from __future__ import annotations
 
 
+# ============================================================
+# C2: FALLBACK MAP — z-ai skills → local alternatives
+# ============================================================
+SKILL_FALLBACK_MAP: dict[str, str | None] = {
+    # Web search
+    "buscar_web_api": "buscar_web",
+    "leer_web_api": "resumir_url",
+    # Documents
+    "crear_documento": "crear_docx",
+    "crear_pdf": "crear_pdf",          # mismo nombre, diferente impl
+    "crear_presentacion": "crear_pptx",
+    "crear_hoja_calculo": "crear_xlsx",
+    # Multimedia
+    "texto_a_voz": None,               # No full local alternative
+    "generar_imagen": "buscar_imagen",  # No genera, pero busca
+    "analizar_imagen_api": "analizar_imagen",  # VLM local via Ollama
+    "navegar_web": "leer_web",         # No automatiza, pero lee
+}
+
+
 class SkillError(Exception):
     """Error tipado de un skill con sugerencias de recuperacion.
 
