@@ -6,6 +6,7 @@ Expone el agente ReAct completo (tools, memory, streaming)
 como API REST para la interfaz Next.js.
 
 Endpoints:
+- GET  /api/system      - Recursos del sistema (CPU, RAM, Disco, GPU reales)
 - GET  /api/status      - Estado del sistema
 - GET  /api/models      - Modelos disponibles
 - GET  /api/tools       - Lista de herramientas
@@ -345,6 +346,61 @@ class ModelSwitchRequest(BaseModel):
 # ============================================================
 # ENDPOINTS
 # ============================================================
+
+@app.get("/api/system")
+async def system_info(auth=Depends(verify_token)):
+    """Retorna informacion REAL de hardware: CPU, RAM, Disco, GPU.
+
+    Usa psutil para metricas reales y nvidia-smi para GPU/VRAM.
+    """
+    info = {
+        "cpu_percent": 0,
+        "ram_percent": 0,
+        "ram_total_gb": 0,
+        "ram_used_gb": 0,
+        "disk_percent": 0,
+        "disk_total_gb": 0,
+        "disk_used_gb": 0,
+        "gpu": None,
+    }
+    try:
+        import psutil
+        info["cpu_percent"] = psutil.cpu_percent(interval=0.5)
+        mem = psutil.virtual_memory()
+        info["ram_percent"] = mem.percent
+        info["ram_total_gb"] = round(mem.total / (1024**3), 1)
+        info["ram_used_gb"] = round(mem.used / (1024**3), 1)
+        disk = psutil.disk_usage("/")
+        info["disk_percent"] = disk.percent
+        info["disk_total_gb"] = round(disk.total / (1024**3), 1)
+        info["disk_used_gb"] = round(disk.used / (1024**3), 1)
+    except ImportError:
+        _bridge_logger.debug("psutil no instalado, metricas de sistema no disponibles")
+    except Exception as e:
+        _bridge_logger.debug(f"Error obteniendo metricas de sistema: {e}")
+
+    # GPU detection via nvidia-smi
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total,memory.used,memory.free,utilization.gpu", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            parts = result.stdout.strip().split(", ")
+            if len(parts) >= 5:
+                info["gpu"] = {
+                    "name": parts[0],
+                    "vram_total_mb": int(float(parts[1])),
+                    "vram_used_mb": int(float(parts[2])),
+                    "vram_free_mb": int(float(parts[3])),
+                    "gpu_utilization": int(float(parts[4])),
+                }
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError, OSError):
+        pass  # No NVIDIA GPU or nvidia-smi not available
+
+    return info
+
 
 @app.get("/api/health")
 async def health():
@@ -851,6 +907,94 @@ async def reset_conversation(auth=Depends(verify_token)):
             raise HTTPException(status_code=500, detail=f"Error reiniciando conversacion: {str(e)}")
 
 
+@app.get("/api/plan")
+async def plan_get(auth=Depends(verify_token)):
+    """Obtiene el plan de tarea activo (si existe)."""
+    if not AGENT_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Agente no disponible.")
+
+    # Check if there's an active plan in the agent
+    plan_info = {"active": False, "plan": None}
+    try:
+        agent = get_agent()
+        if hasattr(agent, '_active_plan') and agent._active_plan:
+            plan_info = {
+                "active": True,
+                "plan": agent._active_plan,
+            }
+    except Exception as e:
+        _bridge_logger.debug(f"Error getting plan: {e}")
+
+    return plan_info
+
+
+class PlanRequest(BaseModel):
+    goal: str
+    task_type: Optional[str] = None
+
+
+class PlanAdvanceRequest(BaseModel):
+    result: str = ""
+
+
+@app.post("/api/plan")
+async def plan_create(request: PlanRequest, auth=Depends(verify_token)):
+    """Crea un plan de tarea usando la herramienta planificar_tarea."""
+    if not AGENT_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Agente no disponible.")
+
+    try:
+        from tools import TOOL_FUNCTIONS
+        if "planificar_tarea" not in TOOL_FUNCTIONS:
+            raise HTTPException(status_code=404, detail="Herramienta planificar_tarea no disponible.")
+
+        result = TOOL_FUNCTIONS["planificar_tarea"](
+            objetivo=request.goal,
+            tipo_tarea=request.task_type or "general"
+        )
+        return {"success": True, "result": str(result)[:5000]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creando plan: {e}")
+
+
+@app.post("/api/plan/advance")
+async def plan_advance(request: PlanAdvanceRequest, auth=Depends(verify_token)):
+    """Avanza al siguiente paso del plan activo."""
+    if not AGENT_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Agente no disponible.")
+
+    try:
+        from tools import TOOL_FUNCTIONS
+        if "listar_tareas" not in TOOL_FUNCTIONS:
+            raise HTTPException(status_code=404, detail="Herramienta listar_tareas no disponible.")
+
+        result = TOOL_FUNCTIONS["listar_tareas"]()
+        return {"success": True, "result": str(result)[:5000]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error avanzando plan: {e}")
+
+
+# --- Cancel flag for agent cancellation (B7) ---
+_cancel_requested = False
+
+
+@app.post("/api/chat/cancel")
+async def cancel_chat(auth=Depends(verify_token)):
+    """Solicita la cancelacion del agente que esta corriendo.
+
+    El agente revisa esta bandera entre pasos del loop ReAct.
+    """
+    global _cancel_requested
+    if not _busy:
+        return {"status": "ok", "message": "No hay agente corriendo."}
+    _cancel_requested = True
+    return {"status": "ok", "message": "Cancelacion solicitada."}
+
+
 @app.get("/api/history")
 async def history(limit: int = 50, auth=Depends(verify_token)):
     """Historial de conversacion."""
@@ -881,12 +1025,17 @@ def _agent_runner(agent: ReactAgent, message: str, q: queue.Queue):
     """
     Corre agent.run_stream() en un thread separado.
     Pone cada evento en la queue para que el async generator lo consuma.
+    Revisa _cancel_requested entre eventos para soportar cancelacion (B7).
     """
-    global _busy
+    global _busy, _cancel_requested
     with _agent_lock:
         _busy = True
+        _cancel_requested = False
     try:
         for event in agent.run_stream(message):
+            if _cancel_requested:
+                q.put({"type": "error", "data": "Generacion cancelada por el usuario"})
+                break
             q.put(event)
         # Senal de fin
         q.put(None)
@@ -904,6 +1053,7 @@ def _agent_runner(agent: ReactAgent, message: str, q: queue.Queue):
     finally:
         with _agent_lock:
             _busy = False
+            _cancel_requested = False
 
 
 async def _stream_agent_threaded(agent: ReactAgent, message: str):

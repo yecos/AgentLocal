@@ -3,6 +3,16 @@ import { NextRequest } from "next/server";
 const BRIDGE_BASE = "http://localhost:8000";
 const OLLAMA_BASE = "http://localhost:11434";
 
+/** Build headers for bridge requests, including Authorization if BRIDGE_TOKEN is set (B6 fix) */
+function bridgeHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const token = process.env.BRIDGE_TOKEN;
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  return headers;
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -46,7 +56,7 @@ async function streamFromBridge(messages: Array<{role: string; content: string}>
   try {
     const bridgeResponse = await fetch(`${BRIDGE_BASE}/api/chat`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: bridgeHeaders(),
       body: JSON.stringify({
         message: lastUserMsg.content,
         model: model,

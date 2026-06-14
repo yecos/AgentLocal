@@ -8,10 +8,10 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ZAI — Agent Interface",
-  description: "Futuristic minimal-tech chat interface for local AI agents running on Ollama",
+  title: "AgentLocal — Agente IA Local",
+  description: "Interfaz de agente IA 100% local con Ollama. Sin nube, sin API keys. Procesamiento privado en tu máquina.",
   icons: {
-    icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
+    icon: "/favicon.svg",
   },
 };
 
@@ -21,7 +21,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="dark" suppressHydrationWarning>
+    <html lang="es" className="dark" suppressHydrationWarning>
       <body
         className={`${geistMono.variable} mono antialiased bg-[#000000] text-[#e0e0e0]`}
         style={{ fontFamily: "var(--font-geist-mono), 'JetBrains Mono', 'Fira Code', ui-monospace, monospace" }}

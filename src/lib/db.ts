@@ -10,4 +10,7 @@ export const db =
     log: ['query'],
   })
 
+// Also export as default for compatibility with routes that use `import prisma from '@/lib/db'`
+export default db
+
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = db

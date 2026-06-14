@@ -2,9 +2,21 @@ import { NextRequest, NextResponse } from "next/server";
 
 const BRIDGE_BASE = "http://localhost:8000";
 
+/** Build headers for bridge requests, including Authorization if BRIDGE_TOKEN is set (B6 fix) */
+function bridgeHeaders(jsonContentType = false): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (jsonContentType) headers["Content-Type"] = "application/json";
+  const token = process.env.BRIDGE_TOKEN;
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  return headers;
+}
+
 export async function GET() {
   try {
     const response = await fetch(`${BRIDGE_BASE}/api/plan`, {
+      headers: bridgeHeaders(),
       signal: AbortSignal.timeout(5000),
     });
     const data = await response.json();
@@ -25,7 +37,7 @@ export async function POST(request: NextRequest) {
     if (advance) {
       const response = await fetch(`${BRIDGE_BASE}/api/plan/advance`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: bridgeHeaders(true),
         body: JSON.stringify({ result: result || "" }),
         signal: AbortSignal.timeout(10000),
       });
@@ -42,7 +54,7 @@ export async function POST(request: NextRequest) {
 
     const response = await fetch(`${BRIDGE_BASE}/api/plan`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: bridgeHeaders(true),
       body: JSON.stringify({ goal, task_type: task_type || null }),
       signal: AbortSignal.timeout(10000),
     });

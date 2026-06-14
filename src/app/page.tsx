@@ -160,61 +160,74 @@ function ToolCallCard({ toolCall }: { toolCall: ToolCall }) {
   );
 }
 
-// ─── Hardware Stats Component ────────────────────────────────────────────────
+// ─── Hardware Stats Component (REAL data via /api/system) ──────────────────
+
+interface SystemInfo {
+  cpu_percent: number;
+  ram_percent: number;
+  ram_total_gb: number;
+  ram_used_gb: number;
+  disk_percent: number;
+  disk_total_gb: number;
+  disk_used_gb: number;
+  gpu: {
+    name: string;
+    vram_total_mb: number;
+    vram_used_mb: number;
+    vram_free_mb: number;
+    gpu_utilization: number;
+  } | null;
+}
 
 function HardwareStats() {
-  const [stats, setStats] = useState({ cpu: 0, mem: 0, disk: 0 });
-  const hasInitialized = useRef(false);
+  const [sysInfo, setSysInfo] = useState<SystemInfo | null>(null);
 
   useEffect(() => {
-    if (!hasInitialized.current) {
-      hasInitialized.current = true;
-    }
-
-    const interval = setInterval(() => {
-      setStats((prev) => {
-        const base =
-          prev.cpu === 0
-            ? {
-                cpu: 20 + Math.floor(Math.random() * 30),
-                mem: 40 + Math.floor(Math.random() * 20),
-                disk: 25 + Math.floor(Math.random() * 20),
-              }
-            : {
-                cpu: Math.max(
-                  5,
-                  Math.min(
-                    95,
-                    prev.cpu +
-                      (Math.random() > 0.5 ? 1 : -1) *
-                        Math.floor(Math.random() * 5)
-                  )
-                ),
-                mem: Math.max(
-                  30,
-                  Math.min(
-                    85,
-                    prev.mem +
-                      (Math.random() > 0.5 ? 1 : -1) *
-                        Math.floor(Math.random() * 3)
-                  )
-                ),
-                disk: prev.disk,
-              };
-        return base;
-      });
-    }, 100);
+    const fetchSystem = async () => {
+      try {
+        const res = await fetch("/api/system");
+        if (res.ok) {
+          const data = await res.json();
+          setSysInfo(data);
+        }
+      } catch {
+        // System info not available
+      }
+    };
+    fetchSystem();
+    const interval = setInterval(fetchSystem, 5000); // Refresh every 5s
     return () => clearInterval(interval);
   }, []);
+
+  const cpu = sysInfo?.cpu_percent ?? 0;
+  const mem = sysInfo?.ram_percent ?? 0;
+  const disk = sysInfo?.disk_percent ?? 0;
+  const gpu = sysInfo?.gpu;
 
   return (
     <div className="space-y-3">
       <div>
         <div className="flex justify-between items-center mb-1">
           <span className="text-[10px] text-[#505050]">GPU</span>
-          <span className="text-[11px] text-[#666666]">—</span>
+          <span className="text-[11px] text-[#666666]">
+            {gpu ? `${gpu.gpu_utilization}%` : sysInfo ? "—" : "..."}
+          </span>
         </div>
-        <div className="text-[9px] text-[#444444]">No GPU detected</div>
+        <div className="text-[9px] text-[#444444]">
+          {gpu
+            ? `${gpu.name} · ${gpu.vram_used_mb}/${gpu.vram_total_mb}MB VRAM`
+            : sysInfo
+            ? "No GPU detected"
+            : "Detecting..."}
+        </div>
+        {gpu && (
+          <div className="h-[3px] bg-[rgba(255,255,255,0.08)] overflow-hidden mt-1">
+            <div
+              className="h-full bg-[rgba(168,85,247,0.4)] transition-all duration-1000"
+              style={{ width: `${gpu.gpu_utilization}%` }}
+            />
+          </div>
+        )}
       </div>
       <div>
         <div className="flex justify-between items-center mb-1.5">
@@ -223,13 +236,13 @@ function HardwareStats() {
             <span className="text-[10px] text-[#505050]">CPU</span>
           </div>
           <span className="text-[10px] text-[#666666]">
-            {stats.cpu > 0 ? `${stats.cpu}%` : "—"}
+            {sysInfo ? `${cpu}%` : "..."}
           </span>
         </div>
         <div className="h-[3px] bg-[rgba(255,255,255,0.08)] overflow-hidden">
           <div
             className="h-full bg-[rgba(0,212,255,0.4)] transition-all duration-1000"
-            style={{ width: stats.cpu > 0 ? `${stats.cpu}%` : "0%" }}
+            style={{ width: sysInfo ? `${cpu}%` : "0%" }}
           />
         </div>
       </div>
@@ -240,13 +253,13 @@ function HardwareStats() {
             <span className="text-[10px] text-[#505050]">MEM</span>
           </div>
           <span className="text-[10px] text-[#666666]">
-            {stats.mem > 0 ? `${stats.mem}%` : "—"}
+            {sysInfo ? `${mem}% (${sysInfo.ram_used_gb}/${sysInfo.ram_total_gb}GB)` : "..."}
           </span>
         </div>
         <div className="h-[3px] bg-[rgba(255,255,255,0.08)] overflow-hidden">
           <div
             className="h-full bg-[rgba(0,255,136,0.35)] transition-all duration-1000"
-            style={{ width: stats.mem > 0 ? `${stats.mem}%` : "0%" }}
+            style={{ width: sysInfo ? `${mem}%` : "0%" }}
           />
         </div>
       </div>
@@ -257,13 +270,13 @@ function HardwareStats() {
             <span className="text-[10px] text-[#505050]">DISK</span>
           </div>
           <span className="text-[10px] text-[#666666]">
-            {stats.disk > 0 ? `${stats.disk}%` : "—"}
+            {sysInfo ? `${disk}% (${sysInfo.disk_used_gb}/${sysInfo.disk_total_gb}GB)` : "..."}
           </span>
         </div>
         <div className="h-[3px] bg-[rgba(255,255,255,0.08)] overflow-hidden">
           <div
             className="h-full bg-[rgba(255,217,61,0.35)] transition-all duration-1000"
-            style={{ width: stats.disk > 0 ? `${stats.disk}%` : "0%" }}
+            style={{ width: sysInfo ? `${disk}%` : "0%" }}
           />
         </div>
       </div>
@@ -508,13 +521,13 @@ function WelcomeScreen({
       {/* ASCII-art style logo */}
       <div className="text-[13px] leading-[1.4] text-[rgba(0,212,255,0.15)] tracking-[0.2em] font-bold">
         <div className="text-center">
-          ┏┓┏┓┏┳┓┏┓┏┓
+          ┏┳┓┏┓┏┓┏┓
         </div>
         <div className="text-center">
-          ┗┫┣ ┃ ┣┫┣
+          ┃ ┣ ┣┫┗┓
         </div>
         <div className="text-center">
-          ┗┛┗┛┻ ┗┛┗┛
+          ┻ ┗┛┗┛┗┛
         </div>
       </div>
       <div className="h-px w-20 bg-[rgba(0,212,255,0.2)]" />
@@ -522,7 +535,7 @@ function WelcomeScreen({
         Local AI agent interface.
         <br />
         <span className="text-[#333333]">
-          All processing runs on your machine via Ollama.
+          All processing runs on your machine via Ollama. 100% local, no cloud.
         </span>
       </div>
       <div className="flex items-center gap-4 mt-2">
@@ -566,7 +579,7 @@ function WelcomeScreen({
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
-export default function ZAIInterface() {
+export default function AgentLocalInterface() {
   // State
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -717,11 +730,14 @@ export default function ZAIInterface() {
 
   // ─── File Upload ────────────────────────────────────────────────────────
 
+  const fileObjectsRef = useRef<File[]>([]);
+
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
 
     const newFiles: UploadedFile[] = [];
+    const newFileObjects: File[] = [];
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       newFiles.push({
@@ -729,8 +745,10 @@ export default function ZAIInterface() {
         size: file.size,
         type: file.type,
       });
+      newFileObjects.push(file);
     }
     setUploadedFiles((prev) => [...prev, ...newFiles]);
+    fileObjectsRef.current = [...fileObjectsRef.current, ...newFileObjects];
 
     // Reset file input
     if (fileInputRef.current) {
@@ -740,16 +758,18 @@ export default function ZAIInterface() {
 
   const removeFile = (index: number) => {
     setUploadedFiles((prev) => prev.filter((_, i) => i !== index));
+    fileObjectsRef.current = fileObjectsRef.current.filter((_, i) => i !== index);
   };
 
   const uploadFiles = async (): Promise<string[]> => {
     if (uploadedFiles.length === 0) return [];
+    if (fileObjectsRef.current.length === 0) return uploadedFiles.map((f) => f.name);
 
     try {
       const formData = new FormData();
-      // We can't get the actual File objects back from state, so we skip
-      // actual upload if the files came from state. In a real implementation,
-      // we'd store File objects. For now, just return file names.
+      for (const file of fileObjectsRef.current) {
+        formData.append("files", file);
+      }
       const res = await fetch("/api/upload", {
         method: "POST",
         body: formData,
@@ -757,7 +777,8 @@ export default function ZAIInterface() {
 
       if (res.ok) {
         const data = await res.json();
-        return uploadedFiles.map((f) => f.name);
+        const names = (data.files || []).map((f: { name: string }) => f.name);
+        return names.length > 0 ? names : uploadedFiles.map((f) => f.name);
       }
     } catch {
       // Upload failed, still include file names in the message
@@ -810,12 +831,18 @@ export default function ZAIInterface() {
 
   // ─── Stop Generation ────────────────────────────────────────────────────
 
-  const stopGeneration = useCallback(() => {
+  const stopGeneration = useCallback(async () => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
     setIsLoading(false);
+    // Also request server-side cancellation (B7)
+    try {
+      await fetch("/api/chat/cancel", { method: "POST" });
+    } catch {
+      // Cancel request failed - client abort already sent
+    }
   }, []);
 
   // ─── Send Message ───────────────────────────────────────────────────────
@@ -1195,7 +1222,7 @@ export default function ZAIInterface() {
 
   // ─── Clear Chat ─────────────────────────────────────────────────────────
 
-  const clearChat = () => {
+  const clearChat = async () => {
     setMessages([]);
     setSessionStats({
       messageCount: 0,
@@ -1204,6 +1231,14 @@ export default function ZAIInterface() {
       totalTokens: 0,
     });
     responseTimesRef.current = [];
+    // Also clear agent memory via bridge (B2 fix)
+    if (useAgent) {
+      try {
+        await fetch("/api/memory/clear", { method: "POST" });
+      } catch {
+        // Bridge not available - local clear is sufficient
+      }
+    }
   };
 
   // ─── Render ─────────────────────────────────────────────────────────────
@@ -1222,7 +1257,7 @@ export default function ZAIInterface() {
           <div className="flex items-center gap-1.5">
             <div className="w-1.5 h-1.5 bg-[rgba(0,212,255,0.4)]" />
             <span className="text-[11px] tracking-[0.3em] text-[#e0e0e0] font-bold">
-              ZAI
+              AGENTLOCAL
             </span>
           </div>
           <span className="text-[10px] text-[#333333]">│</span>
@@ -1252,9 +1287,10 @@ export default function ZAIInterface() {
             }`}
             title={
               useAgent
-                ? "Full agent mode (ReAct + Tools)"
-                : "Simple chat mode (no tools)"
+                ? "Full agent mode (ReAct + Tools + Persistent Memory)"
+                : "Simple chat mode (no tools, no persistent memory)"
             }
+            aria-label="Toggle agent mode"
           >
             {useAgent ? "AGENT" : "CHAT"}
           </button>
@@ -1262,6 +1298,8 @@ export default function ZAIInterface() {
             <button
               onClick={clearChat}
               className="text-[10px] text-[#555555] hover:text-[#777777] transition-colors px-2 py-0.5 border border-[rgba(255,255,255,0.06)] hover:border-[rgba(255,255,255,0.1)]"
+              aria-label="Clear chat and memory"
+              title={useAgent ? "Clear chat view and agent memory" : "Clear chat view"}
             >
               CLEAR
             </button>
@@ -1353,6 +1391,7 @@ export default function ZAIInterface() {
                 onClick={() => fileInputRef.current?.click()}
                 className="pb-1 text-[#555555] hover:text-[rgba(0,212,255,0.6)] transition-colors duration-150 shrink-0"
                 title="Attach file"
+                aria-label="Attach file"
                 disabled={!status.connected}
               >
                 <Paperclip size={14} />
@@ -1376,6 +1415,7 @@ export default function ZAIInterface() {
                 title={
                   isRecording ? "Stop recording" : "Voice input"
                 }
+                aria-label={isRecording ? "Stop voice recording" : "Start voice input"}
                 disabled={!status.connected}
               >
                 {isRecording ? <MicOff size={14} /> : <Mic size={14} />}
@@ -1719,7 +1759,7 @@ export default function ZAIInterface() {
             {/* Footer */}
             <div className="pt-6">
               <div className="text-[8px] text-[#333333] text-center tracking-[0.4em] uppercase">
-                ZAI Agent Interface v0.2
+                AgentLocal v1.0
               </div>
             </div>
           </div>

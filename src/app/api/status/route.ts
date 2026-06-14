@@ -1,12 +1,22 @@
 import { NextResponse } from "next/server";
 
 const BRIDGE_BASE = "http://localhost:8000";
-const OLLAMA_BASE = "http://localhost:11434";
+
+/** Build headers for bridge requests, including Authorization if BRIDGE_TOKEN is set (B6 fix) */
+function bridgeHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const token = process.env.BRIDGE_TOKEN;
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  return headers;
+}
 
 export async function GET() {
   // Try bridge first (has agent status + Ollama status)
   try {
     const bridgeResponse = await fetch(`${BRIDGE_BASE}/api/status`, {
+      headers: bridgeHeaders(),
       signal: AbortSignal.timeout(3000),
     });
 
@@ -26,7 +36,7 @@ export async function GET() {
 
   // Direct Ollama check
   try {
-    const response = await fetch(`${OLLAMA_BASE}/api/tags`, {
+    const response = await fetch(`http://localhost:11434/api/tags`, {
       signal: AbortSignal.timeout(5000),
     });
 
