@@ -974,12 +974,12 @@ class ReactAgent:
             self._models_cache = ollama._fetch_available_models() or [ollama.model or "desconocido"]
         models = self._models_cache
 
-        system_content = SYSTEM_PROMPT.format(
-            so=os.name,
-            repos_dir=REPOS_DIR,
-            models=", ".join(models),
-            corrections="Ver correcciones abajo"
-        )
+        system_content = SYSTEM_PROMPT
+        # Usar replace en vez de .format() para evitar KeyError con llaves {} en el texto
+        system_content = system_content.replace("{so}", os.name)
+        system_content = system_content.replace("{repos_dir}", REPOS_DIR)
+        system_content = system_content.replace("{models}", ", ".join(models))
+        system_content = system_content.replace("{corrections}", "Ver correcciones abajo")
 
         # Perfil de usuario (personalizacion)
         user_profile = self._load_user_profile()
