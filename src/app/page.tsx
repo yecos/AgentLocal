@@ -43,6 +43,17 @@ import {
   Globe,
   Eye,
   WrenchIcon,
+  Folder,
+  File,
+  FileCode,
+  GitBranch,
+  GitCommit,
+  Terminal,
+  ListTodo,
+  ArrowUp,
+  ArrowDown,
+  RefreshCw,
+  Play,
 } from "lucide-react";
 import {
   Dialog,
@@ -74,6 +85,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -172,6 +184,30 @@ interface ConversationListItem {
   createdAt: string;
   updatedAt: string;
   _count?: { messages: number };
+}
+
+type PanelMode = "chat" | "files" | "git" | "terminal" | "tasks";
+
+interface FileEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size?: number;
+  modified?: string;
+}
+
+interface PendingConfirmation {
+  toolName: string;
+  arguments: Record<string, unknown>;
+  resolve: (allowed: boolean) => void;
+}
+
+interface KanbanTask {
+  id: string;
+  title: string;
+  status: string;
+  description?: string;
+  planId: string;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -1199,6 +1235,770 @@ function MemoryViewerDialog({
   );
 }
 
+// ─── File Explorer Panel ─────────────────────────────────────────────────────
+
+function FileExplorerPanel({ onExecuteTool }: { onExecuteTool: (toolName: string, args: Record<string, unknown>, skipConfirm?: boolean) => Promise<string> }) {
+  const [rootPath, setRootPath] = useState(".");
+  const [files, setFiles] = useState<FileEntry[]>([]);
+  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
+  const [previewContent, setPreviewContent] = useState<string | null>(null);
+  const [previewPath, setPreviewPath] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [dirCache, setDirCache] = useState<Record<string, FileEntry[]>>({});
+  const [breadcrumb, setBreadcrumb] = useState<string[]>(["."]);
+
+  const fetchDir = useCallback(async (dirPath: string) => {
+    try {
+      const result = await onExecuteTool("listar_archivos", { ruta: dirPath }, true);
+      const parsed = JSON.parse(result);
+      const entries: FileEntry[] = Array.isArray(parsed) ? parsed : parsed.archivos || parsed.files || parsed.entries || [];
+      return entries.map((e: any) => ({
+        name: e.name || e.nombre || e,
+        path: e.path || e.ruta || (dirPath === "." ? e.name || e.nombre || e : `${dirPath}/${e.name || e.nombre || e}`),
+        is_dir: e.is_dir ?? e.isDirectory ?? e.es_directorio ?? false,
+        size: e.size ?? e.tamano,
+        modified: e.modified ?? e.modificado,
+      })).sort((a: FileEntry, b: FileEntry) => {
+        if (a.is_dir && !b.is_dir) return -1;
+        if (!a.is_dir && b.is_dir) return 1;
+        return a.name.localeCompare(b.name);
+      });
+    } catch {
+      return null;
+    }
+  }, [onExecuteTool]);
+
+  const loadRoot = useCallback(async () => {
+    setLoading(true);
+    const entries = await fetchDir(rootPath);
+    if (entries) {
+      setFiles(entries);
+      setDirCache((prev) => ({ ...prev, [rootPath]: entries }));
+    }
+    setLoading(false);
+  }, [rootPath, fetchDir]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadRoot();
+  }, [loadRoot]);
+
+  const toggleDir = async (dirPath: string) => {
+    const newExpanded = new Set(expandedDirs);
+    if (newExpanded.has(dirPath)) {
+      newExpanded.delete(dirPath);
+    } else {
+      newExpanded.add(dirPath);
+      if (!dirCache[dirPath]) {
+        const entries = await fetchDir(dirPath);
+        if (entries) {
+          setDirCache((prev) => ({ ...prev, [dirPath]: entries }));
+        }
+      }
+    }
+    setExpandedDirs(newExpanded);
+  };
+
+  const openFile = async (filePath: string) => {
+    setPreviewPath(filePath);
+    setPreviewContent("Loading...");
+    try {
+      const result = await onExecuteTool("leer_archivo", { ruta: filePath }, true);
+      setPreviewContent(result);
+    } catch (err) {
+      setPreviewContent(`Error loading file: ${err}`);
+    }
+  };
+
+  const navigateTo = (index: number) => {
+    if (index === -1) {
+      setRootPath(".");
+      setBreadcrumb(["."]);
+    } else {
+      const newPath = breadcrumb.slice(0, index + 1).join("/");
+      setRootPath(newPath === "." ? "." : newPath);
+      setBreadcrumb(breadcrumb.slice(0, index + 1));
+    }
+    setExpandedDirs(new Set());
+    setDirCache({});
+    setPreviewContent(null);
+    setPreviewPath(null);
+  };
+
+  const openDirAsRoot = (dirPath: string) => {
+    setRootPath(dirPath);
+    const parts = dirPath.split("/").filter(Boolean);
+    setBreadcrumb(dirPath === "." ? ["."] : parts);
+    setExpandedDirs(new Set());
+    setDirCache({});
+    setPreviewContent(null);
+    setPreviewPath(null);
+  };
+
+  const renderTree = (entries: FileEntry[], depth: number = 0) => {
+    return entries.map((entry) => {
+      const isExpanded = expandedDirs.has(entry.path);
+      const indent = depth * 16;
+      return (
+        <div key={entry.path}>
+          <div
+            className={`flex items-center gap-1.5 px-2 py-1 hover:bg-[rgba(255,255,255,0.03)] cursor-pointer transition-colors ${
+              previewPath === entry.path ? "bg-[rgba(0,212,255,0.06)] border-l border-[rgba(0,212,255,0.3)]" : ""
+            }`}
+            style={{ paddingLeft: `${8 + indent}px` }}
+            onClick={() => {
+              if (entry.is_dir) {
+                toggleDir(entry.path);
+              } else {
+                openFile(entry.path);
+              }
+            }}
+            onDoubleClick={() => {
+              if (entry.is_dir) {
+                openDirAsRoot(entry.path);
+              }
+            }}
+          >
+            {entry.is_dir ? (
+              <>
+                {isExpanded ? (
+                  <ChevronDown size={11} className="text-[#666] shrink-0" />
+                ) : (
+                  <ChevronRight size={11} className="text-[#666] shrink-0" />
+                )}
+                <Folder size={12} className="text-[#ffd93d] shrink-0" />
+              </>
+            ) : (
+              <>
+                <span className="w-[11px] shrink-0" />
+                {entry.name.endsWith(".ts") || entry.name.endsWith(".tsx") || entry.name.endsWith(".js") || entry.name.endsWith(".py") ? (
+                  <FileCode size={12} className="text-[#00d4ff] shrink-0" />
+                ) : (
+                  <File size={12} className="text-[#888] shrink-0" />
+                )}
+              </>
+            )}
+            <span className="text-[11px] text-[#ccc] truncate">{entry.name}</span>
+            {!entry.is_dir && entry.size !== undefined && (
+              <span className="text-[9px] text-[#555] ml-auto shrink-0">{formatBytes(entry.size)}</span>
+            )}
+          </div>
+          {entry.is_dir && isExpanded && dirCache[entry.path] && (
+            <div>{renderTree(dirCache[entry.path], depth + 1)}</div>
+          )}
+        </div>
+      );
+    });
+  };
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--zai-border)]">
+        <FolderOpen size={13} className="text-[var(--zai-accent)]" />
+        <span className="text-[11px] tracking-[0.15em] text-[var(--zai-text)] uppercase font-bold">FILES</span>
+        <div className="flex-1" />
+        <button onClick={loadRoot} className="p-1 text-[var(--zai-text-dim)] hover:text-[var(--zai-accent)] transition-colors" title="Refresh">
+          <RefreshCw size={12} />
+        </button>
+      </div>
+
+      {/* Breadcrumb */}
+      <div className="flex items-center gap-1 px-4 py-1.5 border-b border-[rgba(255,255,255,0.04)] overflow-x-auto">
+        {breadcrumb.map((part, i) => (
+          <div key={i} className="flex items-center gap-1 shrink-0">
+            {i > 0 && <ChevronRight size={9} className="text-[#444]" />}
+            <button
+              onClick={() => navigateTo(i)}
+              className={`text-[10px] hover:text-[var(--zai-accent)] transition-colors ${
+                i === breadcrumb.length - 1 ? "text-[var(--zai-text)]" : "text-[var(--zai-text-dim)]"
+              }`}
+            >
+              {part}
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {/* Content */}
+      <div className="flex flex-1 min-h-0">
+        {/* Tree */}
+        <div className="flex-1 overflow-y-auto min-w-0 border-r border-[rgba(255,255,255,0.04)]">
+          {loading ? (
+            <div className="flex items-center justify-center h-full">
+              <span className="text-[11px] text-[var(--zai-text-dim)] animate-pulse">Loading files...</span>
+            </div>
+          ) : files.length === 0 ? (
+            <div className="flex items-center justify-center h-full">
+              <span className="text-[11px] text-[var(--zai-text-dim)]">No files found</span>
+            </div>
+          ) : (
+            <div className="py-1">{renderTree(files)}</div>
+          )}
+        </div>
+
+        {/* Preview */}
+        {previewContent !== null && (
+          <div className="w-1/2 flex flex-col min-w-0">
+            <div className="flex items-center gap-2 px-3 py-1.5 border-b border-[rgba(255,255,255,0.04)]">
+              <FileCode size={10} className="text-[var(--zai-accent)]" />
+              <span className="text-[10px] text-[var(--zai-text-dim)] truncate">{previewPath}</span>
+              <button onClick={() => { setPreviewContent(null); setPreviewPath(null); }} className="ml-auto text-[var(--zai-text-dim)] hover:text-[var(--zai-text)] transition-colors">
+                <X size={10} />
+              </button>
+            </div>
+            <pre className="flex-1 overflow-auto p-3 text-[11px] text-[#aaa] leading-[1.6] whitespace-pre-wrap font-mono">
+              {previewContent}
+            </pre>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Git Panel ───────────────────────────────────────────────────────────────
+
+function GitPanel({ onExecuteTool }: { onExecuteTool: (toolName: string, args: Record<string, unknown>, skipConfirm?: boolean) => Promise<string> }) {
+  const [output, setOutput] = useState<string>("");
+  const [loading, setLoading] = useState(false);
+  const [activeOp, setActiveOp] = useState<string | null>(null);
+  const [branch, setBranch] = useState<string>("");
+  const [statusCounts, setStatusCounts] = useState({ modified: 0, staged: 0, untracked: 0 });
+
+  const runGitOp = async (operation: string, args?: Record<string, unknown>) => {
+    setLoading(true);
+    setActiveOp(operation);
+    setOutput((prev) => prev + `\n$ git ${operation}\n`);
+    try {
+      const result = await onExecuteTool("git_operacion", { operacion: operation, ...args });
+      const parsed = JSON.parse(result);
+      const text = typeof parsed === "string" ? parsed : parsed.output || parsed.result || parsed.message || JSON.stringify(parsed, null, 2);
+      setOutput((prev) => prev + text + "\n");
+
+      // Parse status info
+      if (operation === "status") {
+        const statusText = typeof parsed === "string" ? parsed : JSON.stringify(parsed);
+        const modified = (statusText.match(/modified/gi) || []).length;
+        const staged = (statusText.match(/new file/gi) || []).length;
+        const untracked = (statusText.match(/untracked/gi) || []).length;
+        setStatusCounts({ modified, staged, untracked });
+      }
+      if (operation === "branch" || operation === "status") {
+        const branchMatch = text.match(/On branch (\S+)/);
+        if (branchMatch) setBranch(branchMatch[1]);
+        const branchStarMatch = text.match(/\* (\S+)/);
+        if (branchStarMatch && !branchMatch) setBranch(branchStarMatch[1]);
+      }
+    } catch (err) {
+      setOutput((prev) => prev + `Error: ${err}\n`);
+    }
+    setLoading(false);
+    setActiveOp(null);
+  };
+
+  const clearOutput = () => setOutput("");
+
+  useEffect(() => {
+    runGitOp("status");
+  }, []);
+
+  const gitButtons = [
+    { op: "status", label: "STATUS", icon: <Eye size={11} /> },
+    { op: "log", label: "LOG", icon: <GitCommit size={11} /> },
+    { op: "diff", label: "DIFF", icon: <FileCode size={11} /> },
+    { op: "branch", label: "BRANCH", icon: <GitBranch size={11} /> },
+    { op: "pull", label: "PULL", icon: <ArrowDown size={11} /> },
+    { op: "push", label: "PUSH", icon: <ArrowUp size={11} /> },
+  ];
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--zai-border)]">
+        <GitBranch size={13} className="text-[var(--zai-accent)]" />
+        <span className="text-[11px] tracking-[0.15em] text-[var(--zai-text)] uppercase font-bold">GIT</span>
+        {branch && (
+          <>
+            <span className="text-[10px] text-[#444]">│</span>
+            <span className="text-[10px] text-[var(--zai-accent)]">{branch}</span>
+          </>
+        )}
+        <div className="flex-1" />
+        {statusCounts.modified > 0 && <Badge variant="outline" className="text-[8px] px-1.5 h-4 border-[#ffd93d] text-[#ffd93d]">{statusCounts.modified}M</Badge>}
+        {statusCounts.staged > 0 && <Badge variant="outline" className="text-[8px] px-1.5 h-4 border-[#00ff88] text-[#00ff88]">{statusCounts.staged}S</Badge>}
+        {statusCounts.untracked > 0 && <Badge variant="outline" className="text-[8px] px-1.5 h-4 border-[#888] text-[#888]">{statusCounts.untracked}U</Badge>}
+        <button onClick={clearOutput} className="p-1 text-[var(--zai-text-dim)] hover:text-[var(--zai-text)] transition-colors" title="Clear output">
+          <Trash2 size={11} />
+        </button>
+      </div>
+
+      {/* Buttons */}
+      <div className="flex items-center gap-1.5 px-4 py-2 border-b border-[rgba(255,255,255,0.04)] overflow-x-auto">
+        {gitButtons.map((btn) => (
+          <button
+            key={btn.op}
+            onClick={() => runGitOp(btn.op)}
+            disabled={loading}
+            className={`flex items-center gap-1.5 px-2.5 py-1 border text-[9px] tracking-wider transition-colors shrink-0 ${
+              activeOp === btn.op
+                ? "border-[var(--zai-border-accent)] bg-[var(--zai-accent-dim)] text-[var(--zai-accent)]"
+                : "border-[var(--zai-border)] text-[var(--zai-text-dim)] hover:border-[var(--zai-border)] hover:text-[var(--zai-text)] hover:bg-[rgba(255,255,255,0.03)]"
+            } disabled:opacity-30`}
+          >
+            {btn.icon}
+            {btn.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Output */}
+      <div className="flex-1 overflow-auto p-4">
+        <pre className="text-[11px] text-[#aaa] leading-[1.6] whitespace-pre-wrap font-mono">{output || "Run a git command to see output..."}</pre>
+        {loading && (
+          <span className="inline-block w-[7px] h-[14px] bg-[rgba(0,212,255,0.5)] cursor-blink" />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Terminal Panel ──────────────────────────────────────────────────────────
+
+function TerminalPanel({ onExecuteTool }: { onExecuteTool: (toolName: string, args: Record<string, unknown>, skipConfirm?: boolean) => Promise<string> }) {
+  const [cmdInput, setCmdInput] = useState("");
+  const [history, setHistory] = useState<string[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+  const [output, setOutput] = useState<string[]>(["$ Terminal ready. Type a command and press Enter."]);
+  const [loading, setLoading] = useState(false);
+  const outputEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    outputEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [output]);
+
+  const executeCommand = async () => {
+    const cmd = cmdInput.trim();
+    if (!cmd || loading) return;
+
+    setHistory((prev) => [...prev, cmd]);
+    setHistoryIndex(-1);
+    setCmdInput("");
+    setOutput((prev) => [...prev, `$ ${cmd}`]);
+    setLoading(true);
+
+    try {
+      const result = await onExecuteTool("ejecutar_bash", { comando: cmd });
+      const parsed = JSON.parse(result);
+      const text = typeof parsed === "string" ? parsed : parsed.output || parsed.result || parsed.stdout || JSON.stringify(parsed, null, 2);
+      const lines = text.split("\n");
+      setOutput((prev) => [...prev, ...lines]);
+    } catch (err) {
+      setOutput((prev) => [...prev, `Error: ${err}`]);
+    }
+    setLoading(false);
+    inputRef.current?.focus();
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      executeCommand();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (history.length > 0) {
+        const newIndex = historyIndex === -1 ? history.length - 1 : Math.max(0, historyIndex - 1);
+        setHistoryIndex(newIndex);
+        setCmdInput(history[newIndex]);
+      }
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (historyIndex >= 0) {
+        const newIndex = historyIndex + 1;
+        if (newIndex >= history.length) {
+          setHistoryIndex(-1);
+          setCmdInput("");
+        } else {
+          setHistoryIndex(newIndex);
+          setCmdInput(history[newIndex]);
+        }
+      }
+    }
+  };
+
+  const clearOutput = () => {
+    setOutput(["$ Terminal cleared."]);
+  };
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--zai-border)]">
+        <Terminal size={13} className="text-[var(--zai-accent)]" />
+        <span className="text-[11px] tracking-[0.15em] text-[var(--zai-text)] uppercase font-bold">TERMINAL</span>
+        <div className="flex-1" />
+        <button onClick={clearOutput} className="p-1 text-[var(--zai-text-dim)] hover:text-[var(--zai-text)] transition-colors" title="Clear terminal">
+          <Trash2 size={11} />
+        </button>
+      </div>
+
+      {/* Output */}
+      <div className="flex-1 overflow-auto p-4 space-y-0">
+        {output.map((line, i) => (
+          <div key={i} className={`text-[11px] leading-[1.6] font-mono whitespace-pre-wrap ${
+            line.startsWith("$") ? "text-[#00d4ff]" :
+            line.startsWith("Error") ? "text-[#ff3333]" :
+            "text-[#aaa]"
+          }`}>
+            {line}
+          </div>
+        ))}
+        {loading && (
+          <span className="inline-block w-[7px] h-[14px] bg-[rgba(0,212,255,0.5)] cursor-blink" />
+        )}
+        <div ref={outputEndRef} />
+      </div>
+
+      {/* Input */}
+      <div className="flex items-center gap-2 px-4 py-2.5 border-t border-[var(--zai-border)]">
+        <span className="text-[12px] text-[#00d4ff] shrink-0">$</span>
+        <input
+          ref={inputRef}
+          value={cmdInput}
+          onChange={(e) => setCmdInput(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="Enter command..."
+          disabled={loading}
+          className="flex-1 bg-transparent text-[12px] text-[#e0e0e0] placeholder-[#3a3a3a] outline-none font-mono disabled:opacity-30"
+          style={{ fontFamily: "inherit" }}
+        />
+        <button
+          onClick={executeCommand}
+          disabled={!cmdInput.trim() || loading}
+          className="p-1 text-[var(--zai-text-dim)] hover:text-[var(--zai-accent)] disabled:opacity-10 transition-colors"
+          aria-label="Run command"
+        >
+          <Play size={12} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Task Planner Panel ──────────────────────────────────────────────────────
+
+function TaskPlannerPanel({ onExecuteTool }: { onExecuteTool: (toolName: string, args: Record<string, unknown>, skipConfirm?: boolean) => Promise<string> }) {
+  const [tasks, setTasks] = useState<KanbanTask[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [newTaskTitle, setNewTaskTitle] = useState("");
+  const [newTaskStatus, setNewTaskStatus] = useState("pending");
+  const [activePlanId, setActivePlanId] = useState<string | null>(null);
+
+  const fetchTasks = useCallback(async () => {
+    setLoading(true);
+    try {
+      // Try bridge first
+      const result = await onExecuteTool("listar_tareas", {}, true);
+      const parsed = JSON.parse(result);
+      if (Array.isArray(parsed)) {
+        setTasks(parsed.map((t: any) => ({
+          id: t.id || generateId(),
+          title: t.title || t.titulo || t.name || "Untitled",
+          status: t.status || t.estado || "pending",
+          description: t.description || t.descripcion,
+          planId: t.planId || t.plan_id || "",
+        })));
+      } else if (parsed.tareas || parsed.tasks) {
+        const taskList = parsed.tareas || parsed.tasks;
+        setTasks(taskList.map((t: any) => ({
+          id: t.id || generateId(),
+          title: t.title || t.titulo || t.name || "Untitled",
+          status: t.status || t.estado || "pending",
+          description: t.description || t.descripcion,
+          planId: t.planId || t.plan_id || "",
+        })));
+      }
+    } catch {
+      // Fallback: try local DB via /api/plans
+      try {
+        const res = await fetch("/api/plans?limit=1");
+        if (res.ok) {
+          const data = await res.json();
+          if (data.plans && data.plans.length > 0) {
+            const plan = data.plans[0];
+            setActivePlanId(plan.id);
+            const tasksRes = await fetch(`/api/plans/${plan.id}/tasks`);
+            if (tasksRes.ok) {
+              const tasksData = await tasksRes.json();
+              setTasks((tasksData.tasks || []).map((t: any) => ({
+                id: t.id,
+                title: t.title,
+                status: t.status,
+                description: t.description,
+                planId: t.planId,
+              })));
+            }
+          }
+        }
+      } catch {
+        // No tasks available
+      }
+    }
+    setLoading(false);
+  }, [onExecuteTool]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    fetchTasks();
+  }, [fetchTasks]);
+
+  const createTask = async () => {
+    if (!newTaskTitle.trim()) return;
+    setLoading(true);
+
+    try {
+      // Try bridge first
+      await onExecuteTool("planificar_tarea", {
+        titulo: newTaskTitle,
+        estado: newTaskStatus,
+      });
+    } catch {
+      // Fallback: use local DB
+      try {
+        let planId = activePlanId;
+        if (!planId) {
+          const res = await fetch("/api/plans", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ goal: "Task Board" }),
+          });
+          if (res.ok) {
+            const plan = await res.json();
+            planId = plan.id;
+            setActivePlanId(planId);
+          }
+        }
+        if (planId) {
+          await fetch(`/api/plans/${planId}/tasks`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: newTaskTitle, status: newTaskStatus }),
+          });
+        }
+      } catch {
+        toast.error("Failed to create task");
+      }
+    }
+
+    setNewTaskTitle("");
+    await fetchTasks();
+  };
+
+  const moveTask = async (taskId: string, newStatus: string) => {
+    // Optimistic update
+    setTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, status: newStatus } : t));
+
+    // Try to persist
+    try {
+      const task = tasks.find((t) => t.id === taskId);
+      if (task?.planId) {
+        await fetch(`/api/plans/${task.planId}/tasks/${taskId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: newStatus }),
+        });
+      }
+    } catch {
+      // Silently fail - optimistic update already applied
+    }
+  };
+
+  const columns = [
+    { id: "pending", label: "PENDING", color: "border-[#888]" },
+    { id: "in_progress", label: "IN PROGRESS", color: "border-[#00d4ff]" },
+    { id: "completed", label: "COMPLETED", color: "border-[#00ff88]" },
+  ];
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--zai-border)]">
+        <ListTodo size={13} className="text-[var(--zai-accent)]" />
+        <span className="text-[11px] tracking-[0.15em] text-[var(--zai-text)] uppercase font-bold">TASKS</span>
+        <span className="text-[9px] text-[var(--zai-text-dim)] ml-1">{tasks.length}</span>
+        <div className="flex-1" />
+        <button onClick={fetchTasks} className="p-1 text-[var(--zai-text-dim)] hover:text-[var(--zai-accent)] transition-colors" title="Refresh tasks">
+          <RefreshCw size={12} />
+        </button>
+      </div>
+
+      {/* Add task */}
+      <div className="flex items-center gap-2 px-4 py-2 border-b border-[rgba(255,255,255,0.04)]">
+        <Input
+          value={newTaskTitle}
+          onChange={(e) => setNewTaskTitle(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && createTask()}
+          placeholder="New task..."
+          className="h-7 text-[11px] bg-[var(--zai-bg)] border-[var(--zai-border)] text-[var(--zai-text)] placeholder:text-[var(--zai-text-dim)]"
+          style={{ fontFamily: "inherit" }}
+        />
+        <select
+          value={newTaskStatus}
+          onChange={(e) => setNewTaskStatus(e.target.value)}
+          className="bg-transparent text-[10px] text-[var(--zai-text-dim)] outline-none cursor-pointer border border-[var(--zai-border)] px-2 py-1"
+          style={{ fontFamily: "inherit" }}
+        >
+          <option value="pending" className="bg-[var(--zai-bg-subtle)] text-[var(--zai-text)]">Pending</option>
+          <option value="in_progress" className="bg-[var(--zai-bg-subtle)] text-[var(--zai-text)]">In Progress</option>
+          <option value="completed" className="bg-[var(--zai-bg-subtle)] text-[var(--zai-text)]">Completed</option>
+        </select>
+        <button
+          onClick={createTask}
+          disabled={!newTaskTitle.trim() || loading}
+          className="flex items-center gap-1 px-2.5 py-1 border border-[var(--zai-border-accent)] bg-[var(--zai-accent-dim)] text-[9px] text-[var(--zai-accent)] tracking-wider hover:bg-[rgba(0,212,255,0.1)] disabled:opacity-30 transition-colors"
+        >
+          <Plus size={10} />
+          ADD
+        </button>
+      </div>
+
+      {/* Kanban Board */}
+      <div className="flex-1 overflow-x-auto p-4">
+        {loading && tasks.length === 0 ? (
+          <div className="flex items-center justify-center h-full">
+            <span className="text-[11px] text-[var(--zai-text-dim)] animate-pulse">Loading tasks...</span>
+          </div>
+        ) : (
+          <div className="flex gap-4 h-full min-w-max">
+            {columns.map((col) => {
+              const colTasks = tasks.filter((t) => t.status === col.id);
+              return (
+                <div key={col.id} className="w-64 flex flex-col min-h-0">
+                  <div className={`flex items-center gap-2 px-2 py-1.5 border-b-2 ${col.color} mb-2`}>
+                    <span className="text-[10px] tracking-[0.15em] text-[var(--zai-text-dim)] uppercase">{col.label}</span>
+                    <span className="text-[9px] text-[var(--zai-text-dim)] ml-auto">{colTasks.length}</span>
+                  </div>
+                  <div className="flex-1 overflow-y-auto space-y-2 max-h-full">
+                    {colTasks.map((task) => (
+                      <div
+                        key={task.id}
+                        className="px-3 py-2 border border-[var(--zai-border)] bg-[rgba(255,255,255,0.02)] hover:bg-[rgba(255,255,255,0.04)] transition-colors group"
+                      >
+                        <div className="text-[11px] text-[var(--zai-text)] leading-[1.5]">{task.title}</div>
+                        {task.description && (
+                          <div className="text-[9px] text-[var(--zai-text-dim)] mt-1 line-clamp-2">{task.description}</div>
+                        )}
+                        <div className="flex items-center gap-1 mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                          {col.id !== "pending" && (
+                            <button
+                              onClick={() => moveTask(task.id, col.id === "in_progress" ? "pending" : "in_progress")}
+                              className="text-[8px] text-[var(--zai-text-dim)] hover:text-[var(--zai-accent)] px-1 border border-[var(--zai-border)] transition-colors"
+                            >
+                              ← BACK
+                            </button>
+                          )}
+                          {col.id !== "completed" && (
+                            <button
+                              onClick={() => moveTask(task.id, col.id === "pending" ? "in_progress" : "completed")}
+                              className="text-[8px] text-[var(--zai-text-dim)] hover:text-[#00ff88] px-1 border border-[var(--zai-border)] transition-colors"
+                            >
+                              {col.id === "pending" ? "START →" : "DONE →"}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                    {colTasks.length === 0 && (
+                      <div className="text-[9px] text-[var(--zai-text-dim)] text-center py-4 opacity-30">No tasks</div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Confirmation Dialog ─────────────────────────────────────────────────────
+
+function ConfirmationDialog({
+  pending,
+  onResolve,
+  sessionRemembered,
+}: {
+  pending: PendingConfirmation | null;
+  onResolve: (allowed: boolean, remember: boolean) => void;
+  sessionRemembered: Set<string>;
+}) {
+  const [remember, setRemember] = useState(false);
+
+  if (!pending) return null;
+
+  // Auto-allow if already remembered for this session
+  if (sessionRemembered.has(pending.toolName)) {
+    onResolve(true, false);
+    return null;
+  }
+
+  return (
+    <Dialog open={!!pending} onOpenChange={() => onResolve(false, false)}>
+      <DialogContent className="sm:max-w-[440px] bg-[var(--zai-bg-subtle)] border-[var(--zai-border)] text-[var(--zai-text)]" style={{ fontFamily: "inherit" }}>
+        <DialogHeader>
+          <DialogTitle className="text-[13px] tracking-[0.15em] text-[var(--zai-red)] flex items-center gap-2">
+            <AlertTriangle size={14} />
+            CONFIRM ACTION
+          </DialogTitle>
+          <DialogDescription className="text-[11px] text-[var(--zai-text-dim)]">
+            This action may modify your system. Please review before allowing.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3 mt-2">
+          <div className="px-3 py-2 border border-[rgba(255,51,51,0.2)] bg-[rgba(255,51,51,0.03)]">
+            <div className="flex items-center gap-2 mb-1.5">
+              <Wrench size={10} className="text-[var(--zai-red)]" />
+              <span className="text-[11px] text-[var(--zai-red)] font-bold">{pending.toolName}</span>
+            </div>
+            {pending.arguments && Object.keys(pending.arguments).length > 0 && (
+              <pre className="text-[10px] text-[var(--zai-text-dim)] leading-[1.5] whitespace-pre-wrap max-h-32 overflow-y-auto">
+                {JSON.stringify(pending.arguments, null, 2)}
+              </pre>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id="remember-check"
+              checked={remember}
+              onCheckedChange={(v) => setRemember(v === true)}
+              className="border-[var(--zai-border)]"
+            />
+            <Label htmlFor="remember-check" className="text-[10px] text-[var(--zai-text-dim)] cursor-pointer">
+              Remember for this session
+            </Label>
+          </div>
+        </div>
+        <div className="flex gap-2 mt-4">
+          <button
+            onClick={() => onResolve(false, false)}
+            className="flex-1 px-3 py-2 border border-[var(--zai-border)] text-[10px] text-[var(--zai-text-dim)] hover:text-[var(--zai-text)] hover:bg-[var(--zai-bg-elevated)] transition-colors tracking-wider"
+          >
+            DENY
+          </button>
+          <button
+            onClick={() => onResolve(true, remember)}
+            className="flex-1 px-3 py-2 border border-[rgba(0,255,136,0.3)] bg-[rgba(0,255,136,0.05)] text-[10px] text-[#00ff88] hover:bg-[rgba(0,255,136,0.1)] transition-colors tracking-wider"
+          >
+            ALLOW
+          </button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // ─── Main Component ──────────────────────────────────────────────────────────
 
 export default function AgentLocalInterface() {
@@ -1228,6 +2028,11 @@ export default function AgentLocalInterface() {
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
   const [isRecording, setIsRecording] = useState(false);
   const [tools, setTools] = useState<ToolInfo[]>([]);
+
+  // Panel mode state
+  const [panelMode, setPanelMode] = useState<PanelMode>("chat");
+  const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | null>(null);
+  const [sessionRemembered, setSessionRemembered] = useState<Set<string>>(new Set());
 
   // Settings & Memory state
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -2166,6 +2971,68 @@ export default function AgentLocalInterface() {
     setClearMemoryAlertOpen(false);
   }, [fetchMemoryStats]);
 
+  // ─── Execute Tool with Confirmation ──────────────────────────────────
+
+  const executeTool = useCallback(async (
+    toolName: string,
+    args: Record<string, unknown>,
+    skipConfirm?: boolean
+  ): Promise<string> => {
+    const isDangerous = !skipConfirm && (
+      toolName.startsWith("ejecutar_") ||
+      toolName.startsWith("matar_") ||
+      toolName === "escribir_archivo" ||
+      toolName === "buscar_reemplazar" ||
+      (toolName === "git_operacion" && (args.operacion === "push" || args.operacion === "reset" || args.operacion === "checkout"))
+    );
+
+    if (isDangerous && !sessionRemembered.has(toolName)) {
+      return new Promise<string>((resolve) => {
+        setPendingConfirmation({
+          toolName,
+          arguments: args,
+          resolve: (allowed: boolean) => {
+            if (!allowed) {
+              resolve(JSON.stringify({ error: "Action denied by user" }));
+            } else {
+              // Execute the tool
+              fetch("/api/execute", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ tool_name: toolName, arguments: args }),
+              })
+                .then((res) => res.json())
+                .then((data) => resolve(JSON.stringify(data)))
+                .catch((err) => resolve(JSON.stringify({ error: String(err) })));
+            }
+          },
+        });
+      });
+    }
+
+    try {
+      const res = await fetch("/api/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tool_name: toolName, arguments: args }),
+      });
+      const data = await res.json();
+      return JSON.stringify(data);
+    } catch (err) {
+      return JSON.stringify({ error: String(err) });
+    }
+  }, [sessionRemembered]);
+
+  const resolveConfirmation = useCallback((allowed: boolean, remember: boolean) => {
+    if (pendingConfirmation) {
+      if (remember && allowed) {
+        setSessionRemembered((prev) => new Set(prev).add(pendingConfirmation.toolName));
+      }
+      pendingConfirmation.resolve(allowed);
+      setPendingConfirmation(null);
+    }
+  }, [pendingConfirmation]);
+
   // ─── Render ─────────────────────────────────────────────────────────────
 
   return (
@@ -2297,158 +3164,177 @@ export default function AgentLocalInterface() {
         </AlertDialogContent>
       </AlertDialog>
 
+      {/* ─── Confirmation Dialog ─────────────────────────────────────────── */}
+      <ConfirmationDialog
+        pending={pendingConfirmation}
+        onResolve={resolveConfirmation}
+        sessionRemembered={sessionRemembered}
+      />
+
       {/* ─── Main Content ────────────────────────────────────────────────── */}
       <div className="flex flex-1 overflow-hidden relative">
-        {/* ─── Chat Area ────────────────────────────────────────────────── */}
+        {/* ─── Main Area (Chat or Panel) ──────────────────────────────────── */}
         <main className="flex-1 flex flex-col min-w-0">
-          {/* Messages */}
-          <div className="flex-1 overflow-y-auto px-6 py-6 space-y-5">
-            {messages.length === 0 && (
-              <WelcomeScreen
-                status={status}
-                selectedModel={selectedModel}
-                useAgent={useAgent}
-                onStarterClick={handleStarterClick}
-              />
-            )}
+          {panelMode === "chat" ? (
+            <>
+              {/* Messages */}
+              <div className="flex-1 overflow-y-auto px-6 py-6 space-y-5">
+                {messages.length === 0 && (
+                  <WelcomeScreen
+                    status={status}
+                    selectedModel={selectedModel}
+                    useAgent={useAgent}
+                    onStarterClick={handleStarterClick}
+                  />
+                )}
 
-            {messages.map((msg) => (
-              <ChatMessage
-                key={msg.id}
-                msg={msg}
-                isLastAssistant={msg.id === lastAssistantId}
-                isLoading={isLoading}
-                expandedThinking={expandedThinking}
-                toggleThinking={toggleThinking}
-              />
-            ))}
-            <div ref={chatEndRef} />
-          </div>
-
-          {/* ─── Input Area ──────────────────────────────────────────────── */}
-          {/* Bridge warning bar */}
-          {useAgent && !status.agentAvailable && status.connected && (
-            <div className="px-5 py-1.5 border-t border-[rgba(255,136,0,0.15)] bg-[rgba(255,136,0,0.03)] text-[10px] text-[#ff8800] flex items-center gap-2">
-              <Circle
-                size={4}
-                className="fill-[#ff8800] text-[#ff8800]"
-              />
-              <span>
-                Bridge not running — tools disabled. Start: python
-                bridge_api.py
-              </span>
-            </div>
-          )}
-
-          {/* Uploaded files chips */}
-          {uploadedFiles.length > 0 && (
-            <div className="px-5 py-2 border-t border-[rgba(255,255,255,0.04)] flex flex-wrap gap-1.5">
-              {uploadedFiles.map((file: any, i: number) => (
-                <div
-                  key={i}
-                  className="flex items-center gap-1.5 px-2 py-0.5 border border-[rgba(0,212,255,0.15)] bg-[rgba(0,212,255,0.03)] text-[10px] text-[#888]"
-                >
-                  <Paperclip size={9} className="text-[#555]" />
-                  <span className="truncate max-w-[120px]">{file.name}</span>
-                  <span className="text-[#444]">
-                    ({formatBytes(file.size)})
-                  </span>
-                  <button
-                    onClick={() => removeFile(i)}
-                    className="text-[#555] hover:text-[#ff3333] transition-colors"
-                  >
-                    <X size={9} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-
-          <div className="shrink-0 border-t border-[rgba(255,255,255,0.06)]">
-            <div className="flex items-end gap-2 px-4 py-3">
-              {/* Attach button */}
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                className="pb-1 text-[#555555] hover:text-[rgba(0,212,255,0.6)] transition-colors duration-150 shrink-0"
-                title="Attach file"
-                aria-label="Attach file"
-                disabled={!status.connected}
-              >
-                <Paperclip size={14} />
-              </button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                className="hidden"
-                onChange={handleFileSelect}
-              />
-
-              {/* Voice button */}
-              <button
-                onClick={toggleVoiceInput}
-                className={`pb-1 transition-colors duration-150 shrink-0 ${
-                  isRecording
-                    ? "text-[#ff3333]"
-                    : "text-[#555555] hover:text-[rgba(0,212,255,0.6)]"
-                }`}
-                title={
-                  isRecording ? "Stop recording" : "Voice input"
-                }
-                aria-label={isRecording ? "Stop voice recording" : "Start voice input"}
-                disabled={!status.connected}
-              >
-                {isRecording ? <MicOff size={14} /> : <Mic size={14} />}
-              </button>
-
-              {/* Input prompt symbol */}
-              <div className="text-[12px] text-[#555555] pb-1 select-none shrink-0">
-                {">"}
+                {messages.map((msg) => (
+                  <ChatMessage
+                    key={msg.id}
+                    msg={msg}
+                    isLastAssistant={msg.id === lastAssistantId}
+                    isLoading={isLoading}
+                    expandedThinking={expandedThinking}
+                    toggleThinking={toggleThinking}
+                  />
+                ))}
+                <div ref={chatEndRef} />
               </div>
 
-              {/* Textarea */}
-              <textarea
-                ref={inputRef}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder={
-                  status.connected ? "Enter message..." : "Ollama not connected"
-                }
-                disabled={!status.connected}
-                rows={1}
-                className="flex-1 bg-transparent text-[14px] text-[#e0e0e0] placeholder-[#3a3a3a] resize-none outline-none min-h-[22px] max-h-[140px] leading-[1.6] disabled:opacity-20"
-                style={{ fontFamily: "inherit" }}
-                onInput={(e) => {
-                  const target = e.target as HTMLTextAreaElement;
-                  target.style.height = "auto";
-                  target.style.height =
-                    Math.min(target.scrollHeight, 120) + "px";
-                }}
-              />
-
-              {/* Send / Stop button */}
-              {isLoading ? (
-                <button
-                  onClick={stopGeneration}
-                  className="pb-1 text-[#ff3333] hover:text-[#ff5555] transition-colors duration-150 shrink-0"
-                  aria-label="Stop generation"
-                  title="Stop generation"
-                >
-                  <Square size={14} />
-                </button>
-              ) : (
-                <button
-                  onClick={sendMessage}
-                  disabled={!input.trim() || isLoading || !status.connected}
-                  className="pb-1 text-[#555555] hover:text-[rgba(0,212,255,0.6)] disabled:opacity-10 disabled:hover:text-[#555555] transition-colors duration-150 shrink-0"
-                  aria-label="Send message"
-                >
-                  <Send size={14} />
-                </button>
+              {/* ─── Input Area ──────────────────────────────────────────────── */}
+              {/* Bridge warning bar */}
+              {useAgent && !status.agentAvailable && status.connected && (
+                <div className="px-5 py-1.5 border-t border-[rgba(255,136,0,0.15)] bg-[rgba(255,136,0,0.03)] text-[10px] text-[#ff8800] flex items-center gap-2">
+                  <Circle
+                    size={4}
+                    className="fill-[#ff8800] text-[#ff8800]"
+                  />
+                  <span>
+                    Bridge not running — tools disabled. Start: python
+                    bridge_api.py
+                  </span>
+                </div>
               )}
-            </div>
-          </div>
+
+              {/* Uploaded files chips */}
+              {uploadedFiles.length > 0 && (
+                <div className="px-5 py-2 border-t border-[rgba(255,255,255,0.04)] flex flex-wrap gap-1.5">
+                  {uploadedFiles.map((file: any, i: number) => (
+                    <div
+                      key={i}
+                      className="flex items-center gap-1.5 px-2 py-0.5 border border-[rgba(0,212,255,0.15)] bg-[rgba(0,212,255,0.03)] text-[10px] text-[#888]"
+                    >
+                      <Paperclip size={9} className="text-[#555]" />
+                      <span className="truncate max-w-[120px]">{file.name}</span>
+                      <span className="text-[#444]">
+                        ({formatBytes(file.size)})
+                      </span>
+                      <button
+                        onClick={() => removeFile(i)}
+                        className="text-[#555] hover:text-[#ff3333] transition-colors"
+                      >
+                        <X size={9} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="shrink-0 border-t border-[rgba(255,255,255,0.06)]">
+                <div className="flex items-end gap-2 px-4 py-3">
+                  {/* Attach button */}
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="pb-1 text-[#555555] hover:text-[rgba(0,212,255,0.6)] transition-colors duration-150 shrink-0"
+                    title="Attach file"
+                    aria-label="Attach file"
+                    disabled={!status.connected}
+                  >
+                    <Paperclip size={14} />
+                  </button>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    className="hidden"
+                    onChange={handleFileSelect}
+                  />
+
+                  {/* Voice button */}
+                  <button
+                    onClick={toggleVoiceInput}
+                    className={`pb-1 transition-colors duration-150 shrink-0 ${
+                      isRecording
+                        ? "text-[#ff3333]"
+                        : "text-[#555555] hover:text-[rgba(0,212,255,0.6)]"
+                    }`}
+                    title={
+                      isRecording ? "Stop recording" : "Voice input"
+                    }
+                    aria-label={isRecording ? "Stop voice recording" : "Start voice input"}
+                    disabled={!status.connected}
+                  >
+                    {isRecording ? <MicOff size={14} /> : <Mic size={14} />}
+                  </button>
+
+                  {/* Input prompt symbol */}
+                  <div className="text-[12px] text-[#555555] pb-1 select-none shrink-0">
+                    {">"}
+                  </div>
+
+                  {/* Textarea */}
+                  <textarea
+                    ref={inputRef}
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder={
+                      status.connected ? "Enter message..." : "Ollama not connected"
+                    }
+                    disabled={!status.connected}
+                    rows={1}
+                    className="flex-1 bg-transparent text-[14px] text-[#e0e0e0] placeholder-[#3a3a3a] resize-none outline-none min-h-[22px] max-h-[140px] leading-[1.6] disabled:opacity-20"
+                    style={{ fontFamily: "inherit" }}
+                    onInput={(e) => {
+                      const target = e.target as HTMLTextAreaElement;
+                      target.style.height = "auto";
+                      target.style.height =
+                        Math.min(target.scrollHeight, 120) + "px";
+                    }}
+                  />
+
+                  {/* Send / Stop button */}
+                  {isLoading ? (
+                    <button
+                      onClick={stopGeneration}
+                      className="pb-1 text-[#ff3333] hover:text-[#ff5555] transition-colors duration-150 shrink-0"
+                      aria-label="Stop generation"
+                      title="Stop generation"
+                    >
+                      <Square size={14} />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={sendMessage}
+                      disabled={!input.trim() || isLoading || !status.connected}
+                      className="pb-1 text-[#555555] hover:text-[rgba(0,212,255,0.6)] disabled:opacity-10 disabled:hover:text-[#555555] transition-colors duration-150 shrink-0"
+                      aria-label="Send message"
+                    >
+                      <Send size={14} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            </>
+          ) : panelMode === "files" ? (
+            <FileExplorerPanel onExecuteTool={executeTool} />
+          ) : panelMode === "git" ? (
+            <GitPanel onExecuteTool={executeTool} />
+          ) : panelMode === "terminal" ? (
+            <TerminalPanel onExecuteTool={executeTool} />
+          ) : panelMode === "tasks" ? (
+            <TaskPlannerPanel onExecuteTool={executeTool} />
+          ) : null}
         </main>
 
         {/* ─── Sidebar Overlay (mobile) ──────────────────────────────────── */}
@@ -2470,6 +3356,85 @@ export default function AgentLocalInterface() {
           } shrink-0 border-l border-[var(--zai-border)] bg-[var(--zai-sidebar)] overflow-hidden transition-all duration-200`}
         >
           <div className="w-64 h-full overflow-y-auto px-4 py-4 space-y-5">
+            {/* PANELS NAV */}
+            <section>
+              <div className="flex items-center gap-1.5 mb-2.5">
+                <Shield size={10} className="text-[var(--zai-text-dim)]" />
+                <h3 className="text-[9px] tracking-[0.2em] text-[var(--zai-text-dim)] uppercase">
+                  Panels
+                </h3>
+              </div>
+              <div className="grid grid-cols-5 gap-1">
+                <button
+                  onClick={() => setPanelMode("chat")}
+                  className={`flex flex-col items-center justify-center gap-0.5 px-1 py-1.5 border transition-colors ${
+                    panelMode === "chat"
+                      ? "border-[var(--zai-border-accent)] bg-[var(--zai-accent-dim)] text-[var(--zai-accent)]"
+                      : "border-[var(--zai-border)] text-[var(--zai-text-dim)] hover:text-[var(--zai-text)] hover:border-[var(--zai-border)]"
+                  }`}
+                  title="Chat"
+                  aria-label="Switch to chat panel"
+                >
+                  <MessageSquare size={11} />
+                  <span className="text-[7px] tracking-wider">CHAT</span>
+                </button>
+                <button
+                  onClick={() => setPanelMode("files")}
+                  className={`flex flex-col items-center justify-center gap-0.5 px-1 py-1.5 border transition-colors ${
+                    panelMode === "files"
+                      ? "border-[var(--zai-border-accent)] bg-[var(--zai-accent-dim)] text-[var(--zai-accent)]"
+                      : "border-[var(--zai-border)] text-[var(--zai-text-dim)] hover:text-[var(--zai-text)] hover:border-[var(--zai-border)]"
+                  }`}
+                  title="Files"
+                  aria-label="Switch to file explorer panel"
+                >
+                  <Folder size={11} />
+                  <span className="text-[7px] tracking-wider">FILES</span>
+                </button>
+                <button
+                  onClick={() => setPanelMode("git")}
+                  className={`flex flex-col items-center justify-center gap-0.5 px-1 py-1.5 border transition-colors ${
+                    panelMode === "git"
+                      ? "border-[var(--zai-border-accent)] bg-[var(--zai-accent-dim)] text-[var(--zai-accent)]"
+                      : "border-[var(--zai-border)] text-[var(--zai-text-dim)] hover:text-[var(--zai-text)] hover:border-[var(--zai-border)]"
+                  }`}
+                  title="Git"
+                  aria-label="Switch to git panel"
+                >
+                  <GitBranch size={11} />
+                  <span className="text-[7px] tracking-wider">GIT</span>
+                </button>
+                <button
+                  onClick={() => setPanelMode("terminal")}
+                  className={`flex flex-col items-center justify-center gap-0.5 px-1 py-1.5 border transition-colors ${
+                    panelMode === "terminal"
+                      ? "border-[var(--zai-border-accent)] bg-[var(--zai-accent-dim)] text-[var(--zai-accent)]"
+                      : "border-[var(--zai-border)] text-[var(--zai-text-dim)] hover:text-[var(--zai-text)] hover:border-[var(--zai-border)]"
+                  }`}
+                  title="Terminal"
+                  aria-label="Switch to terminal panel"
+                >
+                  <Terminal size={11} />
+                  <span className="text-[7px] tracking-wider">TERM</span>
+                </button>
+                <button
+                  onClick={() => setPanelMode("tasks")}
+                  className={`flex flex-col items-center justify-center gap-0.5 px-1 py-1.5 border transition-colors ${
+                    panelMode === "tasks"
+                      ? "border-[var(--zai-border-accent)] bg-[var(--zai-accent-dim)] text-[var(--zai-accent)]"
+                      : "border-[var(--zai-border)] text-[var(--zai-text-dim)] hover:text-[var(--zai-text)] hover:border-[var(--zai-border)]"
+                  }`}
+                  title="Tasks"
+                  aria-label="Switch to task planner panel"
+                >
+                  <ListTodo size={11} />
+                  <span className="text-[7px] tracking-wider">TASKS</span>
+                </button>
+              </div>
+            </section>
+
+            <div className="h-px bg-[var(--zai-border)]" />
+
             {/* CONVERSATIONS */}
             <section>
               <button
