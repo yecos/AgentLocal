@@ -591,3 +591,165 @@ def _status_code_to_text(code: str) -> str:
         "!": "ignored",
     }
     return status_map.get(code, f"unknown({code})")
+
+
+# ============================================================
+# S6.3: GIT FEATURE WORKFLOW
+# ============================================================
+
+def git_feature_workflow(
+    feature_name: str,
+    descripcion: str = "",
+    repo_path: str = None,
+    accion: str = "start"
+) -> str:
+    """S6.3: Ejecuta flujo completo de feature branch workflow.
+
+    Automatiza el flujo git estandar para desarrollar features:
+    - start: Crea branch feature/NOMBRE desde main actualizado
+    - status: Muestra estado de la feature branch
+    - commit: Hace add + commit de todos los cambios
+    - finish: Merge a main + push + genera mensaje de PR
+    - abort: Vuelve a main y elimina la feature branch
+
+    Args:
+        feature_name: Nombre de la feature (sin el prefijo feature/)
+        descripcion: Descripcion de la feature para el commit/PR
+        repo_path: Ruta al repositorio (default: REPOS_DIR)
+        accion: Accion a ejecutar: start, status, commit, finish, abort
+
+    Returns:
+        Resultado de la accion ejecutada
+    """
+    cwd = repo_path or REPOS_DIR
+    branch_name = f"feature/{feature_name}"
+    commit_msg = f"feat({feature_name}): {descripcion}" if descripcion else f"feat({feature_name}): update"
+
+    if accion == "start":
+        # 1. Asegurar que estamos en main y actualizado
+        result = _run_git(["checkout", "main"], cwd=cwd)
+        if result.get("error"):
+            # Intentar con master
+            result = _run_git(["checkout", "master"], cwd=cwd)
+            if result.get("error"):
+                return f"ERROR: No se encontro branch main o master: {result.get('error', '')}"
+
+        # 2. Pull de los ultimos cambios
+        _run_git(["pull", "origin", "main"], cwd=cwd)
+
+        # 3. Crear branch de feature
+        result = _run_git(["checkout", "-b", branch_name], cwd=cwd)
+        if result.get("error"):
+            return f"ERROR creando branch {branch_name}: {result['error']}"
+
+        return (
+            f"Feature branch creada: {branch_name}\n"
+            f"Base: main (actualizado)\n"
+            f"Siguiente: Haz tus cambios y usa accion='commit' para guardarlos"
+        )
+
+    elif accion == "status":
+        # Mostrar estado de la feature branch
+        branch_result = _run_git(["branch", "--show-current"], cwd=cwd)
+        current_branch = branch_result.get("output", "").strip()
+        status_result = git_status(repo_path=cwd)
+        log_result = _run_git(["log", "main.." + branch_name, "--oneline"], cwd=cwd)
+        commits = log_result.get("output", "").strip()
+
+        output = f"Branch actual: {current_branch}\n"
+        output += f"Commits en {branch_name} vs main: {len(commits.split(chr(10))) if commits else 0}\n"
+        if commits:
+            output += f"Commits:\n{commits}\n"
+        output += f"\nEstado de archivos:\n{json.dumps(status_result, indent=2, ensure_ascii=False) if isinstance(status_result, dict) else str(status_result)}"
+
+        return output
+
+    elif accion == "commit":
+        # 1. Verificar que estamos en la feature branch
+        branch_result = _run_git(["branch", "--show-current"], cwd=cwd)
+        current_branch = branch_result.get("output", "").strip()
+
+        if current_branch != branch_name:
+            return f"ERROR: Branch actual es '{current_branch}', se esperaba '{branch_name}'. Haz checkout primero."
+
+        # 2. Add todos los cambios
+        add_result = _run_git(["add", "."], cwd=cwd)
+        if add_result.get("error"):
+            return f"ERROR en git add: {add_result['error']}"
+
+        # 3. Verificar si hay algo que commitear
+        status_result = _run_git(["status", "--porcelain"], cwd=cwd)
+        if not status_result.get("output", "").strip():
+            return "No hay cambios pendientes para commitear."
+
+        # 4. Commit
+        commit_result = _run_git(["commit", "-m", commit_msg], cwd=cwd)
+        if commit_result.get("error"):
+            return f"ERROR en git commit: {commit_result['error']}"
+
+        return (
+            f"Commit creado exitosamente.\n"
+            f"Branch: {current_branch}\n"
+            f"Mensaje: {commit_msg}\n"
+            f"Siguiente: Usa accion='finish' para merge a main y push"
+        )
+
+    elif accion == "finish":
+        # 1. Commit pendientes primero
+        status_result = _run_git(["status", "--porcelain"], cwd=cwd)
+        if status_result.get("output", "").strip():
+            _run_git(["add", "."], cwd=cwd)
+            _run_git(["commit", "-m", commit_msg], cwd=cwd)
+
+        # 2. Volver a main
+        _run_git(["checkout", "main"], cwd=cwd)
+
+        # 3. Pull de los ultimos cambios
+        _run_git(["pull", "origin", "main"], cwd=cwd)
+
+        # 4. Merge de la feature branch
+        merge_result = _run_git(["merge", branch_name], cwd=cwd)
+        if merge_result.get("error"):
+            return f"ERROR en merge: {merge_result['error']}\nResuelve los conflictos manualmente."
+
+        # 5. Push
+        push_result = _run_git(["push", "origin", "main"], cwd=cwd)
+
+        # 6. Eliminar feature branch
+        _run_git(["branch", "-d", branch_name], cwd=cwd)
+
+        # 7. Generar mensaje de PR
+        log_result = _run_git(["log", f"HEAD~5..HEAD", "--oneline"], cwd=cwd)
+        recent_commits = log_result.get("output", "").strip()
+
+        pr_message = (
+            f"## Pull Request: {feature_name}\n\n"
+            f"### Descripcion\n{descripcion or feature_name}\n\n"
+            f"### Commits incluidos\n```\n{recent_commits}\n```\n\n"
+            f"### Checklist\n"
+            f"- [ ] Codigo probado localmente\n"
+            f"- [ ] Sin errores de linting\n"
+            f"- [ ] Documentacion actualizada\n"
+        )
+
+        push_status = "OK" if not push_result.get("error") else f"ERROR: {push_result.get('error', '')}"
+
+        return (
+            f"Feature completada y mergeada exitosamente.\n"
+            f"Branch: {branch_name} -> main\n"
+            f"Push: {push_status}\n\n"
+            f"Mensaje de PR sugerido:\n{pr_message}"
+        )
+
+    elif accion == "abort":
+        # Volver a main y eliminar feature branch
+        _run_git(["checkout", "main"], cwd=cwd)
+        del_result = _run_git(["branch", "-D", branch_name], cwd=cwd)
+
+        return (
+            f"Feature branch '{branch_name}' eliminada.\n"
+            f"Los cambios NO fueron mergeados. Branch actual: main"
+        )
+
+    else:
+        return f"ERROR: Accion '{accion}' no reconocida. Usa: start, status, commit, finish, abort"

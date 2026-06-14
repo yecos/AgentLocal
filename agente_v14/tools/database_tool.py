@@ -672,3 +672,401 @@ def _generate_sql_from_question(pregunta: str, schema_info: str, tabla: str = ""
     except Exception as e:
         logger.error(f"Error generando SQL desde pregunta: {e}")
         return ""
+
+
+# ============================================================
+# S6.4: DATABASE MIGRATIONS
+# ============================================================
+
+_MIGRATIONS_DIR = os.path.join(REPOS_DIR, "db_migrations")
+
+def db_migrate(
+    db_path: str,
+    accion: str = "status",
+    migracion_id: str = "",
+    sql_up: str = "",
+    sql_down: str = "",
+    descripcion: str = ""
+) -> str:
+    """S6.4: Gestiona migraciones de esquema de base de datos SQLite.
+
+    Permite crear, aplicar y revertir migraciones de forma controlada:
+    - create: Crea una nueva migracion con SQL up/down
+    - up: Aplica la siguiente migracion pendiente (o una especifica)
+    - down: Revierte una migracion especifica
+    - status: Muestra el estado de las migraciones
+    - generate: Genera SQL de migracion comparando tablas existentes vs deseadas
+
+    Args:
+        db_path: Ruta a la base de datos SQLite
+        accion: Accion a ejecutar: create, up, down, status, generate
+        migracion_id: ID de migracion para up/down especifico
+        sql_up: SQL para aplicar la migracion (accion=create)
+        sql_down: SQL para revertir la migracion (accion=create)
+        descripcion: Descripcion de la migracion
+
+    Returns:
+        Resultado de la operacion de migracion
+    """
+    validation = validate_path(db_path)
+    if validation != db_path:
+        return validation
+
+    # Asegurar directorio de migraciones
+    os.makedirs(_MIGRATIONS_DIR, exist_ok=True)
+
+    # Asegurar tabla de migraciones en la DB
+    _ensure_migrations_table(db_path)
+
+    if accion == "create":
+        return _create_migration(sql_up, sql_down, descripcion)
+    elif accion == "up":
+        return _apply_migration(db_path, migracion_id)
+    elif accion == "down":
+        return _rollback_migration(db_path, migracion_id)
+    elif accion == "status":
+        return _migration_status(db_path)
+    elif accion == "generate":
+        return _generate_migration_sql(db_path, descripcion)
+    else:
+        return f"ERROR: Accion '{accion}' no reconocida. Usa: create, up, down, status, generate"
+
+
+def _ensure_migrations_table(db_path: str):
+    """Crea la tabla de tracking de migraciones si no existe."""
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS _migrations (
+                id TEXT PRIMARY KEY,
+                descripcion TEXT,
+                sql_up TEXT,
+                sql_down TEXT,
+                applied_at TEXT,
+                rolled_back_at TEXT,
+                status TEXT DEFAULT 'pending'
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug(f"Error creando tabla de migraciones: {e}")
+
+
+def _create_migration(sql_up: str, sql_down: str, descripcion: str) -> str:
+    """Crea un archivo de migracion."""
+    from datetime import datetime as _dt
+
+    if not sql_up:
+        return "ERROR: Debes proporcionar sql_up con el SQL para aplicar la migracion."
+
+    # Generar ID de migracion
+    migration_id = _dt.now().strftime("%Y%m%d_%H%M%S")
+    if descripcion:
+        # Slug de la descripcion
+        slug = re.sub(r'[^a-z0-9]+', '_', descripcion.lower())[:30].strip('_')
+        migration_id += f"_{slug}"
+
+    # Guardar archivo de migracion
+    migration_file = os.path.join(_MIGRATIONS_DIR, f"{migration_id}.json")
+    migration_data = {
+        "id": migration_id,
+        "descripcion": descripcion,
+        "sql_up": sql_up,
+        "sql_down": sql_down or "-- No rollback SQL provided",
+        "created_at": _dt.now().isoformat(),
+    }
+
+    try:
+        with open(migration_file, "w", encoding="utf-8") as f:
+            json.dump(migration_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return f"ERROR guardando migracion: {e}"
+
+    return (
+        f"Migracion creada exitosamente.\n"
+        f"ID: {migration_id}\n"
+        f"Descripcion: {descripcion or '(sin descripcion)'}\n"
+        f"SQL UP: {sql_up[:100]}{'...' if len(sql_up) > 100 else ''}\n"
+        f"SQL DOWN: {sql_down[:100] if sql_down else '(no proporcionado)'}\n"
+        f"Para aplicar: db_migrate(db_path='{db_path}', accion='up', migracion_id='{migration_id}')"
+    )
+
+
+def _apply_migration(db_path: str, migration_id: str = "") -> str:
+    """Aplica la siguiente migracion pendiente o una especifica."""
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+
+        # Encontrar migraciones pendientes
+        if migration_id:
+            # Aplicar migracion especifica
+            migration_file = os.path.join(_MIGRATIONS_DIR, f"{migration_id}.json")
+            if not os.path.exists(migration_file):
+                # Buscar en la tabla de migraciones
+                cursor = conn.execute(
+                    "SELECT id, sql_up FROM _migrations WHERE id = ? AND status = 'pending'",
+                    (migration_id,)
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return f"ERROR: Migracion '{migration_id}' no encontrada o ya aplicada."
+                sql_up = row[1]
+            else:
+                with open(migration_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                sql_up = data["sql_up"]
+                migration_id = data["id"]
+        else:
+            # Aplicar la siguiente pendiente
+            # Buscar archivos de migracion no aplicados
+            applied = set()
+            cursor = conn.execute("SELECT id FROM _migrations WHERE status = 'applied'")
+            for row in cursor.fetchall():
+                applied.add(row[0])
+
+            pending = []
+            if os.path.exists(_MIGRATIONS_DIR):
+                for fname in sorted(os.listdir(_MIGRATIONS_DIR)):
+                    if fname.endswith(".json"):
+                        mid = fname[:-5]
+                        if mid not in applied:
+                            pending.append(mid)
+
+            if not pending:
+                return "No hay migraciones pendientes por aplicar."
+
+            # Aplicar la primera pendiente
+            migration_id = pending[0]
+            migration_file = os.path.join(_MIGRATIONS_DIR, f"{migration_id}.json")
+            with open(migration_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            sql_up = data["sql_up"]
+
+        # Ejecutar migracion en transaccion
+        try:
+            conn.execute("BEGIN")
+            for statement in sql_up.split(";"):
+                statement = statement.strip()
+                if statement:
+                    conn.execute(statement)
+
+            # Registrar migracion aplicada
+            from datetime import datetime as _dt
+            conn.execute(
+                "INSERT OR REPLACE INTO _migrations (id, sql_up, sql_down, applied_at, status) VALUES (?, ?, ?, ?, 'applied')",
+                (migration_id, sql_up, "", _dt.now().isoformat())
+            )
+            conn.execute("COMMIT")
+
+            return f"Migracion '{migration_id}' aplicada exitosamente."
+
+        except Exception as e:
+            conn.execute("ROLLBACK")
+            return f"ERROR aplicando migracion '{migration_id}': {e}\nLa migracion fue revertida (rollback)."
+
+    except Exception as e:
+        return f"ERROR: {e}"
+    finally:
+        if conn:
+            conn.close()
+
+
+def _rollback_migration(db_path: str, migration_id: str) -> str:
+    """Revierte una migracion especifica."""
+    if not migration_id:
+        return "ERROR: Debes especificar el migracion_id a revertir."
+
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+
+        # Verificar que la migracion fue aplicada
+        cursor = conn.execute(
+            "SELECT id, sql_down FROM _migrations WHERE id = ? AND status = 'applied'",
+            (migration_id,)
+        )
+        row = cursor.fetchone()
+
+        if not row:
+            # Buscar en archivos
+            migration_file = os.path.join(_MIGRATIONS_DIR, f"{migration_id}.json")
+            if not os.path.exists(migration_file):
+                return f"ERROR: Migracion '{migration_id}' no encontrada o no fue aplicada."
+
+            with open(migration_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            sql_down = data.get("sql_down", "")
+        else:
+            sql_down = row[1]
+
+        if not sql_down or sql_down.startswith("--"):
+            return f"ERROR: No hay SQL de rollback para la migracion '{migration_id}'."
+
+        # Ejecutar rollback en transaccion
+        try:
+            conn.execute("BEGIN")
+            for statement in sql_down.split(";"):
+                statement = statement.strip()
+                if statement and not statement.startswith("--"):
+                    conn.execute(statement)
+
+            # Actualizar estado
+            from datetime import datetime as _dt
+            conn.execute(
+                "UPDATE _migrations SET status = 'rolled_back', rolled_back_at = ? WHERE id = ?",
+                (_dt.now().isoformat(), migration_id)
+            )
+            conn.execute("COMMIT")
+
+            return f"Migracion '{migration_id}' revertida exitosamente."
+
+        except Exception as e:
+            conn.execute("ROLLBACK")
+            return f"ERROR revirtiendo migracion '{migration_id}': {e}\nEl rollback fallo, datos pueden estar en estado inconsistente."
+
+    except Exception as e:
+        return f"ERROR: {e}"
+    finally:
+        if conn:
+            conn.close()
+
+
+def _migration_status(db_path: str) -> str:
+    """Muestra el estado de todas las migraciones."""
+    try:
+        conn = sqlite3.connect(db_path)
+
+        # Obtener migraciones aplicadas de la DB
+        cursor = conn.execute(
+            "SELECT id, descripcion, status, applied_at FROM _migrations ORDER BY id"
+        )
+        applied = {row[0]: {"desc": row[1], "status": row[2], "applied_at": row[3]} for row in cursor.fetchall()}
+        conn.close()
+
+        # Obtener todas las migraciones de archivos
+        all_migrations = []
+        if os.path.exists(_MIGRATIONS_DIR):
+            for fname in sorted(os.listdir(_MIGRATIONS_DIR)):
+                if fname.endswith(".json"):
+                    try:
+                        with open(os.path.join(_MIGRATIONS_DIR, fname), "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        mid = data["id"]
+                        db_info = applied.get(mid, {})
+                        all_migrations.append({
+                            "id": mid,
+                            "descripcion": data.get("descripcion", ""),
+                            "status": db_info.get("status", "pending"),
+                            "applied_at": db_info.get("applied_at", ""),
+                        })
+                    except Exception:
+                        continue
+
+        # Agregar las que solo estan en la DB (no tienen archivo)
+        for mid, info in applied.items():
+            if not any(m["id"] == mid for m in all_migrations):
+                all_migrations.append({
+                    "id": mid,
+                    "descripcion": info.get("desc", ""),
+                    "status": info["status"],
+                    "applied_at": info.get("applied_at", ""),
+                })
+
+        if not all_migrations:
+            return "No hay migraciones registradas."
+
+        # Formatear
+        lines = [f"Estado de migraciones ({len(all_migrations)} total):\n"]
+        for m in sorted(all_migrations, key=lambda x: x["id"]):
+            status_icon = {"applied": "OK", "pending": "..", "rolled_back": "XX"}.get(m["status"], "??")
+            lines.append(
+                f"  [{status_icon}] {m['id']}: {m.get('descripcion', '(sin descripcion)')}"
+                f"{' (aplicada: ' + m['applied_at'][:10] + ')' if m.get('applied_at') else ''}"
+            )
+
+        applied_count = sum(1 for m in all_migrations if m["status"] == "applied")
+        pending_count = sum(1 for m in all_migrations if m["status"] == "pending")
+
+        lines.append(f"\nResumen: {applied_count} aplicadas, {pending_count} pendientes")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"ERROR obteniendo estado: {e}"
+
+
+def _generate_migration_sql(db_path: str, descripcion: str = "") -> str:
+    """Genera SQL de migracion comparando tablas existentes vs lo que se necesita.
+
+    Usa LLM para generar el SQL de migracion basado en la descripcion
+    de los cambios deseados y el esquema actual de la base de datos.
+    """
+    try:
+        # Obtener esquema actual
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != '_migrations'"
+        )
+        tables = cursor.fetchall()
+        conn.close()
+
+        schema_info = "\n".join([f"TABLE {t[0]}:\n{t[1]}" for t in tables if t[1]])
+
+        if not descripcion:
+            return (
+                f"Esquema actual de la base de datos:\n\n{schema_info}\n\n"
+                f"Proporciona una descripcion de los cambios que necesitas para generar la migracion."
+            )
+
+        # Usar LLM para generar SQL
+        from llm import ollama
+        prompt = (
+            f"Eres un experto en SQL para SQLite. Genera SQL de migracion para los siguientes cambios:\n\n"
+            f"ESQUEMA ACTUAL:\n{schema_info}\n\n"
+            f"CAMBIOS SOLICITADOS: {descripcion}\n\n"
+            f"Genera DOS bloques SQL:\n"
+            f"1. SQL_UP: Sentencias SQL para APLICAR la migracion\n"
+            f"2. SQL_DOWN: Sentencias SQL para REVERTIR la migracion\n\n"
+            f"Formato de respuesta:\n"
+            f"```sql_up\n...SQL para aplicar...\n```\n"
+            f"```sql_down\n...SQL para revertir...\n```"
+        )
+
+        messages = [{"role": "user", "content": prompt}]
+        response = ollama.generate_chat(messages)
+        result = str(response).strip() if response else ""
+
+        if not result:
+            return "ERROR: No se pudo generar SQL de migracion."
+
+        # Parsear resultado
+        sql_up = ""
+        sql_down = ""
+        if "```sql_up" in result:
+            parts = result.split("```sql_up")
+            if len(parts) > 1:
+                sql_up = parts[1].split("```")[0].strip()
+        if "```sql_down" in result:
+            parts = result.split("```sql_down")
+            if len(parts) > 1:
+                sql_down = parts[1].split("```")[0].strip()
+
+        if not sql_up:
+            # Fallback: usar todo el resultado como sql_up
+            sql_up = result
+            sql_down = ""
+
+        output = (
+            f"SQL de migracion generado para: {descripcion}\n\n"
+            f"== SQL UP (aplicar) ==\n{sql_up}\n\n"
+            f"== SQL DOWN (revertir) ==\n{sql_down or '-- No se genero SQL de rollback'}\n\n"
+            f"Para crear la migracion:\n"
+            f"db_migrate(db_path='{db_path}', accion='create', sql_up='''{sql_up[:200]}''', sql_down='''{sql_down[:200] if sql_down else ''}''', descripcion='{descripcion}')"
+        )
+
+        return output
+
+    except Exception as e:
+        return f"ERROR generando migracion: {e}"

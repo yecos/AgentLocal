@@ -517,3 +517,221 @@ def escribir_portapapeles(texto: str) -> str:
         return "ERROR: No se pudo escribir al portapapeles. Instala: pip install pyperclip"
     except Exception as e:
         return f"ERROR escribiendo portapapeles: {e}"
+
+
+# ============================================================
+# S5.5: AGENDA / SCHEDULER
+# ============================================================
+
+_AGENDA_FILE = os.path.join(LEARN_DIR, "agenda.json")
+
+def crear_evento(
+    titulo: str,
+    fecha: str = "",
+    hora: str = "",
+    descripcion: str = "",
+    duracion_minutos: int = 60,
+    prioridad: str = "normal",
+    recordatorio_minutos: int = 15
+) -> str:
+    """S5.5: Crea un evento en la agenda del agente.
+
+    Permite gestionar eventos, reuniones y recordatorios.
+    Los eventos se almacenan localmente y se pueden consultar,
+    modificar, y detectar conflictos de horario.
+
+    Args:
+        titulo: Titulo del evento o reunion
+        fecha: Fecha del evento en formato YYYY-MM-DD (si vacio, hoy)
+        hora: Hora del evento en formato HH:MM (si vacio, sin hora fija)
+        descripcion: Descripcion o notas del evento
+        duracion_minutos: Duracion estimada en minutos (default: 60)
+        prioridad: Prioridad: alta, normal, baja (default: normal)
+        recordatorio_minutos: Minutos antes para recordar (default: 15)
+
+    Returns:
+        Confirmacion del evento creado
+    """
+    from datetime import datetime as _dt, timedelta
+
+    # Defaults
+    if not fecha:
+        fecha = _dt.now().strftime("%Y-%m-%d")
+
+    # Cargar agenda existente
+    agenda = _load_agenda()
+
+    # Detectar conflictos
+    conflictos = _detect_conflicts(agenda, fecha, hora, duracion_minutos)
+
+    # Crear evento
+    event_id = f"evt_{_dt.now().strftime('%Y%m%d_%H%M%S')}"
+    event = {
+        "id": event_id,
+        "titulo": titulo[:200],
+        "fecha": fecha,
+        "hora": hora,
+        "descripcion": descripcion[:1000],
+        "duracion_minutos": duracion_minutos,
+        "prioridad": prioridad,
+        "recordatorio_minutos": recordatorio_minutos,
+        "creado": _dt.now().isoformat(),
+        "estado": "pendiente",
+    }
+
+    agenda.append(event)
+    _save_agenda(agenda)
+
+    result = f"Evento creado exitosamente.\nID: {event_id}\nTitulo: {titulo}\nFecha: {fecha}"
+    if hora:
+        result += f" a las {hora}"
+    result += f"\nDuracion: {duracion_minutos} min\nPrioridad: {prioridad}"
+
+    if conflictos:
+        result += f"\n\nCONFLICTO DETECTADO: {len(conflictos)} evento(s) se solapan con este horario:"
+        for c in conflictos:
+            result += f"\n  - {c['titulo']} ({c['fecha']} {c.get('hora', '')})"
+
+    return result
+
+
+def listar_eventos(
+    fecha: str = "",
+    proximos: int = 7,
+    prioridad: str = ""
+) -> str:
+    """S5.5: Lista eventos de la agenda, por defecto los proximos N dias.
+
+    Args:
+        fecha: Fecha especifica en formato YYYY-MM-DD (opcional)
+        proximos: Mostrar eventos de los proximos N dias (default: 7)
+        prioridad: Filtrar por prioridad: alta, normal, baja (opcional)
+
+    Returns:
+        Lista de eventos encontrados
+    """
+    from datetime import datetime as _dt, timedelta
+
+    agenda = _load_agenda()
+    if not agenda:
+        return "No hay eventos en la agenda. Usa crear_evento para agregar."
+
+    # Filtrar
+    now = _dt.now()
+    fecha_limite = (now + timedelta(days=proximos)).strftime("%Y-%m-%d")
+
+    filtered = []
+    for event in agenda:
+        # Filtrar por prioridad
+        if prioridad and event.get("prioridad", "") != prioridad:
+            continue
+        # Filtrar por fecha especifica
+        if fecha:
+            if event.get("fecha", "") != fecha:
+                continue
+        else:
+            # Filtrar por rango de proximos N dias
+            evt_fecha = event.get("fecha", "")
+            if evt_fecha and evt_fecha >= now.strftime("%Y-%m-%d") and evt_fecha <= fecha_limite:
+                pass  # OK
+            elif not evt_fecha:
+                pass  # Sin fecha, incluir
+            else:
+                continue  # Fuera de rango
+
+        filtered.append(event)
+
+    # Ordenar por fecha y hora
+    filtered.sort(key=lambda e: (e.get("fecha", "9999"), e.get("hora", "99:99")))
+
+    if not filtered:
+        return f"No hay eventos para los proximos {proximos} dias."
+
+    # Formatear
+    lines = [f"Agenda: {len(filtered)} evento(s) encontrados\n"]
+    for evt in filtered:
+        prio_icon = {"alta": "!!!", "normal": "...", "baja": "  "}.get(evt.get("prioridad", ""), "...")
+        estado = evt.get("estado", "pendiente")
+        lines.append(
+            f"  [{prio_icon}] {evt.get('titulo', '?')}\n"
+            f"      ID: {evt['id']} | Fecha: {evt.get('fecha', '?')} {evt.get('hora', '')}\n"
+            f"      Duracion: {evt.get('duracion_minutos', '?')} min | Estado: {estado}"
+        )
+        if evt.get("descripcion"):
+            lines.append(f"      Notas: {evt['descripcion'][:100]}")
+
+    return "\n".join(lines)
+
+
+def eliminar_evento(evento_id: str) -> str:
+    """S5.5: Elimina un evento de la agenda por su ID.
+
+    Args:
+        evento_id: ID del evento a eliminar
+
+    Returns:
+        Confirmacion de eliminacion
+    """
+    agenda = _load_agenda()
+    original_len = len(agenda)
+
+    agenda = [e for e in agenda if e.get("id") != evento_id]
+
+    if len(agenda) == original_len:
+        return f"ERROR: No se encontro evento con ID: {evento_id}"
+
+    _save_agenda(agenda)
+    return f"Evento {evento_id} eliminado exitosamente."
+
+
+def _load_agenda() -> list:
+    """Carga la agenda desde disco."""
+    try:
+        if os.path.exists(_AGENDA_FILE):
+            with open(_AGENDA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as e:
+        logger.debug(f"Error cargando agenda: {e}")
+    return []
+
+
+def _save_agenda(agenda: list):
+    """Guarda la agenda a disco."""
+    try:
+        os.makedirs(os.path.dirname(_AGENDA_FILE), exist_ok=True)
+        with open(_AGENDA_FILE, "w", encoding="utf-8") as f:
+            json.dump(agenda, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"Error guardando agenda: {e}")
+
+
+def _detect_conflicts(agenda: list, fecha: str, hora: str, duracion_minutos: int) -> list:
+    """Detecta conflictos de horario con eventos existentes."""
+    if not fecha or not hora:
+        return []  # Sin fecha/hora, no se puede verificar
+
+    try:
+        from datetime import datetime as _dt, timedelta
+        new_start = _dt.strptime(f"{fecha} {hora}", "%Y-%m-%d %H:%M")
+        new_end = new_start + timedelta(minutes=duracion_minutos)
+    except (ValueError, TypeError):
+        return []  # Formato invalido, no verificar
+
+    conflicts = []
+    for evt in agenda:
+        evt_fecha = evt.get("fecha", "")
+        evt_hora = evt.get("hora", "")
+        if not evt_fecha or not evt_hora:
+            continue
+
+        try:
+            evt_start = _dt.strptime(f"{evt_fecha} {evt_hora}", "%Y-%m-%d %H:%M")
+            evt_end = evt_start + timedelta(minutes=evt.get("duracion_minutos", 60))
+
+            # Check overlap
+            if new_start < evt_end and new_end > evt_start:
+                conflicts.append(evt)
+        except (ValueError, TypeError):
+            continue
+
+    return conflicts

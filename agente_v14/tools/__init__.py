@@ -40,8 +40,9 @@ from .documentos import (
 from .crear_documentos import crear_pdf, crear_docx, crear_xlsx, crear_grafico, crear_pptx
 
 # Importar herramientas v16 (Database, Code Review)
-from .database_tool import query_natural_language
+from .database_tool import query_natural_language, db_migrate
 from .code_executor import review_code
+from .git_tool import git_feature_workflow
 from .percepcion import (
     transcribir_audio, leer_imagen_ocr,
     scrapear_web, automatizar_web
@@ -49,7 +50,8 @@ from .percepcion import (
 from .integracion import (
     leer_email, enviar_email, configurar_email,
     llamar_api, programar_tarea, listar_tareas,
-    leer_portapapeles, escribir_portapapeles
+    leer_portapapeles, escribir_portapapeles,
+    crear_evento, listar_eventos, eliminar_evento
 )
 
 # Importar herramientas v15 (Super Agente Avanzado)
@@ -201,6 +203,12 @@ def _register_submodule_tools():
         "buscar_conocimiento": buscar_conocimiento,
         "listar_conocimiento": listar_conocimiento,
         "notas_reunion": notas_reunion,
+        # v17.3 Skills nuevos (S5.5, S6.3, S6.4)
+        "crear_evento": crear_evento,
+        "listar_eventos": listar_eventos,
+        "eliminar_evento": eliminar_evento,
+        "git_feature_workflow": git_feature_workflow,
+        "db_migrate": db_migrate,
     }
 
     for name, func in submod_tools.items():

@@ -1413,4 +1413,99 @@ TOOL_SCHEMAS = [
             }
         }
     },
+    # ============================================================
+    # S5.5: AGENDA / SCHEDULER
+    # ============================================================
+    {
+        "type": "function",
+        "function": {
+            "name": "crear_evento",
+            "description": "Crea un evento en la agenda del agente. Permite gestionar reuniones y recordatorios con deteccion de conflictos de horario.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "titulo": {"type": "string", "description": "Titulo del evento o reunion"},
+                    "fecha": {"type": "string", "description": "Fecha del evento en formato YYYY-MM-DD (si vacio, hoy)"},
+                    "hora": {"type": "string", "description": "Hora del evento en formato HH:MM (si vacio, sin hora fija)"},
+                    "descripcion": {"type": "string", "description": "Descripcion o notas del evento"},
+                    "duracion_minutos": {"type": "integer", "description": "Duracion estimada en minutos (default: 60)"},
+                    "prioridad": {"type": "string", "description": "Prioridad: alta, normal, baja (default: normal)"},
+                    "recordatorio_minutos": {"type": "integer", "description": "Minutos antes para recordar (default: 15)"}
+                },
+                "required": ["titulo"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "listar_eventos",
+            "description": "Lista eventos de la agenda, por defecto los proximos 7 dias. Permite filtrar por fecha o prioridad.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fecha": {"type": "string", "description": "Fecha especifica en formato YYYY-MM-DD (opcional)"},
+                    "proximos": {"type": "integer", "description": "Mostrar eventos de los proximos N dias (default: 7)"},
+                    "prioridad": {"type": "string", "description": "Filtrar por prioridad: alta, normal, baja (opcional)"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "eliminar_evento",
+            "description": "Elimina un evento de la agenda por su ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "evento_id": {"type": "string", "description": "ID del evento a eliminar"}
+                },
+                "required": ["evento_id"]
+            }
+        }
+    },
+    # ============================================================
+    # S6.3: GIT FEATURE WORKFLOW
+    # ============================================================
+    {
+        "type": "function",
+        "function": {
+            "name": "git_feature_workflow",
+            "description": "Ejecuta flujo completo de feature branch workflow. Automatiza: crear branch, commit, merge, push y genera mensaje de PR.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "feature_name": {"type": "string", "description": "Nombre de la feature (sin el prefijo feature/)"},
+                    "descripcion": {"type": "string", "description": "Descripcion de la feature para el commit/PR"},
+                    "repo_path": {"type": "string", "description": "Ruta al repositorio (default: REPOS_DIR)"},
+                    "accion": {"type": "string", "description": "Accion: start, status, commit, finish, abort (default: start)"}
+                },
+                "required": ["feature_name"]
+            }
+        }
+    },
+    # ============================================================
+    # S6.4: DATABASE MIGRATIONS
+    # ============================================================
+    {
+        "type": "function",
+        "function": {
+            "name": "db_migrate",
+            "description": "Gestiona migraciones de esquema de base de datos SQLite. Permite crear, aplicar, revertir migraciones con historial y rollback automatico.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "db_path": {"type": "string", "description": "Ruta a la base de datos SQLite"},
+                    "accion": {"type": "string", "description": "Accion: create, up, down, status, generate (default: status)"},
+                    "migracion_id": {"type": "string", "description": "ID de migracion para up/down especifico"},
+                    "sql_up": {"type": "string", "description": "SQL para aplicar la migracion (accion=create)"},
+                    "sql_down": {"type": "string", "description": "SQL para revertir la migracion (accion=create)"},
+                    "descripcion": {"type": "string", "description": "Descripcion de la migracion"}
+                },
+                "required": ["db_path"]
+            }
+        }
+    },
 ]
