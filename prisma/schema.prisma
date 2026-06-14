@@ -1,9 +1,6 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -12,6 +9,10 @@ datasource db {
   provider = "sqlite"
   url      = env("DATABASE_URL")
 }
+
+// ============================================================
+// AgentLocal Data Models — Complete Schema
+// ============================================================
 
 model User {
   id        String   @id @default(cuid())
@@ -29,4 +30,159 @@ model Post {
   authorId  String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// --- Conversations & Messages ---
+
+model Conversation {
+  id        String    @id @default(cuid())
+  title     String    @default("New Conversation")
+  model     String?
+  mode      String    @default("agent") // "agent" or "chat"
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  messages  ConversationMessage[]
+}
+
+model ConversationMessage {
+  id             String       @id @default(cuid())
+  conversationId String
+  role           String       // "user", "assistant", "system"
+  content        String
+  thinking       String?      // Deep thinking content
+  toolCalls      String?      // JSON string of tool calls
+  tokenCount     Int          @default(0)
+  responseTime   Int?         // ms
+  createdAt      DateTime     @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId])
+}
+
+// --- Memory ---
+
+model MemoryEntry {
+  id        String    @id @default(cuid())
+  type      String    // "short_term", "long_term", "working", "episodic", "preference"
+  category  String?
+  content   String
+  context   String?
+  confidence Float     @default(1.0)
+  source    String?    // "user", "agent", "tool", "learning"
+  tags      String?    // JSON array string
+  expiresAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([type])
+  @@index([category])
+}
+
+// --- Notes ---
+
+model Note {
+  id        String   @id @default(cuid())
+  title     String
+  content   String
+  pinned    Boolean  @default(false)
+  tags      String?  // JSON array string
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([pinned])
+}
+
+// --- Projects ---
+
+model Project {
+  id          String   @id @default(cuid())
+  name        String
+  path        String
+  language    String?
+  framework   String?
+  description String?
+  lastOpened  DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([path])
+}
+
+// --- Skills ---
+
+model Skill {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  category    String   @default("general")
+  enabled     Boolean  @default(true)
+  isLocal     Boolean  @default(true) // true = 100% local, false = requires cloud API
+  config      String?  // JSON string with skill-specific configuration
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([category])
+  @@index([enabled])
+}
+
+// --- Planning & Tasks ---
+
+model ExecutionPlan {
+  id          String   @id @default(cuid())
+  goal        String
+  taskType    String   @default("general")
+  status      String   @default("active") // "active", "completed", "failed", "paused"
+  plan        String?  // JSON string with full plan structure
+  result      String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  tasks       Task[]
+}
+
+model Task {
+  id          String         @id @default(cuid())
+  planId      String
+  title       String
+  description String?
+  status      String         @default("pending") // "pending", "in_progress", "completed", "failed", "skipped"
+  order       Int            @default(0)
+  result      String?
+  error       String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  plan        ExecutionPlan  @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  @@index([planId])
+  @@index([status])
+}
+
+// --- Tool Call Logs ---
+
+model ToolCallLog {
+  id          String   @id @default(cuid())
+  tool        String
+  arguments   String?  // JSON string
+  result      String?
+  success     Boolean  @default(true)
+  durationMs  Int?
+  conversationId String?
+  createdAt   DateTime @default(now())
+
+  @@index([tool])
+  @@index([success])
+  @@index([createdAt])
+}
+
+// --- Agent Configuration ---
+
+model AgentConfig {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String
+  category  String   @default("general") // "model", "memory", "tools", "ui", "security"
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([key])
+  @@index([category])
 }

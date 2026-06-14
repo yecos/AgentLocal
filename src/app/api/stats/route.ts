@@ -6,7 +6,6 @@ export async function GET() {
   try {
     const [
       conversationCount,
-      activeConversationCount,
       planCount,
       activePlanCount,
       taskCount,
@@ -19,17 +18,17 @@ export async function GET() {
       noteCount,
       toolCallCount,
       recentToolCalls,
-      toolCallSuccessRate,
+      successfulToolCalls,
+      totalToolCallsForRate,
     ] = await Promise.all([
       prisma.conversation.count(),
-      prisma.conversation.count({ where: { status: 'active' } }),
       prisma.executionPlan.count(),
-      prisma.executionPlan.count({ where: { status: 'in_progress' } }),
+      prisma.executionPlan.count({ where: { status: 'active' } }),
       prisma.task.count(),
       prisma.task.count({ where: { status: 'completed' } }),
       prisma.task.count({ where: { status: 'failed' } }),
       prisma.memoryEntry.count(),
-      prisma.project.count({ where: { status: 'active' } }),
+      prisma.project.count(),
       prisma.skill.count(),
       prisma.skill.count({ where: { enabled: true } }),
       prisma.note.count(),
@@ -40,23 +39,20 @@ export async function GET() {
           createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
         },
       }),
-      // Tool call success rate
-      prisma.toolCallLog.aggregate({
-        _count: { id: true },
-        _sum: { success: true },
-      }),
+      // Successful tool calls for rate calculation
+      prisma.toolCallLog.count({ where: { success: true } }),
+      prisma.toolCallLog.count(),
     ])
 
-    const successTotal = toolCallSuccessRate._sum.success ?? 0
-    const successRate = toolCallSuccessRate._count.id > 0
-      ? Math.round((successTotal / toolCallSuccessRate._count.id) * 100)
+    const successRate = totalToolCallsForRate > 0
+      ? Math.round((successfulToolCalls / totalToolCallsForRate) * 100)
       : 0
 
     // Top tools by usage
     const topTools = await prisma.toolCallLog.groupBy({
-      by: ['toolName'],
-      _count: { toolName: true },
-      orderBy: { _count: { toolName: 'desc' } },
+      by: ['tool'],
+      _count: { tool: true },
+      orderBy: { _count: { tool: 'desc' } },
       take: 10,
     })
 
@@ -75,7 +71,6 @@ export async function GET() {
     return NextResponse.json({
       conversations: {
         total: conversationCount,
-        active: activeConversationCount,
       },
       plans: {
         total: planCount,
@@ -105,7 +100,7 @@ export async function GET() {
         total: toolCallCount,
         last24h: recentToolCalls,
         successRate,
-        topTools: topTools.map(t => ({ name: t.toolName, count: t._count.toolName })),
+        topTools: topTools.map(t => ({ name: t.tool, count: t._count.tool })),
       },
     })
   } catch (error) {
