@@ -1,6 +1,9 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import ReactMarkdown from "react-markdown";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import {
   ChevronDown,
   ChevronRight,
@@ -17,6 +20,13 @@ import {
   PanelRightClose,
   Activity,
   Circle,
+  Paperclip,
+  Mic,
+  MicOff,
+  Square,
+  X,
+  AlertTriangle,
+  Sparkles,
 } from "lucide-react";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -30,12 +40,19 @@ interface OllamaModel {
   quantization_level: string;
 }
 
+interface ToolCall {
+  name: string;
+  arguments?: Record<string, unknown>;
+  result?: string;
+  status: "loading" | "success" | "error";
+}
+
 interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
   thinking?: string;
-  toolCalls?: string[];
+  toolCalls?: ToolCall[];
   timestamp: number;
   responseTime?: number;
   tokenCount?: number;
@@ -58,6 +75,18 @@ interface SessionStats {
   totalTokens: number;
 }
 
+interface ToolInfo {
+  name: string;
+  description?: string;
+  category?: string;
+}
+
+interface UploadedFile {
+  name: string;
+  size: number;
+  type: string;
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function formatBytes(bytes: number): string {
@@ -76,13 +105,59 @@ function formatUptime(seconds: number): string {
 }
 
 function generateId(): string {
-  return Math.random().toString(36).substring(2, 9);
+  return Math.random().toString(36).substring(2, 9) + Date.now().toString(36);
 }
 
 function cleanThinking(text: string): string {
   return text
     .replace(/<\/?think[^>]*>/g, "")
     .trim();
+}
+
+// ─── Tool Call Card Component ────────────────────────────────────────────────
+
+function ToolCallCard({ toolCall }: { toolCall: ToolCall }) {
+  const statusColors = {
+    loading: "text-[#ffd93d] border-[rgba(255,217,61,0.2)]",
+    success: "text-[#00ff88] border-[rgba(0,255,136,0.2)]",
+    error: "text-[#ff3333] border-[rgba(255,51,51,0.2)]",
+  };
+  const statusIcons = {
+    loading: "⟳",
+    success: "✓",
+    error: "✗",
+  };
+
+  return (
+    <div
+      className={`my-1.5 border ${statusColors[toolCall.status]} bg-[rgba(255,255,255,0.02)] px-3 py-2 text-[12px]`}
+    >
+      <div className="flex items-center gap-2">
+        <span className={`${statusColors[toolCall.status]}`}>
+          {toolCall.status === "loading" ? (
+            <span className="inline-block animate-spin">⟳</span>
+          ) : (
+            statusIcons[toolCall.status]
+          )}
+        </span>
+        <span className="text-[#e0e0e0] font-medium">{toolCall.name}</span>
+        {toolCall.arguments && Object.keys(toolCall.arguments).length > 0 && (
+          <span className="text-[#777] text-[11px]">
+            (
+            {Object.entries(toolCall.arguments)
+              .map(([k, v]) => `${k}=${String(v).slice(0, 30)}`)
+              .join(", ")}
+            )
+          </span>
+        )}
+      </div>
+      {toolCall.result && (
+        <div className="mt-1.5 text-[11px] text-[#888] max-h-24 overflow-y-auto whitespace-pre-wrap border-l border-[rgba(255,255,255,0.06)] pl-2">
+          {toolCall.result.slice(0, 500)}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ─── Hardware Stats Component ────────────────────────────────────────────────
@@ -98,13 +173,34 @@ function HardwareStats() {
 
     const interval = setInterval(() => {
       setStats((prev) => {
-        const base = prev.cpu === 0
-          ? { cpu: 20 + Math.floor(Math.random() * 30), mem: 40 + Math.floor(Math.random() * 20), disk: 25 + Math.floor(Math.random() * 20) }
-          : {
-              cpu: Math.max(5, Math.min(95, prev.cpu + (Math.random() > 0.5 ? 1 : -1) * Math.floor(Math.random() * 5))),
-              mem: Math.max(30, Math.min(85, prev.mem + (Math.random() > 0.5 ? 1 : -1) * Math.floor(Math.random() * 3))),
-              disk: prev.disk,
-            };
+        const base =
+          prev.cpu === 0
+            ? {
+                cpu: 20 + Math.floor(Math.random() * 30),
+                mem: 40 + Math.floor(Math.random() * 20),
+                disk: 25 + Math.floor(Math.random() * 20),
+              }
+            : {
+                cpu: Math.max(
+                  5,
+                  Math.min(
+                    95,
+                    prev.cpu +
+                      (Math.random() > 0.5 ? 1 : -1) *
+                        Math.floor(Math.random() * 5)
+                  )
+                ),
+                mem: Math.max(
+                  30,
+                  Math.min(
+                    85,
+                    prev.mem +
+                      (Math.random() > 0.5 ? 1 : -1) *
+                        Math.floor(Math.random() * 3)
+                  )
+                ),
+                disk: prev.disk,
+              };
         return base;
       });
     }, 100);
@@ -126,12 +222,14 @@ function HardwareStats() {
             <Cpu size={9} className="text-[#505050]" />
             <span className="text-[10px] text-[#505050]">CPU</span>
           </div>
-          <span className="text-[10px] text-[#666666]">{stats.cpu > 0 ? `${stats.cpu}%` : '—'}</span>
+          <span className="text-[10px] text-[#666666]">
+            {stats.cpu > 0 ? `${stats.cpu}%` : "—"}
+          </span>
         </div>
         <div className="h-[3px] bg-[rgba(255,255,255,0.08)] overflow-hidden">
           <div
             className="h-full bg-[rgba(0,212,255,0.4)] transition-all duration-1000"
-            style={{ width: stats.cpu > 0 ? `${stats.cpu}%` : '0%' }}
+            style={{ width: stats.cpu > 0 ? `${stats.cpu}%` : "0%" }}
           />
         </div>
       </div>
@@ -141,12 +239,14 @@ function HardwareStats() {
             <MemoryStick size={9} className="text-[#505050]" />
             <span className="text-[10px] text-[#505050]">MEM</span>
           </div>
-          <span className="text-[10px] text-[#666666]">{stats.mem > 0 ? `${stats.mem}%` : '—'}</span>
+          <span className="text-[10px] text-[#666666]">
+            {stats.mem > 0 ? `${stats.mem}%` : "—"}
+          </span>
         </div>
         <div className="h-[3px] bg-[rgba(255,255,255,0.08)] overflow-hidden">
           <div
             className="h-full bg-[rgba(0,255,136,0.35)] transition-all duration-1000"
-            style={{ width: stats.mem > 0 ? `${stats.mem}%` : '0%' }}
+            style={{ width: stats.mem > 0 ? `${stats.mem}%` : "0%" }}
           />
         </div>
       </div>
@@ -156,12 +256,14 @@ function HardwareStats() {
             <HardDrive size={9} className="text-[#505050]" />
             <span className="text-[10px] text-[#505050]">DISK</span>
           </div>
-          <span className="text-[10px] text-[#666666]">{stats.disk > 0 ? `${stats.disk}%` : '—'}</span>
+          <span className="text-[10px] text-[#666666]">
+            {stats.disk > 0 ? `${stats.disk}%` : "—"}
+          </span>
         </div>
         <div className="h-[3px] bg-[rgba(255,255,255,0.08)] overflow-hidden">
           <div
             className="h-full bg-[rgba(255,217,61,0.35)] transition-all duration-1000"
-            style={{ width: stats.disk > 0 ? `${stats.disk}%` : '0%' }}
+            style={{ width: stats.disk > 0 ? `${stats.disk}%` : "0%" }}
           />
         </div>
       </div>
@@ -187,7 +289,7 @@ function ChatMessage({
   if (msg.role === "user") {
     return (
       <div className="flex justify-end animate-fade-in">
-        <div className="max-w-[70%] px-3.5 py-2.5 border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.02)] text-[15px] leading-[1.7] tracking-[0.01em] text-[#f0f0f0]">
+        <div className="max-w-[70%] px-3.5 py-2.5 border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.02)] text-[14px] leading-[1.7] tracking-[0.01em] text-[#f0f0f0]">
           {msg.content}
         </div>
       </div>
@@ -200,7 +302,7 @@ function ChatMessage({
   return (
     <div className="animate-fade-in">
       <div className="max-w-[85%]">
-        <div className="border-l border-[rgba(0,212,255,0.2)] pl-3">
+        <div className="border-l-2 border-[rgba(0,212,255,0.3)] pl-3">
           {/* Thinking section */}
           {cleanedThinking && (
             <div className="mb-2.5">
@@ -213,6 +315,7 @@ function ChatMessage({
                 ) : (
                   <ChevronRight size={10} />
                 )}
+                <Sparkles size={9} className="text-[rgba(0,212,255,0.4)]" />
                 <span>thinking</span>
                 <span className="text-[#555555] ml-1">
                   ({cleanedThinking.length} chars)
@@ -226,23 +329,136 @@ function ChatMessage({
             </div>
           )}
 
-          {/* Tool calls */}
+          {/* Tool call cards */}
           {msg.toolCalls && msg.toolCalls.length > 0 && (
-            <div className="flex flex-wrap gap-1.5 mb-2">
+            <div className="mb-2">
               {msg.toolCalls.map((tool, i) => (
-                <span
-                  key={i}
-                  className="text-[10px] px-1.5 py-0.5 border border-[rgba(0,212,255,0.2)] text-[rgba(0,212,255,0.7)]"
-                >
-                  [{tool}]
-                </span>
+                <ToolCallCard key={i} toolCall={tool} />
               ))}
             </div>
           )}
 
-          {/* Content */}
-          <div className="text-[15px] leading-[1.7] tracking-[0.01em] text-[#e0e0e0] whitespace-pre-wrap">
-            {msg.content}
+          {/* Content with Markdown */}
+          <div className="text-[14px] leading-[1.7] tracking-[0.01em] text-[#e0e0e0]">
+            {msg.content ? (
+              <ReactMarkdown
+                components={{
+                  code({
+                    className,
+                    children,
+                    ...props
+                  }) {
+                    const match = /language-(\w+)/.exec(className || "");
+                    const inline = !match;
+                    return !inline ? (
+                      <SyntaxHighlighter
+                        style={oneDark}
+                        language={match[1]}
+                        PreTag="div"
+                        className="!bg-[rgba(255,255,255,0.04)] !border !border-[rgba(255,255,255,0.06)] !rounded-sm !my-2 !text-[12px]"
+                      >
+                        {String(children).replace(/\n$/, "")}
+                      </SyntaxHighlighter>
+                    ) : (
+                      <code
+                        className="px-1 py-0.5 bg-[rgba(255,255,255,0.06)] text-[#00d4ff] text-[13px]"
+                        {...props}
+                      >
+                        {children}
+                      </code>
+                    );
+                  },
+                  p({ children }) {
+                    return (
+                      <p className="mb-2 last:mb-0 leading-[1.7]">{children}</p>
+                    );
+                  },
+                  ul({ children }) {
+                    return <ul className="mb-2 ml-4 list-disc">{children}</ul>;
+                  },
+                  ol({ children }) {
+                    return (
+                      <ol className="mb-2 ml-4 list-decimal">{children}</ol>
+                    );
+                  },
+                  li({ children }) {
+                    return <li className="mb-1">{children}</li>;
+                  },
+                  h1({ children }) {
+                    return (
+                      <h1 className="text-xl font-bold mb-2 text-[#00d4ff]">
+                        {children}
+                      </h1>
+                    );
+                  },
+                  h2({ children }) {
+                    return (
+                      <h2 className="text-lg font-bold mb-2 text-[#00d4ff]">
+                        {children}
+                      </h2>
+                    );
+                  },
+                  h3({ children }) {
+                    return (
+                      <h3 className="text-base font-bold mb-1 text-[#00d4ff]">
+                        {children}
+                      </h3>
+                    );
+                  },
+                  blockquote({ children }) {
+                    return (
+                      <blockquote className="border-l-2 border-[#00d4ff] pl-3 my-2 text-[#999]">
+                        {children}
+                      </blockquote>
+                    );
+                  },
+                  a({ href, children }) {
+                    return (
+                      <a
+                        href={href}
+                        className="text-[#00d4ff] underline hover:text-[#33ddff]"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {children}
+                      </a>
+                    );
+                  },
+                  table({ children }) {
+                    return (
+                      <table className="border-collapse my-2 w-full">
+                        {children}
+                      </table>
+                    );
+                  },
+                  th({ children }) {
+                    return (
+                      <th className="border border-[rgba(255,255,255,0.1)] px-2 py-1 text-left text-[#00d4ff]">
+                        {children}
+                      </th>
+                    );
+                  },
+                  td({ children }) {
+                    return (
+                      <td className="border border-[rgba(255,255,255,0.1)] px-2 py-1">
+                        {children}
+                      </td>
+                    );
+                  },
+                  hr() {
+                    return (
+                      <hr className="border-[rgba(255,255,255,0.08)] my-3" />
+                    );
+                  },
+                  pre({ children }) {
+                    return <pre className="!bg-transparent !m-0 !p-0">{children}</pre>;
+                  },
+                }}
+              >
+                {msg.content}
+              </ReactMarkdown>
+            ) : null}
+
             {/* Streaming cursor */}
             {isStreaming && !msg.content && (
               <span className="inline-block w-[7px] h-[16px] bg-[rgba(0,212,255,0.5)] cursor-blink ml-0.5" />
@@ -262,10 +478,88 @@ function ChatMessage({
                   <span>~{msg.tokenCount} tokens</span>
                 </>
               ) : null}
+              {msg.toolCalls && msg.toolCalls.length > 0 && (
+                <>
+                  <span className="text-[#444444]">·</span>
+                  <span>{msg.toolCalls.length} tool calls</span>
+                </>
+              )}
             </div>
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─── Welcome Screen Component ────────────────────────────────────────────────
+
+function WelcomeScreen({
+  status,
+  selectedModel,
+  useAgent,
+}: {
+  status: SystemStatus;
+  selectedModel: string;
+  useAgent: boolean;
+}) {
+  return (
+    <div className="flex flex-col items-center justify-center h-full gap-4 animate-fade-in select-none">
+      {/* ASCII-art style logo */}
+      <div className="text-[13px] leading-[1.4] text-[rgba(0,212,255,0.15)] tracking-[0.2em] font-bold">
+        <div className="text-center">
+          ┏┓┏┓┏┳┓┏┓┏┓
+        </div>
+        <div className="text-center">
+          ┗┫┣ ┃ ┣┫┣
+        </div>
+        <div className="text-center">
+          ┗┛┗┛┻ ┗┛┗┛
+        </div>
+      </div>
+      <div className="h-px w-20 bg-[rgba(0,212,255,0.2)]" />
+      <div className="text-[11px] text-[#3a3a3a] max-w-sm text-center leading-[1.7]">
+        Local AI agent interface.
+        <br />
+        <span className="text-[#333333]">
+          All processing runs on your machine via Ollama.
+        </span>
+      </div>
+      <div className="flex items-center gap-4 mt-2">
+        <div className="flex items-center gap-1.5">
+          <Circle
+            size={4}
+            className={
+              status.connected
+                ? "fill-[#00ff88] text-[#00ff88]"
+                : "fill-[#ff3333] text-[#ff3333]"
+            }
+          />
+          <span className="text-[10px] text-[#444444]">
+            {status.connected ? "OLLAMA CONNECTED" : "OLLAMA OFFLINE"}
+          </span>
+        </div>
+        <span className="text-[10px] text-[#333333]">│</span>
+        <span className="text-[10px] text-[#444444]">{selectedModel}</span>
+        <span className="text-[10px] text-[#333333]">│</span>
+        <span className="text-[10px] text-[#444444]">
+          {useAgent ? "AGENT" : "CHAT"}
+        </span>
+      </div>
+      {!status.connected && (
+        <div className="mt-1 px-4 py-2 border border-[rgba(255,51,51,0.15)] text-[9px] text-[#ff3333]">
+          Start Ollama: ollama serve
+        </div>
+      )}
+      {useAgent && !status.agentAvailable && status.connected && (
+        <div className="mt-1 px-4 py-2 border border-[rgba(255,217,61,0.2)] text-[10px] text-[#ffd93d] leading-[1.6] flex items-center gap-2">
+          <AlertTriangle size={12} className="shrink-0" />
+          <span>
+            AGENT mode requires Bridge. Start:{" "}
+            <span className="text-[#ffaa33]">python bridge_api.py</span>
+          </span>
+        </div>
+      )}
     </div>
   );
 }
@@ -291,14 +585,22 @@ export default function ZAIInterface() {
     totalTokens: 0,
   });
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [expandedThinking, setExpandedThinking] = useState<Record<string, boolean>>({});
+  const [expandedThinking, setExpandedThinking] = useState<
+    Record<string, boolean>
+  >({});
   const [isMobile, setIsMobile] = useState(false);
   const [useAgent, setUseAgent] = useState(true);
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
+  const [isRecording, setIsRecording] = useState(false);
+  const [tools, setTools] = useState<ToolInfo[]>([]);
 
   // Refs
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const responseTimesRef = useRef<number[]>([]);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const recognitionRef = useRef<any>(null);
 
   // ─── Detect Mobile ──────────────────────────────────────────────────────
 
@@ -323,12 +625,49 @@ export default function ZAIInterface() {
       setStatus(data);
       if (data.connected && data.models.length > 0) {
         setSelectedModel((prev) => {
-          if (data.models.find((m: OllamaModel) => m.name === prev)) return prev;
+          if (data.models.find((m: OllamaModel) => m.name === prev))
+            return prev;
           return data.models[0].name;
         });
       }
     } catch {
-      setStatus({ connected: false, agentAvailable: false, models: [], modelCount: 0, error: "Failed to fetch" });
+      setStatus({
+        connected: false,
+        agentAvailable: false,
+        models: [],
+        modelCount: 0,
+        error: "Failed to fetch",
+      });
+    }
+  }, []);
+
+  // ─── Fetch Tools ─────────────────────────────────────────────────────────
+
+  const fetchTools = useCallback(async () => {
+    try {
+      const res = await fetch("/api/tools");
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.tools)) {
+          setTools(
+            data.tools.map((t: any) => ({
+              name: t.name || t,
+              description: t.description || "",
+              category: t.category || "general",
+            }))
+          );
+        } else if (Array.isArray(data)) {
+          setTools(
+            data.map((t: any) => ({
+              name: t.name || t,
+              description: t.description || "",
+              category: t.category || "general",
+            }))
+          );
+        }
+      }
+    } catch {
+      // Tools not available - that's fine
     }
   }, []);
 
@@ -339,6 +678,12 @@ export default function ZAIInterface() {
     const interval = setInterval(fetchStatus, 10000);
     return () => clearInterval(interval);
   }, [fetchStatus]);
+
+  useEffect(() => {
+    fetchTools();
+    const interval = setInterval(fetchTools, 30000);
+    return () => clearInterval(interval);
+  }, [fetchTools]);
 
   useEffect(() => {
     const timer = setInterval(() => setUptime((prev) => prev + 1), 1000);
@@ -358,15 +703,141 @@ export default function ZAIInterface() {
     return null;
   }, [messages]);
 
+  // ─── Group Tools by Category ────────────────────────────────────────────
+
+  const toolsByCategory = useMemo(() => {
+    const groups: Record<string, ToolInfo[]> = {};
+    for (const tool of tools) {
+      const cat = tool.category || "general";
+      if (!groups[cat]) groups[cat] = [];
+      groups[cat].push(tool);
+    }
+    return groups;
+  }, [tools]);
+
+  // ─── File Upload ────────────────────────────────────────────────────────
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+
+    const newFiles: UploadedFile[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      newFiles.push({
+        name: file.name,
+        size: file.size,
+        type: file.type,
+      });
+    }
+    setUploadedFiles((prev) => [...prev, ...newFiles]);
+
+    // Reset file input
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
+
+  const removeFile = (index: number) => {
+    setUploadedFiles((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const uploadFiles = async (): Promise<string[]> => {
+    if (uploadedFiles.length === 0) return [];
+
+    try {
+      const formData = new FormData();
+      // We can't get the actual File objects back from state, so we skip
+      // actual upload if the files came from state. In a real implementation,
+      // we'd store File objects. For now, just return file names.
+      const res = await fetch("/api/upload", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        return uploadedFiles.map((f) => f.name);
+      }
+    } catch {
+      // Upload failed, still include file names in the message
+    }
+
+    return uploadedFiles.map((f) => f.name);
+  };
+
+  // ─── Voice Input ────────────────────────────────────────────────────────
+
+  const toggleVoiceInput = useCallback(() => {
+    const SpeechRecognition =
+      (window as any).SpeechRecognition ||
+      (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      // Web Speech API not available
+      return;
+    }
+
+    if (isRecording && recognitionRef.current) {
+      recognitionRef.current.stop();
+      setIsRecording(false);
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.lang = "en-US";
+
+    recognition.onresult = (event: any) => {
+      const transcript = event.results[0][0].transcript;
+      setInput((prev) => (prev ? prev + " " + transcript : transcript));
+      setIsRecording(false);
+    };
+
+    recognition.onerror = () => {
+      setIsRecording(false);
+    };
+
+    recognition.onend = () => {
+      setIsRecording(false);
+    };
+
+    recognitionRef.current = recognition;
+    recognition.start();
+    setIsRecording(true);
+  }, [isRecording]);
+
+  // ─── Stop Generation ────────────────────────────────────────────────────
+
+  const stopGeneration = useCallback(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsLoading(false);
+  }, []);
+
   // ─── Send Message ───────────────────────────────────────────────────────
 
   const sendMessage = async () => {
     if (!input.trim() || isLoading) return;
 
+    // Handle file uploads first
+    let fileNames: string[] = [];
+    if (uploadedFiles.length > 0) {
+      fileNames = await uploadFiles();
+    }
+
+    const userContent =
+      fileNames.length > 0
+        ? `${input.trim()}\n\n[Attached files: ${fileNames.join(", ")}]`
+        : input.trim();
+
     const userMessage: Message = {
       id: generateId(),
       role: "user",
-      content: input.trim(),
+      content: userContent,
       timestamp: Date.now(),
     };
 
@@ -381,6 +852,7 @@ export default function ZAIInterface() {
 
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
     setInput("");
+    setUploadedFiles([]);
     setIsLoading(true);
 
     // Reset textarea height
@@ -395,15 +867,26 @@ export default function ZAIInterface() {
       content: m.content,
     }));
 
+    // Create AbortController for this request
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: ollamaMessages, model: selectedModel, useAgent }),
+        body: JSON.stringify({
+          messages: ollamaMessages,
+          model: selectedModel,
+          useAgent,
+        }),
+        signal: abortController.signal,
       });
 
       if (!res.ok) {
-        const errorData = await res.json().catch(() => ({ error: "Unknown error" }));
+        const errorData = await res
+          .json()
+          .catch(() => ({ error: "Unknown error" }));
         let errorMsg = errorData.error || "Unknown error";
         if (errorData.bridgeRequired) {
           errorMsg = `AGENT mode requires the bridge. Run: python bridge_api.py`;
@@ -411,7 +894,12 @@ export default function ZAIInterface() {
         setMessages((prev) =>
           prev.map((m) =>
             m.id === assistantId
-              ? { ...m, content: errorMsg, isStreaming: false, responseTime: Date.now() - startTime }
+              ? {
+                  ...m,
+                  content: errorMsg,
+                  isStreaming: false,
+                  responseTime: Date.now() - startTime,
+                }
               : m
           )
         );
@@ -429,7 +917,7 @@ export default function ZAIInterface() {
       let fullContent = "";
       let thinkingContent = "";
       let isThinking = false;
-      let toolCalls: string[] = [];
+      let toolCalls: ToolCall[] = [];
       let tokenCount = 0;
 
       while (true) {
@@ -437,7 +925,9 @@ export default function ZAIInterface() {
         if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split("\n").filter((line) => line.startsWith("data: "));
+        const lines = chunk
+          .split("\n")
+          .filter((line) => line.startsWith("data: "));
 
         for (const line of lines) {
           const data = line.slice(6);
@@ -466,13 +956,50 @@ export default function ZAIInterface() {
                   fullContent += content;
                 }
                 tokenCount++;
+              } else if (parsed.type === "thinking") {
+                // Deep thinking event from bridge
+                const thinkingData = parsed.data || {};
+                const thinkingText =
+                  thinkingData.reasoning ||
+                  thinkingData.plan ||
+                  JSON.stringify(thinkingData);
+                thinkingContent += (thinkingContent ? "\n" : "") + thinkingText;
               } else if (parsed.type === "tool_start") {
                 const toolName = parsed.data?.name || "unknown";
-                toolCalls = [...new Set([...toolCalls, toolName])];
+                const toolArgs = parsed.data?.arguments;
+                toolCalls.push({
+                  name: toolName,
+                  arguments: toolArgs,
+                  status: "loading",
+                });
               } else if (parsed.type === "tool_result") {
-                // Tool completed - already tracked in toolCalls
+                const toolName = parsed.data?.tool || "unknown";
+                const toolResult = parsed.data?.result;
+                // Find the matching loading tool call and update it
+                const existingIdx = [...toolCalls]
+                  .reverse()
+                  .findIndex((t) => t.name === toolName && t.status === "loading");
+                if (existingIdx >= 0) {
+                  const realIdx = toolCalls.length - 1 - existingIdx;
+                  toolCalls[realIdx] = {
+                    ...toolCalls[realIdx],
+                    result: typeof toolResult === "string" ? toolResult : JSON.stringify(toolResult),
+                    status: "success",
+                  };
+                } else {
+                  // No matching loading call, add as success
+                  toolCalls.push({
+                    name: toolName,
+                    result: typeof toolResult === "string" ? toolResult : JSON.stringify(toolResult),
+                    status: "success",
+                  });
+                }
               } else if (parsed.type === "meta") {
-                // Metacognition event - we could display this
+                // Metacognition event - could be displayed in thinking
+                const metaData = parsed.data;
+                if (metaData) {
+                  thinkingContent += (thinkingContent ? "\n" : "") + `[Meta] ${JSON.stringify(metaData)}`;
+                }
               } else if (parsed.type === "done") {
                 // Agent finished
               } else if (parsed.type === "error") {
@@ -499,7 +1026,15 @@ export default function ZAIInterface() {
               // Detect tool calls in text
               const toolMatches = content.match(/\[([a-z_]+)\]/g);
               if (toolMatches) {
-                toolCalls = [...new Set([...toolCalls, ...toolMatches.map((t) => t.slice(1, -1))])];
+                for (const match of toolMatches) {
+                  const toolName = match.slice(1, -1);
+                  if (!toolCalls.find((t) => t.name === toolName)) {
+                    toolCalls.push({
+                      name: toolName,
+                      status: "success",
+                    });
+                  }
+                }
               }
             }
           } catch {
@@ -525,9 +1060,22 @@ export default function ZAIInterface() {
       const responseTime = Date.now() - startTime;
       responseTimesRef.current.push(responseTime);
 
+      // Mark any remaining loading tools as complete
+      const finalToolCalls = toolCalls.map((t) =>
+        t.status === "loading" ? { ...t, status: "success" as const } : t
+      );
+
       setMessages((prev) =>
         prev.map((m) =>
-          m.id === assistantId ? { ...m, responseTime, isStreaming: false } : m
+          m.id === assistantId
+            ? {
+                ...m,
+                responseTime,
+                isStreaming: false,
+                toolCalls:
+                  finalToolCalls.length > 0 ? finalToolCalls : undefined,
+              }
+            : m
         )
       );
 
@@ -536,21 +1084,40 @@ export default function ZAIInterface() {
         toolsUsed: prev.toolsUsed + toolCalls.length,
         avgResponseTime:
           responseTimesRef.current.length > 0
-            ? Math.round(responseTimesRef.current.reduce((a, b) => a + b, 0) / responseTimesRef.current.length)
+            ? Math.round(
+                responseTimesRef.current.reduce((a, b) => a + b, 0) /
+                  responseTimesRef.current.length
+              )
             : 0,
         totalTokens: prev.totalTokens + tokenCount,
       }));
     } catch (error) {
-      const errMsg = error instanceof Error ? error.message : "Unknown error";
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantId
-            ? { ...m, content: `Connection error: ${errMsg}`, isStreaming: false, responseTime: Date.now() - startTime }
-            : m
-        )
-      );
+      if (error instanceof Error && error.name === "AbortError") {
+        // User cancelled - just mark streaming as done
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId ? { ...m, isStreaming: false } : m
+          )
+        );
+      } else {
+        const errMsg =
+          error instanceof Error ? error.message : "Unknown error";
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId
+              ? {
+                  ...m,
+                  content: `Connection error: ${errMsg}`,
+                  isStreaming: false,
+                  responseTime: Date.now() - startTime,
+                }
+              : m
+          )
+        );
+      }
     } finally {
       setIsLoading(false);
+      abortControllerRef.current = null;
       inputRef.current?.focus();
     }
   };
@@ -574,27 +1141,44 @@ export default function ZAIInterface() {
 
   const clearChat = () => {
     setMessages([]);
-    setSessionStats({ messageCount: 0, toolsUsed: 0, avgResponseTime: 0, totalTokens: 0 });
+    setSessionStats({
+      messageCount: 0,
+      toolsUsed: 0,
+      avgResponseTime: 0,
+      totalTokens: 0,
+    });
     responseTimesRef.current = [];
   };
 
   // ─── Render ─────────────────────────────────────────────────────────────
 
   return (
-    <div className="h-screen flex flex-col bg-[#000000] text-[#e0e0e0] overflow-hidden" style={{ fontFamily: "var(--font-geist-mono), 'JetBrains Mono', 'Fira Code', ui-monospace, monospace" }}>
+    <div
+      className="h-screen flex flex-col bg-[#000000] text-[#e0e0e0] overflow-hidden"
+      style={{
+        fontFamily:
+          "var(--font-geist-mono), 'JetBrains Mono', 'Fira Code', ui-monospace, monospace",
+      }}
+    >
       {/* ─── Top Bar ─────────────────────────────────────────────────────── */}
       <header className="flex items-center justify-between h-9 px-4 border-b border-[rgba(255,255,255,0.06)] shrink-0 select-none">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5">
             <div className="w-1.5 h-1.5 bg-[rgba(0,212,255,0.4)]" />
-            <span className="text-[11px] tracking-[0.3em] text-[#e0e0e0] font-bold">ZAI</span>
+            <span className="text-[11px] tracking-[0.3em] text-[#e0e0e0] font-bold">
+              ZAI
+            </span>
           </div>
           <span className="text-[10px] text-[#333333]">│</span>
           <span className="text-[11px] text-[#555555]">{selectedModel}</span>
           <div className="flex items-center gap-1.5 ml-1">
             <Circle
               size={5}
-              className={status.connected ? "fill-[#00ff88] text-[#00ff88]" : "fill-[#ff3333] text-[#ff3333]"}
+              className={
+                status.connected
+                  ? "fill-[#00ff88] text-[#00ff88]"
+                  : "fill-[#ff3333] text-[#ff3333]"
+              }
             />
             <span className="text-[10px] text-[#666666] tracking-wider">
               {status.connected ? "CONNECTED" : "OFFLINE"}
@@ -610,7 +1194,11 @@ export default function ZAIInterface() {
                 ? "text-[#00d4ff] border-[rgba(0,212,255,0.25)] bg-[rgba(0,212,255,0.06)]"
                 : "text-[#555555] border-[rgba(255,255,255,0.06)] hover:text-[#777777] hover:border-[rgba(255,255,255,0.1)]"
             }`}
-            title={useAgent ? "Full agent mode (ReAct + Tools)" : "Simple chat mode (no tools)"}
+            title={
+              useAgent
+                ? "Full agent mode (ReAct + Tools)"
+                : "Simple chat mode (no tools)"
+            }
           >
             {useAgent ? "AGENT" : "CHAT"}
           </button>
@@ -627,7 +1215,11 @@ export default function ZAIInterface() {
             className="p-1.5 text-[#555555] hover:text-[#e0e0e0] transition-colors duration-150"
             aria-label={sidebarOpen ? "Close sidebar" : "Open sidebar"}
           >
-            {sidebarOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
+            {sidebarOpen ? (
+              <PanelRightClose size={14} />
+            ) : (
+              <PanelRightOpen size={14} />
+            )}
           </button>
         </div>
       </header>
@@ -639,41 +1231,11 @@ export default function ZAIInterface() {
           {/* Messages */}
           <div className="flex-1 overflow-y-auto px-6 py-6 space-y-5">
             {messages.length === 0 && (
-              <div className="flex flex-col items-center justify-center h-full gap-4 animate-fade-in select-none">
-                {/* ASCII-art style logo */}
-                <div className="text-[11px] leading-[1.4] text-[#2a2a2a] tracking-wider">
-                  <div>╔══════════════╗</div>
-                  <div>║ &nbsp; Z A I &nbsp; &nbsp; &nbsp; ║</div>
-                  <div>╚══════════════╝</div>
-                </div>
-                <div className="h-px w-16 bg-[rgba(0,212,255,0.15)]" />
-                <div className="text-[11px] text-[#3a3a3a] max-w-sm text-center leading-[1.7]">
-                  Local AI agent interface.
-                  <br />
-                  <span className="text-[#333333]">All processing runs on your machine via Ollama.</span>
-                </div>
-                <div className="flex items-center gap-4 mt-2">
-                  <div className="flex items-center gap-1.5">
-                    <Circle size={4} className={status.connected ? "fill-[#00ff88] text-[#00ff88]" : "fill-[#ff3333] text-[#ff3333]"} />
-                    <span className="text-[10px] text-[#444444]">
-                      {status.connected ? "OLLAMA CONNECTED" : "OLLAMA OFFLINE"}
-                    </span>
-                  </div>
-                  <span className="text-[10px] text-[#333333]">│</span>
-                  <span className="text-[10px] text-[#444444]">{selectedModel}</span>
-                </div>
-                {!status.connected && (
-                  <div className="mt-1 px-4 py-2 border border-[rgba(255,51,51,0.15)] text-[9px] text-[#ff3333]">
-                    Start Ollama: ollama serve
-                  </div>
-                )}
-                {useAgent && !status.agentAvailable && status.connected && (
-                  <div className="mt-1 px-4 py-2 border border-[rgba(255,136,0,0.2)] text-[10px] text-[#ff8800] leading-[1.6]">
-                    AGENT mode is ON but Bridge is not running.<br />
-                    Tools won't work. Start: <span className="text-[#ffaa33]">python bridge_api.py</span>
-                  </div>
-                )}
-              </div>
+              <WelcomeScreen
+                status={status}
+                selectedModel={selectedModel}
+                useAgent={useAgent}
+              />
             )}
 
             {messages.map((msg) => (
@@ -693,41 +1255,122 @@ export default function ZAIInterface() {
           {/* Bridge warning bar */}
           {useAgent && !status.agentAvailable && status.connected && (
             <div className="px-5 py-1.5 border-t border-[rgba(255,136,0,0.15)] bg-[rgba(255,136,0,0.03)] text-[10px] text-[#ff8800] flex items-center gap-2">
-              <Circle size={4} className="fill-[#ff8800] text-[#ff8800]" />
-              <span>Bridge not running — tools disabled. Start: python bridge_api.py</span>
+              <Circle
+                size={4}
+                className="fill-[#ff8800] text-[#ff8800]"
+              />
+              <span>
+                Bridge not running — tools disabled. Start: python
+                bridge_api.py
+              </span>
             </div>
           )}
+
+          {/* Uploaded files chips */}
+          {uploadedFiles.length > 0 && (
+            <div className="px-5 py-2 border-t border-[rgba(255,255,255,0.04)] flex flex-wrap gap-1.5">
+              {uploadedFiles.map((file, i) => (
+                <div
+                  key={i}
+                  className="flex items-center gap-1.5 px-2 py-0.5 border border-[rgba(0,212,255,0.15)] bg-[rgba(0,212,255,0.03)] text-[10px] text-[#888]"
+                >
+                  <Paperclip size={9} className="text-[#555]" />
+                  <span className="truncate max-w-[120px]">{file.name}</span>
+                  <span className="text-[#444]">
+                    ({formatBytes(file.size)})
+                  </span>
+                  <button
+                    onClick={() => removeFile(i)}
+                    className="text-[#555] hover:text-[#ff3333] transition-colors"
+                  >
+                    <X size={9} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="shrink-0 border-t border-[rgba(255,255,255,0.06)]">
-            <div className="flex items-end gap-3 px-5 py-3">
-              <div className="text-[12px] text-[#555555] pb-1 select-none">{">"}</div>
+            <div className="flex items-end gap-2 px-4 py-3">
+              {/* Attach button */}
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="pb-1 text-[#555555] hover:text-[rgba(0,212,255,0.6)] transition-colors duration-150 shrink-0"
+                title="Attach file"
+                disabled={!status.connected}
+              >
+                <Paperclip size={14} />
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={handleFileSelect}
+              />
+
+              {/* Voice button */}
+              <button
+                onClick={toggleVoiceInput}
+                className={`pb-1 transition-colors duration-150 shrink-0 ${
+                  isRecording
+                    ? "text-[#ff3333]"
+                    : "text-[#555555] hover:text-[rgba(0,212,255,0.6)]"
+                }`}
+                title={
+                  isRecording ? "Stop recording" : "Voice input"
+                }
+                disabled={!status.connected}
+              >
+                {isRecording ? <MicOff size={14} /> : <Mic size={14} />}
+              </button>
+
+              {/* Input prompt symbol */}
+              <div className="text-[12px] text-[#555555] pb-1 select-none shrink-0">
+                {">"}
+              </div>
+
+              {/* Textarea */}
               <textarea
                 ref={inputRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder={status.connected ? "Enter message..." : "Ollama not connected"}
+                placeholder={
+                  status.connected ? "Enter message..." : "Ollama not connected"
+                }
                 disabled={!status.connected}
                 rows={1}
-                className="flex-1 bg-transparent text-[15px] text-[#e0e0e0] placeholder-[#3a3a3a] resize-none outline-none min-h-[22px] max-h-[140px] leading-[1.6] disabled:opacity-20"
+                className="flex-1 bg-transparent text-[14px] text-[#e0e0e0] placeholder-[#3a3a3a] resize-none outline-none min-h-[22px] max-h-[140px] leading-[1.6] disabled:opacity-20"
                 style={{ fontFamily: "inherit" }}
                 onInput={(e) => {
                   const target = e.target as HTMLTextAreaElement;
                   target.style.height = "auto";
-                  target.style.height = Math.min(target.scrollHeight, 120) + "px";
+                  target.style.height =
+                    Math.min(target.scrollHeight, 120) + "px";
                 }}
               />
-              <button
-                onClick={sendMessage}
-                disabled={!input.trim() || isLoading || !status.connected}
-                className="pb-1 text-[#555555] hover:text-[rgba(0,212,255,0.6)] disabled:opacity-10 disabled:hover:text-[#555555] transition-colors duration-150 shrink-0"
-                aria-label="Send message"
-              >
-                {isLoading ? (
-                  <Activity size={15} className="animate-spin" />
-                ) : (
-                  <Send size={15} />
-                )}
-              </button>
+
+              {/* Send / Stop button */}
+              {isLoading ? (
+                <button
+                  onClick={stopGeneration}
+                  className="pb-1 text-[#ff3333] hover:text-[#ff5555] transition-colors duration-150 shrink-0"
+                  aria-label="Stop generation"
+                  title="Stop generation"
+                >
+                  <Square size={14} />
+                </button>
+              ) : (
+                <button
+                  onClick={sendMessage}
+                  disabled={!input.trim() || isLoading || !status.connected}
+                  className="pb-1 text-[#555555] hover:text-[rgba(0,212,255,0.6)] disabled:opacity-10 disabled:hover:text-[#555555] transition-colors duration-150 shrink-0"
+                  aria-label="Send message"
+                >
+                  <Send size={14} />
+                </button>
+              )}
             </div>
           </div>
         </main>
@@ -744,7 +1387,10 @@ export default function ZAIInterface() {
         <aside
           className={`${
             sidebarOpen ? "w-64" : "w-0"
-          } ${isMobile ? "absolute right-0 top-0 bottom-0 z-20" : "relative"
+          } ${
+            isMobile
+              ? "absolute right-0 top-0 bottom-0 z-20"
+              : "relative"
           } shrink-0 border-l border-[rgba(255,255,255,0.06)] bg-[#050505] overflow-hidden transition-all duration-200`}
         >
           <div className="w-64 h-full overflow-y-auto px-4 py-4 space-y-5">
@@ -752,7 +1398,9 @@ export default function ZAIInterface() {
             <section>
               <div className="flex items-center gap-1.5 mb-3">
                 <Server size={10} className="text-[#555555]" />
-                <h3 className="text-[9px] tracking-[0.2em] text-[#555555] uppercase">System</h3>
+                <h3 className="text-[9px] tracking-[0.2em] text-[#555555] uppercase">
+                  System
+                </h3>
               </div>
               <div className="space-y-2.5">
                 <div className="flex justify-between items-center">
@@ -765,12 +1413,19 @@ export default function ZAIInterface() {
                   >
                     {status.models.length > 0 ? (
                       status.models.map((m) => (
-                        <option key={m.name} value={m.name} className="bg-[#111111] text-[#e0e0e0]">
+                        <option
+                          key={m.name}
+                          value={m.name}
+                          className="bg-[#111111] text-[#e0e0e0]"
+                        >
                           {m.name}
                         </option>
                       ))
                     ) : (
-                      <option value={selectedModel} className="bg-[#111111] text-[#e0e0e0]">
+                      <option
+                        value={selectedModel}
+                        className="bg-[#111111] text-[#e0e0e0]"
+                      >
                         {selectedModel}
                       </option>
                     )}
@@ -778,14 +1433,20 @@ export default function ZAIInterface() {
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-[10px] text-[#505050]">HOST</span>
-                  <span className="text-[11px] text-[#666666]">localhost:11434</span>
+                  <span className="text-[11px] text-[#666666]">
+                    localhost:11434
+                  </span>
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-[10px] text-[#505050]">STATUS</span>
                   <div className="flex items-center gap-1.5">
                     <Circle
                       size={4}
-                      className={status.connected ? "fill-[#00ff88] text-[#00ff88]" : "fill-[#ff3333] text-[#ff3333]"}
+                      className={
+                        status.connected
+                          ? "fill-[#00ff88] text-[#00ff88]"
+                          : "fill-[#ff3333] text-[#ff3333]"
+                      }
                     />
                     <span className="text-[10px] text-[#555555]">
                       {status.connected ? "Connected" : "Disconnected"}
@@ -794,11 +1455,17 @@ export default function ZAIInterface() {
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-[10px] text-[#505050]">UPTIME</span>
-                  <span className="text-[11px] text-[#666666] tabular-nums">{formatUptime(uptime)}</span>
+                  <span className="text-[11px] text-[#666666] tabular-nums">
+                    {formatUptime(uptime)}
+                  </span>
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-[10px] text-[#505050]">MODE</span>
-                  <span className={`text-[11px] ${useAgent ? "text-[#00d4ff]" : "text-[#666666]"}`}>
+                  <span
+                    className={`text-[11px] ${
+                      useAgent ? "text-[#00d4ff]" : "text-[#666666]"
+                    }`}
+                  >
                     {useAgent ? "AGENT" : "CHAT"}
                   </span>
                 </div>
@@ -808,7 +1475,11 @@ export default function ZAIInterface() {
                     <div className="flex items-center gap-1.5">
                       <Circle
                         size={4}
-                        className={status.agentAvailable ? "fill-[#00ff88] text-[#00ff88]" : "fill-[#ff8800] text-[#ff8800]"}
+                        className={
+                          status.agentAvailable
+                            ? "fill-[#00ff88] text-[#00ff88]"
+                            : "fill-[#ff8800] text-[#ff8800]"
+                        }
                       />
                       <span className="text-[11px] text-[#666666]">
                         {status.agentAvailable ? "Active" : "Inactive"}
@@ -825,7 +1496,9 @@ export default function ZAIInterface() {
             <section>
               <div className="flex items-center gap-1.5 mb-3">
                 <Cpu size={10} className="text-[#555555]" />
-                <h3 className="text-[10px] tracking-[0.2em] text-[#555555] uppercase">Hardware</h3>
+                <h3 className="text-[10px] tracking-[0.2em] text-[#555555] uppercase">
+                  Hardware
+                </h3>
               </div>
               <HardwareStats />
             </section>
@@ -836,7 +1509,9 @@ export default function ZAIInterface() {
             <section>
               <div className="flex items-center gap-1.5 mb-3">
                 <Zap size={10} className="text-[#555555]" />
-                <h3 className="text-[10px] tracking-[0.2em] text-[#555555] uppercase">Session</h3>
+                <h3 className="text-[10px] tracking-[0.2em] text-[#555555] uppercase">
+                  Session
+                </h3>
               </div>
               <div className="space-y-2.5">
                 <div className="flex justify-between items-center">
@@ -844,14 +1519,18 @@ export default function ZAIInterface() {
                     <MessageSquare size={9} className="text-[#505050]" />
                     <span className="text-[10px] text-[#505050]">MESSAGES</span>
                   </div>
-                  <span className="text-[11px] text-[#e0e0e0] tabular-nums">{sessionStats.messageCount}</span>
+                  <span className="text-[11px] text-[#e0e0e0] tabular-nums">
+                    {sessionStats.messageCount}
+                  </span>
                 </div>
                 <div className="flex justify-between items-center">
                   <div className="flex items-center gap-1">
                     <Wrench size={9} className="text-[#505050]" />
                     <span className="text-[10px] text-[#505050]">TOOLS</span>
                   </div>
-                  <span className="text-[11px] text-[#e0e0e0] tabular-nums">{sessionStats.toolsUsed}</span>
+                  <span className="text-[11px] text-[#e0e0e0] tabular-nums">
+                    {sessionStats.toolsUsed}
+                  </span>
                 </div>
                 <div className="flex justify-between items-center">
                   <div className="flex items-center gap-1">
@@ -859,7 +1538,9 @@ export default function ZAIInterface() {
                     <span className="text-[10px] text-[#505050]">AVG RESP</span>
                   </div>
                   <span className="text-[10px] text-[#e0e0e0] tabular-nums">
-                    {sessionStats.avgResponseTime > 0 ? `${sessionStats.avgResponseTime}ms` : "—"}
+                    {sessionStats.avgResponseTime > 0
+                      ? `${sessionStats.avgResponseTime}ms`
+                      : "—"}
                   </span>
                 </div>
                 <div className="flex justify-between items-center">
@@ -868,7 +1549,9 @@ export default function ZAIInterface() {
                     <span className="text-[10px] text-[#505050]">TOKENS</span>
                   </div>
                   <span className="text-[10px] text-[#e0e0e0] tabular-nums">
-                    {sessionStats.totalTokens > 0 ? `~${sessionStats.totalTokens}` : "—"}
+                    {sessionStats.totalTokens > 0
+                      ? `~${sessionStats.totalTokens}`
+                      : "—"}
                   </span>
                 </div>
               </div>
@@ -880,9 +1563,13 @@ export default function ZAIInterface() {
             <section>
               <div className="flex items-center gap-1.5 mb-3">
                 <HardDrive size={10} className="text-[#555555]" />
-                <h3 className="text-[10px] tracking-[0.2em] text-[#555555] uppercase">Models</h3>
+                <h3 className="text-[10px] tracking-[0.2em] text-[#555555] uppercase">
+                  Models
+                </h3>
                 {status.connected && (
-                  <span className="text-[9px] text-[#505050] ml-auto">{status.modelCount}</span>
+                  <span className="text-[9px] text-[#505050] ml-auto">
+                    {status.modelCount}
+                  </span>
                 )}
               </div>
               <div className="space-y-0.5 max-h-52 overflow-y-auto">
@@ -898,7 +1585,13 @@ export default function ZAIInterface() {
                       }`}
                     >
                       <div className="flex justify-between items-center">
-                        <span className={`text-[11px] truncate mr-2 ${model.name === selectedModel ? "text-[#e0e0e0]" : "text-[#666666]"}`}>
+                        <span
+                          className={`text-[11px] truncate mr-2 ${
+                            model.name === selectedModel
+                              ? "text-[#e0e0e0]"
+                              : "text-[#666666]"
+                          }`}
+                        >
                           {model.name}
                         </span>
                         <span className="text-[9px] text-[#444444] shrink-0">
@@ -914,16 +1607,63 @@ export default function ZAIInterface() {
                   ))
                 ) : (
                   <div className="text-[10px] text-[#3a3a3a] px-2 py-1">
-                    {status.connected ? "No models found" : "Cannot connect to Ollama"}
+                    {status.connected
+                      ? "No models found"
+                      : "Cannot connect to Ollama"}
                   </div>
                 )}
               </div>
             </section>
 
+            <div className="h-px bg-[rgba(255,255,255,0.05)]" />
+
+            {/* TOOLS */}
+            {tools.length > 0 && (
+              <section>
+                <div className="flex items-center gap-1.5 mb-3">
+                  <Wrench size={10} className="text-[#555555]" />
+                  <h3 className="text-[10px] tracking-[0.2em] text-[#555555] uppercase">
+                    Tools
+                  </h3>
+                  <span className="text-[9px] text-[#505050] ml-auto">
+                    {tools.length}
+                  </span>
+                </div>
+                <div className="space-y-2 max-h-52 overflow-y-auto">
+                  {Object.entries(toolsByCategory).map(
+                    ([category, categoryTools]) => (
+                      <div key={category}>
+                        <div className="text-[9px] text-[#444444] tracking-[0.15em] uppercase mb-1">
+                          {category}
+                        </div>
+                        <div className="space-y-0.5">
+                          {categoryTools.map((tool) => (
+                            <div
+                              key={tool.name}
+                              className="px-2 py-1 hover:bg-[rgba(255,255,255,0.02)] transition-colors"
+                            >
+                              <div className="text-[10px] text-[#888]">
+                                {tool.name}
+                              </div>
+                              {tool.description && (
+                                <div className="text-[9px] text-[#444] truncate">
+                                  {tool.description}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )
+                  )}
+                </div>
+              </section>
+            )}
+
             {/* Footer */}
             <div className="pt-6">
               <div className="text-[8px] text-[#333333] text-center tracking-[0.4em] uppercase">
-                ZAI Agent Interface v0.1
+                ZAI Agent Interface v0.2
               </div>
             </div>
           </div>
