@@ -23,6 +23,8 @@ from config import (
 )
 from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS
 from tools.registry import get_tool_metadata
+from tools.skill_pipeline import SkillPipeline
+from tools.tool_selector import get_tools_for_context, get_reduced_schemas
 from memory.triple_memory import TripleMemory, learning
 from llm import ollama
 from agent.schemas import SYSTEM_PROMPT, JSON_TOOLS_PROMPT, build_system_prompt
@@ -78,6 +80,9 @@ class ReactAgent:
     LLM_MAX_RETRIES = 2
     LLM_RETRY_DELAYS = [1, 2]  # Exponential backoff in seconds
 
+    # S3: Pipeline + ToolSelector config
+    REDUCE_TOOL_CONTEXT = True  # Reduce LLM tool context from 77+ to ~15
+
     def __init__(self, memory=None):
         self.memory = memory or TripleMemory()
         self.thinking_log = []
@@ -89,6 +94,7 @@ class ReactAgent:
         self._conversation_token_count = 0  # Approximate token count of conversation
         self._summarization_triggered = False  # Track if summarization was triggered
         self._tool_failures = ToolFailureHistory()  # M2.3: Historial de fallos por herramienta
+        self.pipeline = SkillPipeline()  # C5/S3: Pipeline for chaining skill results
 
     def _log(self, message, category="info"):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -268,6 +274,7 @@ class ReactAgent:
         self._tool_call_counts = {}
         self._total_tool_calls = 0
         self._tool_failures.clear()  # M2.3: Reset failure history for new conversation
+        self.pipeline.reset()  # S3: Reset pipeline for new conversation
         self._last_user_message = user_message  # M5.2: Store for SkillMemory integration
         self._log(f"Mensaje del usuario: {user_message}", "input")
 
@@ -515,6 +522,7 @@ class ReactAgent:
         self._tool_call_counts = {}
         self._total_tool_calls = 0
         self._tool_failures.clear()  # M2.3: Reset failure history for new conversation
+        self.pipeline.reset()  # S3: Reset pipeline for new conversation
         self._last_user_message = user_message  # M5.2: Store for SkillMemory integration
         self._log(f"Mensaje del usuario: {user_message}", "input")
 
@@ -883,7 +891,7 @@ class ReactAgent:
 
         try:
             # Intentar streaming HTTP directo (mas rapido, sin overhead de lib)
-            for chunk in ollama.generate_stream(messages, tools=TOOL_SCHEMAS):
+            for chunk in ollama.generate_stream(messages, tools=self._get_tool_schemas(getattr(self, '_last_user_message', ''))):
                 if isinstance(chunk, str):
                     # Token de texto - emitir inmediatamente
                     # PERO: si parece JSON de tool call, no emitirlo al usuario
@@ -969,7 +977,7 @@ class ReactAgent:
 
         # Fallback: modo no-streaming
         try:
-            response = ollama.generate(messages, tools=TOOL_SCHEMAS)
+            response = ollama.generate(messages, tools=self._get_tool_schemas(getattr(self, '_last_user_message', '')))
             # generate() already records llm_call via @timed, so no duplicate
             if isinstance(response, str):
                 yield {"type": "token", "data": response}
@@ -1008,7 +1016,7 @@ class ReactAgent:
         """ReAct usando function calling nativo. Soporta multiple tool calls."""
         # generate() already records llm_call via @timed decorator
         try:
-            response = ollama.generate(messages, tools=TOOL_SCHEMAS)
+            response = ollama.generate(messages, tools=self._get_tool_schemas(getattr(self, '_last_user_message', '')))
 
             if isinstance(response, str):
                 return ("respond", response)
@@ -1360,6 +1368,13 @@ class ReactAgent:
                     )
         except Exception as e:
             pass  # No bloquear ejecucion si SkillMemory falla
+
+        # S3/C5: Auto-store result in pipeline for chaining
+        try:
+            if "ERROR" not in str(tool_result):
+                self.pipeline.auto_store_from_result(tool_name, str(tool_result))
+        except Exception:
+            pass  # No bloquear ejecucion si pipeline falla
 
         return tool_result
 
@@ -1797,6 +1812,14 @@ class ReactAgent:
         except Exception as e:
             logger.debug(f"Error cargando conocimiento web aprendido: {e}")
 
+        # S3/C5: Include pipeline artifacts in context for chaining
+        try:
+            pipeline_summary = self.pipeline.get_context_summary()
+            if pipeline_summary:
+                system_content += f"\n\n--- PIPELINE ARTIFACTS ---\n{pipeline_summary}"
+        except Exception:
+            pass  # No bloquear si pipeline falla
+
         messages = [{"role": "system", "content": system_content}]
 
         # Historial desde TripleMemory (unica fuente)
@@ -1845,6 +1868,17 @@ class ReactAgent:
             return matches[0]
         return None
 
+    def _get_tool_schemas(self, user_message: str = "") -> list[dict]:
+        """Return tool schemas, optionally filtered by ToolSelector if REDUCE_TOOL_CONTEXT is on."""
+        if self.REDUCE_TOOL_CONTEXT and user_message:
+            try:
+                reduced = get_reduced_schemas(user_message, TOOL_SCHEMAS)
+                if reduced:
+                    return reduced
+            except Exception:
+                pass  # Fallback to all schemas
+        return TOOL_SCHEMAS
+
     def _resolve_params(self, params):
         resolved = {}
         for key, value in params.items():
@@ -1852,6 +1886,11 @@ class ReactAgent:
                 value = value.replace("REPOS_DIR", REPOS_DIR)
                 value = value.replace("RUTA_DEL_REPO", self._find_repo_path())
             resolved[key] = value
+        # S3/C5: Resolve pipeline artifact references (e.g., {artifact:KEY})
+        try:
+            resolved = self.pipeline.resolve_params(resolved)
+        except Exception:
+            pass  # No bloquear si pipeline falla
         return resolved
 
     def _find_repo_path(self):

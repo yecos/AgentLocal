@@ -18,6 +18,10 @@ from .registry import tool, register_tool, TOOL_FUNCTIONS, TOOL_SCHEMAS
 from .skill_router import SkillRouter, get_skill_router, ZAI_TO_LOCAL_FALLBACK, INTENT_TO_TOOLS
 from .skill_errors import SkillError, create_missing_dependency_error, create_timeout_error, create_bad_params_error
 
+# Importar SkillPipeline y ToolSelector (C5/C3/S3)
+from .skill_pipeline import SkillPipeline
+from .tool_selector import detect_intent, get_tools_for_context, get_reduced_schemas
+
 # Importar herramientas de sub-modulos (originales)
 from .sistema import ejecutar_comando, procesos_activos, matar_proceso
 from .archivos import leer_archivo, escribir_archivo, listar_archivos, buscar_en_archivos

@@ -1374,3 +1374,41 @@ Stage Summary:
 - New methods: _should_use_planner() + _auto_plan() in ReactAgent
 - Integration: both run() and run_stream() auto-plan before ReAct loop
 - All 566 tests pass — zero regressions
+
+---
+Task ID: r4a
+Agent: Sub Agent
+Task: R4 — Implement C5 (SkillPipeline) + C3 (ToolSelector) + S3 (Pipeline integration)
+
+Work Log:
+- Read worklog.md, react.py, registry.py, skill_router.py, tools/__init__.py
+- Created C5: tools/skill_pipeline.py — SkillPipeline class for chaining skill results
+  - store()/get() for artifact management
+  - resolve_params() for {artifact:KEY} reference resolution
+  - auto_store_from_result() with file path + text detection
+  - get_context_summary() for LLM context injection
+  - reset()/to_dict() for lifecycle and debugging
+- Created C3: tools/tool_selector.py — Intent-based tool selection
+  - detect_intent() with pattern matching for 7 intents
+  - get_tools_for_context() returns ~15 relevant tools (from 77+)
+  - get_reduced_schemas() filters TOOL_SCHEMAS for LLM calls
+  - ALWAYS_AVAILABLE core tools + CONTEXT_KEYWORDS expansion
+- Integrated S3 in react.py:
+  - Added imports: SkillPipeline, get_tools_for_context, get_reduced_schemas
+  - Added REDUCE_TOOL_CONTEXT = True class flag
+  - Added self.pipeline = SkillPipeline() in __init__
+  - Added self.pipeline.reset() in run() and run_stream()
+  - Added auto_store_from_result() call in _execute_single_tool() after tool execution
+  - Added pipeline.get_context_summary() in _build_messages() (PIPELINE ARTIFACTS section)
+  - Added pipeline.resolve_params() in _resolve_params()
+  - Added _get_tool_schemas() method for schema reduction
+  - Replaced 3 hardcoded TOOL_SCHEMAS refs with _get_tool_schemas() calls
+- Updated tools/__init__.py with new exports (SkillPipeline, detect_intent, get_tools_for_context, get_reduced_schemas)
+- All 566 tests pass — zero regressions
+- Integration tests pass: SkillPipeline, ToolSelector, ReactAgent pipeline wiring
+
+Stage Summary:
+- C5 COMPLETE: SkillPipeline for chaining tool results between skills
+- C3 COMPLETE: ToolSelector reduces LLM context from 84 to ~6-15 tool schemas
+- S3 COMPLETE: Full pipeline integration in ReactAgent (init, reset, auto-store, resolve, context)
+- All 566 existing tests pass — zero regressions
