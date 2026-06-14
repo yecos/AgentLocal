@@ -267,6 +267,11 @@ def generar_imagen(descripcion: str, ruta: str = "", tamano: str = "512x512",
     if estilo:
         full_prompt += f", {estilo} style"
 
+    # Intentar con APIs cloud (DALL-E, Stability, Replicate, HuggingFace)
+    result = _gen_cloud(full_prompt, ruta, tamano)
+    if result is not None:
+        return result
+
     # Intentar con Ollama (stable-diffusion)
     result = _gen_ollama_sd(full_prompt, ruta, tamano, negativo)
     if result is not None:
@@ -282,10 +287,22 @@ def generar_imagen(descripcion: str, ruta: str = "", tamano: str = "512x512",
     if result is not None:
         return result
 
-    return ("ERROR: No se pudo generar imagen. Instala una opcion:\n"
-            "  Ollama + modelo stable-diffusion: ollama pull stable-diffusion\n"
-            "  Automatic1111 WebUI: https://github.com/AUTOMATIC1111/stable-diffusion-webui\n"
-            "  ComfyUI: https://github.com/comfyanonymous/ComfyUI")
+    return ("ERROR: No se pudo generar imagen. Opciones:\n"
+            "  1. Configura una API key: configurar_api_key('openai', 'sk-...')\n"
+            "  2. Ollama + modelo de imagen: ollama pull stable-diffusion\n"
+            "  3. Automatic1111 WebUI: https://github.com/AUTOMATIC1111/stable-diffusion-webui\n"
+            "  4. ComfyUI: https://github.com/comfyanonymous/ComfyUI")
+
+
+def _gen_cloud(prompt, ruta, tamano):
+    """Genera imagen usando APIs cloud (DALL-E, Stability, Replicate, HF)."""
+    try:
+        from tools.cloud import generar_imagen_cloud
+        result = generar_imagen_cloud(prompt, ruta, tamano)
+        return result
+    except Exception as e:
+        logger.debug(f"Cloud image generation fallo: {e}")
+        return None
 
 
 def _gen_ollama_sd(prompt, ruta, tamano, negativo):

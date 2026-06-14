@@ -2,11 +2,9 @@
 Registro centralizado de herramientas.
 El agente importa TOOL_FUNCTIONS y TOOL_SCHEMAS desde aqui.
 
-v15: Super Agente - herramientas de documentos, creacion,
-     percepcion (audio/OCR/web), integracion (email/API/cron),
-     visualizacion avanzada (15+ graficos), diagramas (13+ tipos),
-     procesamiento de datos, multimedia (TTS/imagenes/video),
-     sub-agentes con ejecucion paralela, PPTX.
+v16: Super Agente - sub-agentes con herramientas reales,
+     APIs cloud como fallback, diagramas profesionales,
+     documentos mejorados, gestion de tokens.
 """
 import os
 import json
@@ -54,6 +52,19 @@ from .multimedia import (
 from .subagentes import (
     ejecutar_subagente, ejecutar_paralelo, orquestar,
     listar_subagentes, ver_contexto_compartido, limpiar_contexto
+)
+
+# Importar herramientas v15.2 (Super Agente Avanzado)
+from .avanzado import (
+    busqueda_profunda, editar_multiples, generacion_batch,
+    buscar_patron, listar_glob, crear_proyecto_web, resumir_url
+)
+
+# Importar herramientas v16 (Cloud APIs)
+from .cloud import (
+    configurar_api_key, listar_api_keys,
+    generar_imagen_cloud, analizar_imagen_cloud,
+    buscar_web_cloud, llm_cloud_chat
 )
 
 # Importar schemas predefinidos (para herramientas de sub-modulos)
@@ -148,6 +159,19 @@ def _register_submodule_tools():
         "ejecutar_paralelo": ejecutar_paralelo,
         "orquestar": orquestar,
         "listar_subagentes": listar_subagentes,
+        "ver_contexto_compartido": ver_contexto_compartido,
+        "limpiar_contexto": limpiar_contexto,
+        # v15.2 Super Agente - Herramientas avanzadas
+        "busqueda_profunda": busqueda_profunda,
+        "editar_multiples": editar_multiples,
+        "generacion_batch": generacion_batch,
+        "buscar_patron": buscar_patron,
+        "listar_glob": listar_glob,
+        "crear_proyecto_web": crear_proyecto_web,
+        "resumir_url": resumir_url,
+        # v16 Super Agente - Cloud APIs
+        "configurar_api_key": configurar_api_key,
+        "listar_api_keys": listar_api_keys,
     }
 
     for name, func in submod_tools.items():
@@ -175,10 +199,18 @@ def _register_submodule_tools():
     }
 })
 def analizar_imagen(ruta: str, pregunta: str = "Describe esta imagen") -> str:
-    """Analiza una imagen usando el modelo de vision del LLM."""
-    from llm import ollama
-    result = ollama.generate_with_image(pregunta, ruta)
-    return result
+    """Analiza una imagen usando vision AI (cloud o local)."""
+    # Intentar cloud primero (mejor calidad)
+    cloud_result = analizar_imagen_cloud(ruta, pregunta)
+    if cloud_result:
+        return cloud_result
+    # Fallback: modelo local
+    try:
+        from llm import ollama
+        result = ollama.generate_with_image(pregunta, ruta)
+        return result
+    except Exception as e:
+        return f"ERROR: No se pudo analizar la imagen (ni cloud ni local): {e}"
 
 
 @tool(schema={

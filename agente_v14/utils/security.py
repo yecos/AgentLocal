@@ -248,3 +248,87 @@ def sanitize_shell_arg(arg: str) -> str:
     cleaned = re.sub(r'[`$\\;|&<>(){}[\]!#~]', '', arg)
     cleaned = cleaned.replace('\n', '').replace('\r', '')
     return cleaned.strip()
+
+
+# ============================================================
+# SEGURIDAD PARA EJECUCION DE CODIGO
+# ============================================================
+
+# Modulos Python peligrosos que NO deben importarse en ejecutar_python
+PYTHON_DANGEROUS_MODULES = [
+    "os.system", "os.popen", "os.exec", "os.spawn",
+    "subprocess.call", "subprocess.run", "subprocess.Popen",
+    "shutil.rmtree", "shutil.rmtree",
+    "pickle.loads", "marshal.loads",
+    "ctypes", "multiprocessing",
+    "socket.socket", "http.server",
+    "webbrowser", "antigravity",
+    "sys.exit", "__import__",
+    "eval(", "exec(",
+    "compile(", "open('/etc",
+    "open('/boot", "open('/dev",
+]
+
+# Funciones peligrosas en df.eval() de pandas
+PANDAS_EVAL_DANGEROUS = [
+    "__import__", "eval", "exec", "compile",
+    "os.", "sys.", "subprocess", "shutil",
+    "open(", "globals(", "locals(",
+    "getattr(", "setattr(", "delattr(",
+    "type(", "class ", "def ",
+]
+
+
+def is_dangerous_python(code: str) -> tuple[bool, str]:
+    """Verifica si codigo Python contiene patrones peligrosos.
+    
+    Returns:
+        (is_dangerous, reason) tuple
+    """
+    code_lower = code.lower()
+    
+    for pattern in PYTHON_DANGEROUS_MODULES:
+        if pattern.lower() in code_lower:
+            return True, f"Codigo contiene patron peligroso: {pattern}"
+    
+    # Detectar importaciones sospechosas
+    import_pattern = re.compile(r'(?:from|import)\s+(\w+)', re.IGNORECASE)
+    for match in import_pattern.finditer(code):
+        module = match.group(1).lower()
+        dangerous_imports = {"os", "subprocess", "shutil", "ctypes", "socket",
+                          "http", "pickle", "marshal", "code", "codeop"}
+        if module in dangerous_imports:
+            return True, f"Importacion peligrosa detectada: {module}"
+    
+    # Detectar acceso a archivos del sistema
+    for pattern in [r"open\s*\(\s*['\"]/(etc|boot|dev|sys|proc|root)", 
+                    r"open\s*\(\s*['\"]C:\\(Windows|System32)"]:
+        if re.search(pattern, code, re.IGNORECASE):
+            return True, "Intento de acceso a archivos del sistema"
+    
+    return False, ""
+
+
+def sanitize_pandas_eval(expression: str) -> str:
+    """Sanitiza una expresion para df.eval() de pandas.
+    Elimina patrones peligrosos que permiten ejecucion de codigo arbitrario.
+    """
+    if not expression:
+        return expression
+    
+    for pattern in PANDAS_EVAL_DANGEROUS:
+        if pattern in expression:
+            logger.warning(f"Expresion pandas.eval() contiene patron peligroso: {pattern}")
+            # En lugar de bloquear, reemplazar con version segura
+            expression = expression.replace(pattern, f"# REMOVED_{pattern}")
+    
+    return expression
+
+
+def sanitize_email_password(password: str) -> str:
+    """Sanitiza una contrasena de email (no la expone en logs)."""
+    # No hacer log de la contrasena
+    if not password:
+        return ""
+    # Solo verificar que no tiene caracteres de control
+    return re.sub(r'[\x00-\x1f\x7f]', '', password)

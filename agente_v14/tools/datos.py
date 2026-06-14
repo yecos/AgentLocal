@@ -33,12 +33,22 @@ from utils.security import validate_path, sanitize_input
 
 def ejecutar_python(codigo: str, timeout: int = 60) -> str:
     """Ejecuta codigo Python y retorna la salida. Se ejecuta en un subproceso aislado.
+    Verifica patrones peligrosos antes de ejecutar.
 
     Args:
         codigo: Codigo Python a ejecutar
         timeout: Timeout en segundos (default 60, max 300)
     """
     timeout = min(max(timeout, 5), 300)
+
+    # Verificacion de seguridad
+    try:
+        from utils.security import is_dangerous_python
+        is_dangerous, reason = is_dangerous_python(codigo)
+        if is_dangerous:
+            return f"ERROR: Codigo bloqueado por seguridad. Razon: {reason}\nSi necesitas ejecutar este codigo, confirma con ejecutar_comando."
+    except ImportError:
+        pass
 
     # Escribir codigo a archivo temporal
     with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False,

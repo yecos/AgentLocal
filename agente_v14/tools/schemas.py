@@ -365,15 +365,17 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "crear_docx",
-            "description": "Crea un documento Word (.docx) con formato. Soporta Markdown basico.",
+            "description": "Crea un documento Word (.docx) profesional con formato. Soporta Markdown, tablas e imagenes.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "ruta": {"type": "string", "description": "Ruta donde guardar el .docx"},
                     "titulo": {"type": "string", "description": "Titulo del documento"},
-                    "contenido": {"type": "string", "description": "Contenido (formato Markdown: # headers, - listas)"}
+                    "contenido": {"type": "string", "description": "Contenido (Markdown: # headers, - listas, **bold**, > quotes)"},
+                    "tabla": {"type": "string", "description": "Tabla JSON: {\"headers\":[\"col1\"],\"rows\":[[\"val1\"]]}"},
+                    "imagen": {"type": "string", "description": "Ruta de imagen para insertar"}
                 },
-                "required": ["ruta", "contenido"]
+                "required": ["ruta"]
             }
         }
     },
@@ -381,13 +383,15 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "crear_xlsx",
-            "description": "Crea un archivo Excel (.xlsx) con datos. Los datos se pasan como CSV o JSON.",
+            "description": "Crea un archivo Excel (.xlsx) profesional con datos, formulas, graficos embebidos y estilos.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "ruta": {"type": "string", "description": "Ruta donde guardar el .xlsx"},
-                    "datos": {"type": "string", "description": "Datos en formato CSV (filas por newline, columnas por coma) o JSON"},
-                    "hoja": {"type": "string", "description": "Nombre de la hoja (default: Hoja1)"}
+                    "datos": {"type": "string", "description": "Datos en formato CSV o JSON"},
+                    "hoja": {"type": "string", "description": "Nombre de la hoja (default: Hoja1)"},
+                    "formulas": {"type": "string", "description": "Formulas JSON: [{\"celda\":\"C1\",\"formula\":\"=SUM(A1:B1)\"}]"},
+                    "grafico_embebido": {"type": "string", "description": "Grafico JSON: {\"tipo\":\"bar\",\"titulo\":\"Ventas\"}"}
                 },
                 "required": ["ruta", "datos"]
             }
@@ -993,6 +997,178 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "listar_subagentes",
             "description": "Lista los tipos de sub-agentes disponibles y sus capacidades.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    # ============================================================
+    # v15.2 SUPER AGENTE - HERRAMIENTAS AVANZADAS
+    # ============================================================
+    {
+        "type": "function",
+        "function": {
+            "name": "busqueda_profunda",
+            "description": "Realiza una busqueda profunda multi-ronda sobre un tema. Busca en multiples fuentes, sigue enlaces relevantes y sintetiza un informe completo. Ideal para investigaciones.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tema": {"type": "string", "description": "Tema a investigar en profundidad"},
+                    "profundidad": {"type": "integer", "description": "Nivel de profundidad: 1=rapido, 2=medio, 3=profundo (default 3)"},
+                    "idioma": {"type": "string", "description": "Idioma preferido: es, en, fr, de, pt (default es)"},
+                    "guardar": {"type": "boolean", "description": "Guardar informe en archivo (default True)"}
+                },
+                "required": ["tema"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "editar_multiples",
+            "description": "Realiza multiples ediciones en uno o varios archivos en una sola operacion. Cada edicion especifica archivo, texto a buscar y texto nuevo.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ediciones": {"type": "string", "description": "Lista JSON: [{archivo, buscar, reemplazar, reemplazar_todo?}, ...]"},
+                    "crear_archivos": {"type": "boolean", "description": "Crear archivos que no existen (default True)"}
+                },
+                "required": ["ediciones"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generacion_batch",
+            "description": "Genera multiples archivos en una sola operacion. Ideal para crear estructuras de proyecto o templates.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "archivos": {"type": "string", "description": "Lista JSON: [{ruta, contenido, sobreescribir?}, ...]"}
+                },
+                "required": ["archivos"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "buscar_patron",
+            "description": "Busca un patron de texto o regex en archivos (como grep). Busca en el contenido de archivos del directorio.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "patron": {"type": "string", "description": "Patron de texto o expresion regular"},
+                    "directorio": {"type": "string", "description": "Directorio donde buscar (default .)"},
+                    "tipo_archivo": {"type": "string", "description": "Filtrar por extension: .py, .js, .txt, .md"},
+                    "max_resultados": {"type": "integer", "description": "Max resultados (default 30)"},
+                    "ignorar_case": {"type": "boolean", "description": "Ignorar mayusculas/minusculas (default True)"},
+                    "contexto": {"type": "integer", "description": "Lineas de contexto antes/despues (default 2)"}
+                },
+                "required": ["patron"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "listar_glob",
+            "description": "Lista archivos usando glob patterns (ej: **/*.py, src/**/*.ts, **/test_*.js). Busqueda flexible por nombre.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "patron": {"type": "string", "description": "Patron glob: **/*.py, **/test_*.js, *.md (default **/*)"},
+                    "directorio": {"type": "string", "description": "Directorio base (default actual)"},
+                    "solo_tipo": {"type": "string", "description": "Filtrar: todos, archivos, directorios"},
+                    "max_resultados": {"type": "integer", "description": "Max resultados (default 100)"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "crear_proyecto_web",
+            "description": "Crea un proyecto web con scaffolding completo. Soporta Next.js, React, Vue, Express y sitios estaticos.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "nombre": {"type": "string", "description": "Nombre del proyecto"},
+                    "tipo": {"type": "string", "description": "Tipo: nextjs, react, vue, express, static (default nextjs)"},
+                    "directorio": {"type": "string", "description": "Directorio donde crear el proyecto (default REPOS_DIR)"},
+                    "opciones": {"type": "string", "description": "Opciones JSON: {typescript, tailwind, prisma}"}
+                },
+                "required": ["nombre"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "resumir_url",
+            "description": "Lee y extrae contenido de una URL web. Puede extraer texto, metadatos, links, imagenes o HTML crudo.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL de la pagina web"},
+                    "max_caracteres": {"type": "integer", "description": "Max caracteres a extraer (default 5000)"},
+                    "extraer": {"type": "string", "description": "Que extraer: texto, metadatos, html, links, imagenes (default texto)"}
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ver_contexto_compartido",
+            "description": "Muestra el contenido del contexto compartido entre sub-agentes.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "limpiar_contexto",
+            "description": "Limpia el contexto compartido entre sub-agentes.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    # ============================================================
+    # v16 SUPER AGENTE - CLOUD APIs
+    # ============================================================
+    {
+        "type": "function",
+        "function": {
+            "name": "configurar_api_key",
+            "description": "Configura una API key para servicios cloud. Servicios: google, google_cx, openai, anthropic, stability, replicate, huggingface, google_gemini. Permite usar DALL-E, GPT-4, Claude, Stable Diffusion, etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "servicio": {"type": "string", "description": "Servicio: google, openai, anthropic, stability, replicate, huggingface, google_gemini"},
+                    "clave": {"type": "string", "description": "API key del servicio"}
+                },
+                "required": ["servicio", "clave"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "listar_api_keys",
+            "description": "Lista los servicios cloud con API keys configuradas y su estado.",
             "parameters": {
                 "type": "object",
                 "properties": {},
