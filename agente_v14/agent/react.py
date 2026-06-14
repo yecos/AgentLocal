@@ -1077,28 +1077,55 @@ class ReactAgent:
 
     def _looks_like_tool_json(self, text):
         """Detecta si el texto parece ser JSON de tool call (no respuesta al usuario).
-        v3: Mas robusto - detecta JSON que empieza despues de whitespace o texto corto.
+        v4: Mucho mas preciso - evita falsos positivos con markdown y codigo.
+        
+        Solo suprime si:
+        1. El texto es JSON que contiene campos de tool call (accion, params, etc.)
+        2. O es el inicio de un JSON de tool call detectable
+        
+        NO suprime:
+        - Markdown que empieza con {
+        - Bloques de codigo JSON explicativos
+        - Respuestas que contienen JSON como ejemplo
         """
         text = text.strip()
         if not text:
             return False
-        # Si el texto empieza con { probablemente es JSON de tool call
-        if text.startswith('{'):
-            return True
-        # Si despues de whitespace/newline hay {, tambien es JSON
-        # Esto captura casos donde el modelo genera: "\n{" o "  {"
-        stripped = text.lstrip()
-        if stripped.startswith('{'):
-            return True
-        # Si contiene patrones de tool calls en cualquier parte
-        tool_indicators = ['"accion"', '"pensamiento"', '"params"', '"respuesta_final"',
-                          '"abrir_', '"ejecutar_', '"leer_', '"escribir_', '"buscar_"']
-        for indicator in tool_indicators:
+        
+        # Solo considerar si empieza con { y parece JSON completo/parcial
+        if not text.startswith('{') and not text.lstrip().startswith('{'):
+            return False
+        
+        # Si el texto esta dentro de un bloque de codigo markdown, NO suprimir
+        # (el modelo esta explicando JSON, no llamando herramientas)
+        if text.startswith('```') or '```json' in text[:50] or '```' in text[:20]:
+            return False
+        
+        # Intentar parsear como JSON - si falla, probablemente es texto normal
+        # que casualmente empieza con {
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                # Tiene campos de tool call? → suprimir
+                tool_keys = {"accion", "pensamiento", "params", "respuesta_final", "action"}
+                if tool_keys & set(parsed.keys()):
+                    return True
+                # Tiene function/tool_calls structure? → suprimir
+                if "function" in parsed or "tool_calls" in parsed:
+                    return True
+        except json.JSONDecodeError:
+            pass
+        
+        # Verificar si es inicio de JSON de tool call (no completo aun)
+        # Solo si contiene indicadores fuertes de tool call
+        strong_indicators = ['"accion"', '"pensamiento"', '"respuesta_final"',
+                           '"params":', '"function"']
+        for indicator in strong_indicators:
             if indicator in text:
                 return True
-        # Si el texto es corto y parece inicio de JSON
-        if len(text) < 5 and text in ['{', '"', '\n', '\r']:
-            return True
+        
+        # Por defecto: NO suprimir. Es mejor mostrar texto que podria ser
+        # markdown o codigo que suprimir respuestas legitimas.
         return False
 
     def _detect_tool_calling_support(self):
