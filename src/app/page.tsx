@@ -943,7 +943,16 @@ export default function ZAIInterface() {
             // Bridge agent events (type field present)
             if (parsed.type) {
               if (parsed.type === "text") {
-                const content = parsed.data || "";
+                let content = parsed.data || "";
+                // Filter out internal JSON that the agent leaks
+                // (pensamiento, accion, respuesta_final, params)
+                content = content.replace(/\{"?pensamiento"?\s*:/g, '');
+                content = content.replace(/\{"?accion"?\s*:/g, '');
+                content = content.replace(/\{"?respuesta_final"?\s*:/g, '');
+                if (content.trim().startsWith('{"') && (content.includes('"pensamiento"') || content.includes('"accion"') || content.includes('"respuesta_final"'))) {
+                  // Entire chunk is internal JSON - skip it
+                  continue;
+                }
                 if (content.includes("<think")) {
                   isThinking = true;
                 }
@@ -1007,8 +1016,21 @@ export default function ZAIInterface() {
               }
             } else {
               // Direct Ollama format (no type field)
-              const content = parsed.message?.content || "";
+              let content = parsed.message?.content || "";
               tokenCount++;
+
+              // Filter out internal agent JSON from direct Ollama responses
+              if (content.trim().startsWith('{"') && (content.includes('"pensamiento"') || content.includes('"accion"') || content.includes('"respuesta_final"'))) {
+                // This is internal agent JSON leaking through - try to extract respuesta_final
+                try {
+                  const jsonObj = JSON.parse(content);
+                  content = jsonObj.respuesta_final || jsonObj.pensamiento || '';
+                  if (!content) continue;
+                } catch {
+                  // Partial JSON - skip it entirely
+                  continue;
+                }
+              }
 
               if (content.includes("<think")) {
                 isThinking = true;

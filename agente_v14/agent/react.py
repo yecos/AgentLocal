@@ -764,7 +764,7 @@ class ReactAgent:
 
     def _clean_json_leak(self, text):
         """Limpia texto que tiene restos de formato JSON para mostrar al usuario.
-        v3: Mas agresivo - tambien limpia JSON parcial al inicio/final del texto.
+        v4: Aun mas agresivo - limpia cualquier JSON interno del agente.
         """
         # Si el texto es JSON completo, extraer solo el contenido util
         parsed = self._parse_json(text)
@@ -774,13 +774,22 @@ class ReactAgent:
                 return parsed["respuesta_final"].strip()
             if parsed.get("pensamiento", "").strip():
                 return parsed["pensamiento"].strip()
+            # Si es un dict con solo keys internas pero sin contenido util, devolver vacio
+            internal_keys = {"pensamiento", "accion", "params", "respuesta_final", "_multi_tool_calls", "tool_calls"}
+            if set(parsed.keys()).issubset(internal_keys):
+                return ""
         # Si no es JSON completo, intentar limpiar restos
-        # Caso: texto que empieza con JSON parcial
         import re as _re
         # Remover JSON parcial al inicio: {"pensamiento": "..." ... restos
         cleaned = _re.sub(r'^\s*\{[^}]*$', '', text).strip()
         # Remover JSON parcial al final
         cleaned = _re.sub(r'\{[^}]*$\s*$', '', cleaned).strip()
+        # v4: Remover keys de JSON interno sueltas como '"pensamiento"' o '"accion"'
+        cleaned = _re.sub(r'"?(?:pensamiento|accion|respuesta_final|params)"?\s*:\s*"?[^",}]*"?\s*,?\s*', '', cleaned)
+        # Remover llaves sueltas y comas residuales
+        cleaned = _re.sub(r'^\s*[\{,]\s*', '', cleaned)
+        cleaned = _re.sub(r'\s*[\},]\s*$', '', cleaned)
+        cleaned = cleaned.strip()
         # Si despues de limpiar quedo vacio, devolver texto original
         return cleaned if cleaned else text
 
