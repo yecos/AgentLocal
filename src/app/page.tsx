@@ -30,6 +30,9 @@ import {
   Sparkles,
   Copy,
   Check,
+  Plus,
+  Trash2,
+  FolderOpen,
 } from "lucide-react";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -90,6 +93,29 @@ interface UploadedFile {
   type: string;
 }
 
+interface ConversationListItem {
+  id: string;
+  title: string;
+  model?: string | null;
+  mode: string;
+  createdAt: string;
+  updatedAt: string;
+  _count?: { messages: number };
+}
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+const MAX_CONVERSATION_MEMORY = 15;
+
+const PROMPT_STARTERS = [
+  { label: "Analyze a project", icon: "◆" },
+  { label: "Search the web for...", icon: "◈" },
+  { label: "Create a document", icon: "◇" },
+  { label: "Run Python code", icon: "▶" },
+  { label: "Explain a concept", icon: "○" },
+  { label: "Manage my tasks", icon: "◎" },
+];
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function formatBytes(bytes: number): string {
@@ -115,6 +141,28 @@ function cleanThinking(text: string): string {
   return text
     .replace(/<\/?think[^>]*>/g, "")
     .trim();
+}
+
+function formatDate(dateStr: string): string {
+  const date = new Date(dateStr);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+  if (diffDays === 0) {
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  } else if (diffDays === 1) {
+    return "Yesterday";
+  } else if (diffDays < 7) {
+    return `${diffDays}d ago`;
+  } else {
+    return date.toLocaleDateString([], { month: "short", day: "numeric" });
+  }
+}
+
+function truncateTitle(title: string, maxLen: number = 22): string {
+  if (title.length <= maxLen) return title;
+  return title.slice(0, maxLen - 1) + "…";
 }
 
 // ─── Copy Button for Code Blocks ──────────────────────────────────────────
@@ -258,7 +306,7 @@ function HardwareStats() {
       }
     };
     fetchSystem();
-    const interval = setInterval(fetchSystem, 5000); // Refresh every 5s
+    const interval = setInterval(fetchSystem, 5000);
     return () => clearInterval(interval);
   }, []);
 
@@ -577,10 +625,12 @@ function WelcomeScreen({
   status,
   selectedModel,
   useAgent,
+  onStarterClick,
 }: {
   status: SystemStatus;
   selectedModel: string;
   useAgent: boolean;
+  onStarterClick: (prompt: string) => void;
 }) {
   return (
     <div className="flex flex-col items-center justify-center h-full gap-4 animate-fade-in select-none">
@@ -639,6 +689,29 @@ function WelcomeScreen({
           </span>
         </div>
       )}
+
+      {/* Prompt Starters */}
+      {status.connected && (
+        <div className="mt-4 w-full max-w-md">
+          <div className="text-[9px] text-[#3a3a3a] tracking-[0.2em] uppercase mb-2.5 text-center">
+            Quick Prompts
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            {PROMPT_STARTERS.map((starter) => (
+              <button
+                key={starter.label}
+                onClick={() => onStarterClick(starter.label)}
+                className="flex items-center gap-2 px-3 py-2 border border-[rgba(255,255,255,0.06)] bg-[rgba(255,255,255,0.015)] hover:border-[rgba(0,212,255,0.2)] hover:bg-[rgba(0,212,255,0.03)] text-[11px] text-[#666666] hover:text-[#aaa] transition-all duration-150 text-left group"
+              >
+                <span className="text-[rgba(0,212,255,0.3)] group-hover:text-[rgba(0,212,255,0.6)] text-[10px] shrink-0">
+                  {starter.icon}
+                </span>
+                <span className="truncate">{starter.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -673,6 +746,12 @@ export default function AgentLocalInterface() {
   const [isRecording, setIsRecording] = useState(false);
   const [tools, setTools] = useState<ToolInfo[]>([]);
 
+  // Conversation state
+  const [conversations, setConversations] = useState<ConversationListItem[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [conversationsExpanded, setConversationsExpanded] = useState(true);
+  const [loadingConversation, setLoadingConversation] = useState(false);
+
   // Refs
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -694,6 +773,20 @@ export default function AgentLocalInterface() {
   useEffect(() => {
     if (isMobile) setSidebarOpen(false);
   }, [isMobile]);
+
+  // ─── Fetch Conversations ────────────────────────────────────────────────
+
+  const fetchConversations = useCallback(async () => {
+    try {
+      const res = await fetch("/api/conversations");
+      if (res.ok) {
+        const data = await res.json();
+        setConversations(data.conversations || []);
+      }
+    } catch {
+      // Conversations not available
+    }
+  }, []);
 
   // ─── Fetch Status ────────────────────────────────────────────────────────
 
@@ -765,6 +858,12 @@ export default function AgentLocalInterface() {
     return () => clearInterval(interval);
   }, [fetchTools]);
 
+  // Initial load of conversations
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    fetchConversations().catch(() => {});
+  }, [fetchConversations]);
+
   useEffect(() => {
     const timer = setInterval(() => setUptime((prev) => prev + 1), 1000);
     return () => clearInterval(timer);
@@ -794,6 +893,145 @@ export default function AgentLocalInterface() {
     }
     return groups;
   }, [tools]);
+
+  // ─── Context Usage ──────────────────────────────────────────────────────
+
+  const contextUsage = useMemo(() => {
+    const msgCount = messages.length;
+    const pct = Math.min(100, Math.round((msgCount / MAX_CONVERSATION_MEMORY) * 100));
+    return { msgCount, pct, max: MAX_CONVERSATION_MEMORY };
+  }, [messages]);
+
+  // ─── Create New Conversation ─────────────────────────────────────────────
+
+  const createNewConversation = useCallback(async (title?: string): Promise<string | null> => {
+    try {
+      const res = await fetch("/api/conversations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: title || "New Conversation",
+          model: selectedModel,
+          mode: useAgent ? "agent" : "chat",
+        }),
+      });
+      if (res.ok) {
+        const conv = await res.json();
+        await fetchConversations();
+        return conv.id;
+      }
+    } catch {
+      // Failed to create conversation
+    }
+    return null;
+  }, [selectedModel, useAgent, fetchConversations]);
+
+  // ─── Save Message to Conversation ────────────────────────────────────────
+
+  const saveMessageToConversation = useCallback(async (
+    conversationId: string,
+    role: string,
+    content: string,
+    opts?: { thinking?: string; toolCalls?: ToolCall[]; tokenCount?: number; responseTime?: number }
+  ) => {
+    try {
+      await fetch(`/api/conversations/${conversationId}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          role,
+          content,
+          thinking: opts?.thinking || null,
+          toolCalls: opts?.toolCalls || null,
+          tokenCount: opts?.tokenCount || 0,
+          responseTime: opts?.responseTime || null,
+        }),
+      });
+    } catch {
+      // Failed to save message
+    }
+  }, []);
+
+  // ─── Delete Conversation ─────────────────────────────────────────────────
+
+  const deleteConversation = useCallback(async (convId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      const res = await fetch(`/api/conversations/${convId}`, { method: "DELETE" });
+      if (res.ok) {
+        if (activeConversationId === convId) {
+          setActiveConversationId(null);
+          setMessages([]);
+          setSessionStats({ messageCount: 0, toolsUsed: 0, avgResponseTime: 0, totalTokens: 0 });
+          responseTimesRef.current = [];
+        }
+        await fetchConversations();
+        toast.success("Conversation deleted");
+      }
+    } catch {
+      toast.error("Failed to delete conversation");
+    }
+  }, [activeConversationId, fetchConversations]);
+
+  // ─── Load Conversation ───────────────────────────────────────────────────
+
+  const loadConversation = useCallback(async (convId: string) => {
+    setLoadingConversation(true);
+    try {
+      const res = await fetch(`/api/conversations/${convId}`);
+      if (res.ok) {
+        const data = await res.json();
+        const loadedMessages: Message[] = (data.messages || []).map((m: any) => ({
+          id: m.id || generateId(),
+          role: m.role as "user" | "assistant",
+          content: m.content,
+          thinking: m.thinking || undefined,
+          toolCalls: m.toolCalls ? (() => {
+            try {
+              return typeof m.toolCalls === "string" ? JSON.parse(m.toolCalls) : m.toolCalls;
+            } catch { return undefined; }
+          })() : undefined,
+          timestamp: new Date(m.createdAt).getTime(),
+          responseTime: m.responseTime || undefined,
+          tokenCount: m.tokenCount || undefined,
+        }));
+        setMessages(loadedMessages);
+        setActiveConversationId(convId);
+        setSessionStats({
+          messageCount: loadedMessages.filter((m: Message) => m.role === "assistant").length,
+          toolsUsed: loadedMessages.reduce((acc: number, m: Message) => acc + (m.toolCalls?.length || 0), 0),
+          avgResponseTime: loadedMessages.filter((m: Message) => m.responseTime).length > 0
+            ? Math.round(loadedMessages.filter((m: Message) => m.responseTime).reduce((acc: number, m: Message) => acc + (m.responseTime || 0), 0) / loadedMessages.filter((m: Message) => m.responseTime).length)
+            : 0,
+          totalTokens: loadedMessages.reduce((acc: number, m: Message) => acc + (m.tokenCount || 0), 0),
+        });
+        responseTimesRef.current = loadedMessages
+          .filter((m: Message) => m.responseTime)
+          .map((m: Message) => m.responseTime!);
+      }
+    } catch {
+      toast.error("Failed to load conversation");
+    } finally {
+      setLoadingConversation(false);
+    }
+  }, []);
+
+  // ─── Start New Chat ─────────────────────────────────────────────────────
+
+  const startNewChat = useCallback(() => {
+    setActiveConversationId(null);
+    setMessages([]);
+    setSessionStats({ messageCount: 0, toolsUsed: 0, avgResponseTime: 0, totalTokens: 0 });
+    responseTimesRef.current = [];
+    inputRef.current?.focus();
+  }, []);
+
+  // ─── Handle Starter Click ────────────────────────────────────────────────
+
+  const handleStarterClick = useCallback((prompt: string) => {
+    setInput(prompt);
+    setTimeout(() => inputRef.current?.focus(), 50);
+  }, []);
 
   // ─── File Upload ────────────────────────────────────────────────────────
 
@@ -830,7 +1068,7 @@ export default function AgentLocalInterface() {
 
   const uploadFiles = async (): Promise<string[]> => {
     if (uploadedFiles.length === 0) return [];
-    if (fileObjectsRef.current.length === 0) return uploadedFiles.map((f) => f.name);
+    if (fileObjectsRef.current.length === 0) return uploadedFiles.map((f: any) => f.name);
 
     try {
       const formData = new FormData();
@@ -845,13 +1083,13 @@ export default function AgentLocalInterface() {
       if (res.ok) {
         const data = await res.json();
         const names = (data.files || []).map((f: { name: string }) => f.name);
-        return names.length > 0 ? names : uploadedFiles.map((f) => f.name);
+        return names.length > 0 ? names : uploadedFiles.map((f: any) => f.name);
       }
     } catch {
       // Upload failed, still include file names in the message
     }
 
-    return uploadedFiles.map((f) => f.name);
+    return uploadedFiles.map((f: any) => f.name);
   };
 
   // ─── Voice Input ────────────────────────────────────────────────────────
@@ -954,6 +1192,22 @@ export default function AgentLocalInterface() {
       inputRef.current.style.height = "auto";
     }
 
+    // Ensure we have an active conversation
+    let convId = activeConversationId;
+    if (!convId) {
+      // Auto-create a new conversation with first words of user message as title
+      const title = userContent.slice(0, 50).replace(/\n/g, " ").trim();
+      convId = await createNewConversation(title || "New Conversation");
+      if (convId) {
+        setActiveConversationId(convId);
+      }
+    }
+
+    // Save user message to conversation
+    if (convId) {
+      saveMessageToConversation(convId, "user", userContent);
+    }
+
     const startTime = Date.now();
 
     const ollamaMessages = [...messages, userMessage].map((m) => ({
@@ -1044,28 +1298,21 @@ export default function AgentLocalInterface() {
               if (parsed.type === "text") {
                 let content = parsed.data || "";
                 // v5: More robust filtering of internal agent JSON
-                // (pensamiento, accion, respuesta_final, params)
-                // Check if entire content is internal JSON - try to extract useful content
                 const trimmed = content.trim();
                 if (trimmed.startsWith('{')) {
                   try {
                     const jsonObj = JSON.parse(trimmed);
-                    // Extract useful content: respuesta_final > pensamiento
                     content = jsonObj.respuesta_final || jsonObj.pensamiento || '';
                     if (!content) continue;
                   } catch {
-                    // Partial/incomplete JSON - check if it's internal agent JSON
                     if (trimmed.includes('"pensamiento"') || trimmed.includes('"accion"') || trimmed.includes('"respuesta_final"')) {
-                      // Don't show partial internal JSON to user
                       continue;
                     }
                   }
                 }
-                // Additional cleanup: remove any residual JSON key fragments
                 content = content.replace(/"?pensamiento"?\s*:\s*"?[^",}]*"?\s*,?\s*/g, '');
                 content = content.replace(/"?accion"?\s*:\s*"?[^",}]*"?\s*,?\s*/g, '');
                 content = content.replace(/"?respuesta_final"?\s*:\s*"?[^",}]*"?\s*,?\s*/g, '');
-                // Remove literal key names that might leak through
                 content = content.replace(/"(?:pensamiento|accion|respuesta_final|params)"/g, '');
                 content = content.trim();
                 if (!content) continue;
@@ -1082,7 +1329,6 @@ export default function AgentLocalInterface() {
                 }
                 tokenCount++;
               } else if (parsed.type === "thinking") {
-                // Deep thinking event from bridge
                 const thinkingData = parsed.data || {};
                 const thinkingText =
                   thinkingData.reasoning ||
@@ -1100,7 +1346,6 @@ export default function AgentLocalInterface() {
               } else if (parsed.type === "tool_result") {
                 const toolName = parsed.data?.tool || "unknown";
                 const toolResult = parsed.data?.result;
-                // Find the matching loading tool call and update it
                 const existingIdx = [...toolCalls]
                   .reverse()
                   .findIndex((t) => t.name === toolName && t.status === "loading");
@@ -1112,7 +1357,6 @@ export default function AgentLocalInterface() {
                     status: "success",
                   };
                 } else {
-                  // No matching loading call, add as success
                   toolCalls.push({
                     name: toolName,
                     result: typeof toolResult === "string" ? toolResult : JSON.stringify(toolResult),
@@ -1120,7 +1364,6 @@ export default function AgentLocalInterface() {
                   });
                 }
               } else if (parsed.type === "meta") {
-                // Metacognition event - could be displayed in thinking
                 const metaData = parsed.data;
                 if (metaData) {
                   thinkingContent += (thinkingContent ? "\n" : "") + `[Meta] ${JSON.stringify(metaData)}`;
@@ -1128,7 +1371,6 @@ export default function AgentLocalInterface() {
               } else if (parsed.type === "done") {
                 // Agent finished
               } else if (parsed.type === "error") {
-                // v5: Filter out raw JSON key names from error messages
                 let errMsg = String(parsed.data || '');
                 if (['"pensamiento"', '"accion"', '"respuesta_final"', '"params"'].some(k => errMsg.includes(k))) {
                   errMsg = 'Error procesando respuesta del modelo';
@@ -1140,22 +1382,18 @@ export default function AgentLocalInterface() {
               let content = parsed.message?.content || "";
               tokenCount++;
 
-              // v5: More robust filtering of internal agent JSON from direct Ollama responses
               const directTrimmed = content.trim();
               if (directTrimmed.startsWith('{')) {
                 try {
                   const jsonObj = JSON.parse(directTrimmed);
-                  // Extract useful content: respuesta_final > pensamiento
                   content = jsonObj.respuesta_final || jsonObj.pensamiento || '';
                   if (!content) continue;
                 } catch {
-                  // Partial JSON with internal keys - skip it
                   if (directTrimmed.includes('"pensamiento"') || directTrimmed.includes('"accion"') || directTrimmed.includes('"respuesta_final"')) {
                     continue;
                   }
                 }
               }
-              // Additional cleanup: remove residual JSON key fragments
               content = content.replace(/"(?:pensamiento|accion|respuesta_final|params)"/g, '');
               content = content.trim();
               if (!content) continue;
@@ -1241,6 +1479,18 @@ export default function AgentLocalInterface() {
             : 0,
         totalTokens: prev.totalTokens + tokenCount,
       }));
+
+      // Auto-save assistant message to conversation
+      if (convId && fullContent) {
+        saveMessageToConversation(convId, "assistant", fullContent, {
+          thinking: thinkingContent || undefined,
+          toolCalls: finalToolCalls.length > 0 ? finalToolCalls : undefined,
+          tokenCount,
+          responseTime,
+        });
+        // Refresh conversation list to update title/date
+        fetchConversations();
+      }
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         // User cancelled - just mark streaming as done
@@ -1291,6 +1541,7 @@ export default function AgentLocalInterface() {
 
   const clearChat = async () => {
     setMessages([]);
+    setActiveConversationId(null);
     setSessionStats({
       messageCount: 0,
       toolsUsed: 0,
@@ -1408,6 +1659,7 @@ export default function AgentLocalInterface() {
                 status={status}
                 selectedModel={selectedModel}
                 useAgent={useAgent}
+                onStarterClick={handleStarterClick}
               />
             )}
 
@@ -1442,7 +1694,7 @@ export default function AgentLocalInterface() {
           {/* Uploaded files chips */}
           {uploadedFiles.length > 0 && (
             <div className="px-5 py-2 border-t border-[rgba(255,255,255,0.04)] flex flex-wrap gap-1.5">
-              {uploadedFiles.map((file, i) => (
+              {uploadedFiles.map((file: any, i: number) => (
                 <div
                   key={i}
                   className="flex items-center gap-1.5 px-2 py-0.5 border border-[rgba(0,212,255,0.15)] bg-[rgba(0,212,255,0.03)] text-[10px] text-[#888]"
@@ -1569,6 +1821,107 @@ export default function AgentLocalInterface() {
           } shrink-0 border-l border-[rgba(255,255,255,0.06)] bg-[#050505] overflow-hidden transition-all duration-200`}
         >
           <div className="w-64 h-full overflow-y-auto px-4 py-4 space-y-5">
+            {/* CONVERSATIONS */}
+            <section>
+              <button
+                onClick={() => setConversationsExpanded(!conversationsExpanded)}
+                className="flex items-center gap-1.5 mb-3 w-full"
+              >
+                <FolderOpen size={10} className="text-[#555555]" />
+                <h3 className="text-[9px] tracking-[0.2em] text-[#555555] uppercase">
+                  Conversations
+                </h3>
+                <span className="text-[9px] text-[#3a3a3a] ml-auto">
+                  {conversations.length}
+                </span>
+                {conversationsExpanded ? (
+                  <ChevronDown size={9} className="text-[#444444]" />
+                ) : (
+                  <ChevronRight size={9} className="text-[#444444]" />
+                )}
+              </button>
+
+              {conversationsExpanded && (
+                <div className="space-y-1">
+                  {/* New Chat button */}
+                  <button
+                    onClick={startNewChat}
+                    className={`w-full flex items-center gap-2 px-2 py-1.5 border transition-all duration-150 ${
+                      !activeConversationId
+                        ? "border-[rgba(0,212,255,0.2)] bg-[rgba(0,212,255,0.03)]"
+                        : "border-[rgba(255,255,255,0.04)] hover:border-[rgba(255,255,255,0.08)] hover:bg-[rgba(255,255,255,0.015)]"
+                    }`}
+                  >
+                    <Plus size={10} className={!activeConversationId ? "text-[#00d4ff]" : "text-[#555555]"} />
+                    <span className={`text-[10px] ${!activeConversationId ? "text-[#00d4ff]" : "text-[#666666]"}`}>
+                      New Chat
+                    </span>
+                  </button>
+
+                  {/* Conversation list */}
+                  <div className="max-h-52 overflow-y-auto space-y-0.5">
+                    {loadingConversation ? (
+                      <div className="text-[9px] text-[#444444] px-2 py-1.5">
+                        Loading...
+                      </div>
+                    ) : conversations.length === 0 ? (
+                      <div className="text-[9px] text-[#3a3a3a] px-2 py-1.5">
+                        No conversations yet
+                      </div>
+                    ) : (
+                      conversations.map((conv) => (
+                        <div
+                          key={conv.id}
+                          onClick={() => loadConversation(conv.id)}
+                          className={`group flex items-center gap-1.5 px-2 py-1.5 border cursor-pointer transition-all duration-150 ${
+                            conv.id === activeConversationId
+                              ? "border-[rgba(0,212,255,0.2)] bg-[rgba(0,212,255,0.03)]"
+                              : "border-transparent hover:border-[rgba(255,255,255,0.04)] hover:bg-[rgba(255,255,255,0.015)]"
+                          }`}
+                        >
+                          <MessageSquare
+                            size={9}
+                            className={`shrink-0 ${
+                              conv.id === activeConversationId
+                                ? "text-[#00d4ff]"
+                                : "text-[#444444]"
+                            }`}
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div
+                              className={`text-[10px] truncate ${
+                                conv.id === activeConversationId
+                                  ? "text-[#e0e0e0]"
+                                  : "text-[#888888]"
+                              }`}
+                            >
+                              {truncateTitle(conv.title)}
+                            </div>
+                            <div className="text-[8px] text-[#3a3a3a]">
+                              {formatDate(conv.updatedAt)}
+                              {conv._count && conv._count.messages > 0 && (
+                                <span> · {conv._count.messages} msg{conv._count.messages !== 1 ? "s" : ""}</span>
+                              )}
+                            </div>
+                          </div>
+                          <button
+                            onClick={(e) => deleteConversation(conv.id, e)}
+                            className="opacity-0 group-hover:opacity-100 text-[#444444] hover:text-[#ff3333] transition-all duration-150 shrink-0"
+                            aria-label="Delete conversation"
+                            title="Delete conversation"
+                          >
+                            <X size={9} />
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+            </section>
+
+            <div className="h-px bg-[rgba(255,255,255,0.05)]" />
+
             {/* SYSTEM */}
             <section>
               <div className="flex items-center gap-1.5 mb-3">
@@ -1728,6 +2081,35 @@ export default function AgentLocalInterface() {
                       ? `~${sessionStats.totalTokens}`
                       : "—"}
                   </span>
+                </div>
+
+                {/* Context Usage Indicator */}
+                <div>
+                  <div className="flex justify-between items-center mb-1">
+                    <div className="flex items-center gap-1">
+                      <MemoryStick size={9} className="text-[#505050]" />
+                      <span className="text-[10px] text-[#505050]">CONTEXT</span>
+                    </div>
+                    <span className={`text-[10px] tabular-nums ${
+                      contextUsage.pct >= 90 ? "text-[#ff3333]" :
+                      contextUsage.pct >= 70 ? "text-[#ffd93d]" :
+                      "text-[#666666]"
+                    }`}>
+                      {contextUsage.msgCount}/{contextUsage.max}
+                    </span>
+                  </div>
+                  <div className="h-[3px] bg-[rgba(255,255,255,0.08)] overflow-hidden">
+                    <div
+                      className={`h-full transition-all duration-300 ${
+                        contextUsage.pct >= 90
+                          ? "bg-[rgba(255,51,51,0.5)]"
+                          : contextUsage.pct >= 70
+                          ? "bg-[rgba(255,217,61,0.4)]"
+                          : "bg-[rgba(0,212,255,0.3)]"
+                      }`}
+                      style={{ width: `${contextUsage.pct}%` }}
+                    />
+                  </div>
                 </div>
               </div>
             </section>

@@ -13,7 +13,6 @@ export async function GET(
       where: { id },
       include: {
         messages: { orderBy: { createdAt: 'asc' } },
-        user: { select: { id: true, name: true, email: true } },
       },
     })
 
@@ -36,7 +35,7 @@ export async function PATCH(
   try {
     const { id } = await params
     const body = await request.json()
-    const { title, status } = body
+    const { title, mode } = body
 
     const existing = await prisma.conversation.findUnique({ where: { id } })
     if (!existing) {
@@ -45,7 +44,7 @@ export async function PATCH(
 
     const data: Record<string, unknown> = {}
     if (title !== undefined) data.title = title
-    if (status !== undefined) data.status = status
+    if (mode !== undefined) data.mode = mode
 
     const conversation = await prisma.conversation.update({
       where: { id },

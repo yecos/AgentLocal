@@ -43,7 +43,7 @@ export async function POST(
   try {
     const { id } = await params
     const body = await request.json()
-    const { role, content, thinkingLog, toolCalls, modelName, tokens, duration } = body
+    const { role, content, thinking, toolCalls, tokenCount, responseTime } = body
 
     if (!role || typeof role !== 'string') {
       return NextResponse.json(
@@ -69,11 +69,10 @@ export async function POST(
         conversationId: id,
         role,
         content,
-        thinkingLog: thinkingLog || null,
-        toolCalls: toolCalls || null,
-        modelName: modelName || null,
-        tokens: tokens || 0,
-        duration: duration || 0,
+        thinking: thinking || null,
+        toolCalls: toolCalls ? JSON.stringify(toolCalls) : null,
+        tokenCount: tokenCount || 0,
+        responseTime: responseTime || null,
       },
     })
 

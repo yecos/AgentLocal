@@ -9,7 +9,7 @@ export async function GET(request: NextRequest) {
     const limit = parseInt(searchParams.get('limit') || '50')
     const offset = parseInt(searchParams.get('offset') || '0')
 
-    const where = status ? { status } : { status: { not: 'deleted' } }
+    const where = {}
 
     const conversations = await prisma.conversation.findMany({
       where,
@@ -39,7 +39,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { title, model, userId } = body
+    const { title, model, mode } = body
 
     if (!title || typeof title !== 'string') {
       return NextResponse.json(
@@ -52,7 +52,7 @@ export async function POST(request: NextRequest) {
       data: {
         title,
         model: model || null,
-        userId: userId || null,
+        mode: mode || 'agent',
       },
     })
 
