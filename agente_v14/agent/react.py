@@ -676,8 +676,12 @@ class ReactAgent:
 
     def _clean_json_leak(self, text):
         """Limpia texto que tiene restos de formato JSON para mostrar al usuario.
-        v3: Mas agresivo - tambien limpia JSON parcial al inicio/final del texto.
+        v4: Ultra-agresivo - NUNCA muestra JSON al usuario.
+        Siempre extrae el contenido util y descarta la estructura JSON.
         """
+        if not text or not text.strip():
+            return text
+
         # Si el texto es JSON completo, extraer solo el contenido util
         parsed = self._parse_json(text)
         if parsed:
@@ -686,15 +690,43 @@ class ReactAgent:
                 return parsed["respuesta_final"].strip()
             if parsed.get("pensamiento", "").strip():
                 return parsed["pensamiento"].strip()
+            # Si tiene accion pero no respuesta, generar una descripcion humana
+            accion = parsed.get("accion", "").strip()
+            if accion:
+                params = parsed.get("params", {})
+                params_str = ", ".join(f"{k}={v}" for k, v in params.items()) if params else ""
+                return f"Ejecutando {accion}({params_str})..." if params_str else f"Ejecutando {accion}..."
+            # JSON vacio o sin campos utiles
+            return ""
+
         # Si no es JSON completo, intentar limpiar restos
-        # Caso: texto que empieza con JSON parcial
         import re as _re
-        # Remover JSON parcial al inicio: {"pensamiento": "..." ... restos
-        cleaned = _re.sub(r'^\s*\{[^}]*$', '', text).strip()
+
+        # Remover bloques JSON completos embebidos en texto
+        cleaned = _re.sub(r'\{["\w\s:,.]*"pensamiento"["\w\s:,.]*\}', '', text)
+
+        # Remover JSON parcial al inicio
+        cleaned = _re.sub(r'^\s*\{[^}]*$', '', cleaned).strip()
+
         # Remover JSON parcial al final
         cleaned = _re.sub(r'\{[^}]*$\s*$', '', cleaned).strip()
-        # Si despues de limpiar quedo vacio, devolver texto original
-        return cleaned if cleaned else text
+
+        # Remover lineas que parecen JSON keys
+        cleaned = _re.sub(r'^\s*"(pensamiento|accion|params|respuesta_final)"\s*:', '', cleaned, flags=_re.MULTILINE).strip()
+
+        # Remover llaves y comillas sueltas
+        cleaned = _re.sub(r'^\s*[\{\}]\s*$', '', cleaned, flags=_re.MULTILINE).strip()
+
+        # Si despues de limpiar quedo vacio, intentar extraer texto entre comillas
+        if not cleaned:
+            # Buscar el contenido mas largo entre comillas
+            quotes = _re.findall(r'"([^"]{10,})"', text)
+            if quotes:
+                cleaned = max(quotes, key=len)
+            else:
+                cleaned = text
+
+        return cleaned
 
     # ----------------------------------------------------------
     # RECOLECCION DE RESULTADOS DE TOOLS (v14.7)
