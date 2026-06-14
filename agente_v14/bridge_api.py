@@ -34,6 +34,8 @@ import queue
 import threading
 import traceback
 import shutil
+import logging
+from collections import defaultdict
 from datetime import datetime
 from typing import Optional, List
 
@@ -79,6 +81,24 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "Accept"],  # Solo headers necesarios
 )
 
+
+@app.middleware("http")
+async def rate_limit_middleware(request, call_next):
+    """Rate limiting por IP: max _rate_limit_max requests por _rate_limit_window segundos."""
+    # Skip rate limit for health checks and OPTIONS
+    if request.url.path == "/api/health" or request.method == "OPTIONS":
+        return await call_next(request)
+
+    client_ip = request.client.host if request.client else "unknown"
+    err = _check_rate_limit(client_ip)
+    if err:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": err},
+            headers={"Retry-After": str(_rate_limit_window)},
+        )
+    return await call_next(request)
+
 # --- Seguridad Bearer Token ---
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -96,6 +116,28 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Security(_bea
         raise HTTPException(status_code=403, detail="Token invalido")
     return True
 
+# --- Rate Limiting ---
+_rate_limit_window = 60  # segundos
+_rate_limit_max = 30  # max requests por IP por ventana
+_rate_limits: dict[str, list[float]] = defaultdict(list)
+_rate_lock = threading.Lock()
+
+
+def _check_rate_limit(client_ip: str) -> Optional[str]:
+    """Verifica rate limit por IP. Retorna mensaje de error si excedido, None si OK."""
+    now = time.time()
+    with _rate_lock:
+        # Limpiar requests fuera de ventana
+        _rate_limits[client_ip] = [
+            t for t in _rate_limits[client_ip]
+            if now - t < _rate_limit_window
+        ]
+        if len(_rate_limits[client_ip]) >= _rate_limit_max:
+            return f"Rate limit excedido. Max {_rate_limit_max} requests por {_rate_limit_window}s."
+        _rate_limits[client_ip].append(now)
+    return None
+
+
 # --- Singleton del agente ---
 _agent: Optional[ReactAgent] = None
 _memory: Optional[TripleMemory] = None
@@ -104,6 +146,9 @@ _busy = False  # Flag: el agente esta procesando
 _agent_lock = threading.Lock()  # Protege acceso a _agent, _memory, _busy
 _upload_dir = os.path.join(os.path.expanduser("~"), ".ia-local", "uploads")
 os.makedirs(_upload_dir, exist_ok=True)
+
+# --- Production error handling ---
+_PRODUCTION = os.environ.get("ENV", "development") == "production"
 
 
 def get_agent() -> ReactAgent:
@@ -159,13 +204,25 @@ class ModelSwitchRequest(BaseModel):
 @app.get("/api/health")
 async def health():
     """Health check - rapido, nunca bloquea, no requiere auth."""
+    # Diagnostico rapido: verificar que Ollama responde
+    ollama_status = "unknown"
+    if AGENT_AVAILABLE:
+        try:
+            import urllib.request
+            req = urllib.request.Request("http://localhost:11434/api/tags", method="GET")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                ollama_status = "ok"
+        except Exception:
+            ollama_status = "unreachable"
     return {
         "status": "ok",
         "agent": AGENT_AVAILABLE,
+        "ollama": ollama_status,
         "busy": _busy,
         "version": "16.5.0",
         "uptime": int(time.time() - _start_time),
         "auth_enabled": _AUTH_ENABLED,
+        "memory_loaded": _memory is not None,
     }
 
 
@@ -537,6 +594,9 @@ def _agent_runner(agent: ReactAgent, message: str, q: queue.Queue):
         err_msg = str(e)
         if any(k in err_msg for k in ['pensamiento', 'accion', 'respuesta_final', 'params']):
             err_msg = "Error procesando respuesta del modelo"
+        # In production, don't expose internal error details
+        if _PRODUCTION and len(err_msg) > 200:
+            err_msg = err_msg[:200] + "..."
         q.put({"type": "error", "data": err_msg})
         q.put(None)
     finally:
@@ -629,7 +689,8 @@ async def _stream_agent_threaded(agent: ReactAgent, message: str):
     except Exception as e:
         print(f"[ERROR] _stream_agent_threaded: {e}")
         traceback.print_exc()
-        yield f"data: {json.dumps({'type': 'error', 'data': f'Stream error: {str(e)}'}, ensure_ascii=False)}\n\n"
+        err_msg = "Stream error" if _PRODUCTION else f"Stream error: {str(e)}"
+        yield f"data: {json.dumps({'type': 'error', 'data': err_msg}, ensure_ascii=False)}\n\n"
 
 
 # --- Main ---
@@ -648,5 +709,6 @@ if __name__ == "__main__":
     host = os.environ.get("BRIDGE_HOST", "127.0.0.1")  # Default: localhost only
     port = int(os.environ.get("BRIDGE_PORT", "8000"))
     print(f"  Auth: {'HABILITADA (token configurado)' if _AUTH_ENABLED else 'DESHABILITADA (modo local)'}")
+    print(f"  Rate limit: {_rate_limit_max} req/{_rate_limit_window}s por IP")
     print(f"  Host: {host}:{port}")
     uvicorn.run(app, host=host, port=port)

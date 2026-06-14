@@ -39,7 +39,7 @@ _TOOL_METADATA = {}   # {name: {"func": callable, "schema": dict|None, "descript
 # FUNCION DE REGISTRO MANUAL
 # ============================================================
 
-def register_tool(name: str, func, schema: dict = None) -> None:
+def register_tool(name: str, func, schema: dict = None, *, overwrite: bool = False) -> None:
     """Registra una herramienta manualmente en el registry.
 
     Args:
@@ -47,11 +47,19 @@ def register_tool(name: str, func, schema: dict = None) -> None:
         func: Funcion callable a registrar
         schema: Schema de function calling para Ollama (formato completo).
                 Si es None, se intenta generar uno basico automaticamente.
+        overwrite: Si True, permite sobrescribir una herramienta existente.
+                   Si False (default), NO sobrescribe y emite warning.
     """
     if not callable(func):
         raise TypeError(f"register_tool: func debe ser callable, se recibio {type(func)}")
 
     if name in TOOL_FUNCTIONS:
+        if not overwrite:
+            import logging
+            logging.getLogger(__name__).debug(
+                f"Herramienta '{name}' ya registrada, omitiendo duplicado (usar overwrite=True para forzar)"
+            )
+            return
         import warnings
         warnings.warn(
             f"Registro de herramienta: '{name}' ya existe y sera sobrescrito.",
