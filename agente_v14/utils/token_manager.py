@@ -21,9 +21,12 @@ Uso:
 =============================================================
 """
 
+from __future__ import annotations
+
 import re
 import logging
 from datetime import datetime
+from typing import Any
 
 logger = logging.getLogger("agente")
 
@@ -33,7 +36,7 @@ logger = logging.getLogger("agente")
 # ============================================================
 
 # Ratios aproximados de tokens por palabra segun idioma
-TOKEN_RATIOS = {
+TOKEN_RATIOS: dict[str, float] = {
     "english": 1.3,     # ~1.3 tokens por palabra
     "spanish": 1.7,     # ~1.7 tokens por palabra (mas tokens por acentos)
     "code": 1.5,        # ~1.5 tokens por palabra en codigo
@@ -41,7 +44,7 @@ TOKEN_RATIOS = {
 }
 
 # Tamanos de contexto por modelo conocido (en tokens)
-MODEL_CONTEXT_SIZES = {
+MODEL_CONTEXT_SIZES: dict[str, int] = {
     # Qwen
     "qwen3:4b": 32768,
     "qwen3:8b": 32768,
@@ -67,21 +70,31 @@ MODEL_CONTEXT_SIZES = {
 }
 
 # Distribucion del presupuesto
-BUDGET_SYSTEM = 0.15       # 15% para system prompt
-BUDGET_CONTEXT = 0.30      # 30% para contexto (memoria, historial)
-BUDGET_TOOLS = 0.15        # 15% para tool schemas + resultados
-BUDGET_RESPONSE = 0.40     # 40% para respuesta del modelo
+BUDGET_SYSTEM: float = 0.15       # 15% para system prompt
+BUDGET_CONTEXT: float = 0.30      # 30% para contexto (memoria, historial)
+BUDGET_TOOLS: float = 0.15        # 15% para tool schemas + resultados
+BUDGET_RESPONSE: float = 0.40     # 40% para respuesta del modelo
 
 
 def estimate_tokens(text: str, language: str = "default") -> int:
     """Estima la cantidad de tokens de un texto.
 
     Usa una aproximacion basada en palabras y tipo de contenido.
-    Es una estimacion; el conteo real requiere tiktoken o similar.
+    Es una estimación; el conteo real requiere tiktoken o similar.
+
+    La fórmula es::
+
+        tokens = int(words * ratio + special_chars * 0.3 + numbers * 0.2)
 
     Args:
-        text: Texto a estimar
-        language: Idioma/tipo: english, spanish, code, default
+        text: Texto a estimar.
+        language: Idioma/tipo de contenido para el ratio de tokens.
+            Valores posibles: ``"english"`` (~1.3), ``"spanish"`` (~1.7),
+            ``"code"`` (~1.5), ``"default"`` (~1.5). Default: ``"default"``.
+
+    Returns:
+        Estimación del número de tokens. Mínimo 1 si el texto no
+        está vacío, 0 si está vacío.
     """
     if not text:
         return 0
@@ -104,7 +117,19 @@ def estimate_tokens(text: str, language: str = "default") -> int:
 
 
 def get_model_context_size(model_name: str) -> int:
-    """Obtiene el tamano de contexto de un modelo por su nombre."""
+    """Obtiene el tamano de contexto de un modelo por su nombre.
+
+    Busca primero coincidencia exacta, luego coincidencia parcial
+    (por nombre base del modelo sin tag de versión).
+
+    Args:
+        model_name: Nombre del modelo (e.g., ``"qwen3:8b"``,
+            ``"llama3.1:8b"``). Si es vacío, retorna el default.
+
+    Returns:
+        Tamaño de contexto en tokens. Default: 8192 si el modelo
+        no se reconoce.
+    """
     if not model_name:
         return MODEL_CONTEXT_SIZES["default"]
 
@@ -127,27 +152,69 @@ def get_model_context_size(model_name: str) -> int:
 # ============================================================
 
 class TokenManager:
-    """Gestiona el presupuesto de tokens de una conversacion."""
+    """Gestiona el presupuesto de tokens de una conversacion.
 
-    def __init__(self, model_context_size: int = 0, model_name: str = ""):
-        self.context_size = model_context_size or get_model_context_size(model_name)
-        self.system_tokens = 0
-        self.context_tokens = 0
-        self.tools_tokens = 0
-        self.response_tokens = 0
-        self.total_used = 0
-        self.history = []  # [(timestamp, type, tokens, description)]
-        self._compression_count = 0
+    Distribuye el presupuesto de la ventana de contexto del modelo
+    en 4 categorías:
+        - Sistema (15%): system prompt
+        - Contexto (30%): memoria, historial, resultados de tools
+        - Herramientas (15%): schemas de function calling
+        - Respuesta (40%): respuesta generada por el modelo
+
+    Cuando el contexto excede el presupuesto, proporciona 3 niveles
+    de compresión: light (truncar herramientas), medium (resumir
+    historial), heavy (solo system + últimos intercambios).
+
+    Args:
+        model_context_size: Tamaño de contexto del modelo en tokens.
+            Si es 0, se usa ``get_model_context_size(model_name)``.
+        model_name: Nombre del modelo (para lookup automático del
+            tamaño de contexto). Default: ``""``.
+    """
+
+    def __init__(
+        self,
+        model_context_size: int = 0,
+        model_name: str = "",
+    ) -> None:
+        self.context_size: int = model_context_size or get_model_context_size(model_name)
+        self.system_tokens: int = 0
+        self.context_tokens: int = 0
+        self.tools_tokens: int = 0
+        self.response_tokens: int = 0
+        self.total_used: int = 0
+        self.history: list[dict[str, Any]] = []  # [(timestamp, type, tokens, description)]
+        self._compression_count: int = 0
 
     def add_system(self, text: str) -> int:
-        """Registra tokens del system prompt."""
+        """Registra tokens del system prompt.
+
+        Reemplaza el conteo anterior (solo hay un system prompt).
+
+        Args:
+            text: Contenido del system prompt.
+
+        Returns:
+            Número estimado de tokens del system prompt.
+        """
         tokens = estimate_tokens(text, "english")  # System prompts usually English
         self.system_tokens = tokens
         self._log("system", tokens, "System prompt")
         return tokens
 
     def add_context(self, text: str, description: str = "Context") -> int:
-        """Registra tokens de contexto (memoria, historial)."""
+        """Registra tokens de contexto (memoria, historial).
+
+        Acumula tokens (no reemplaza). Detecta automáticamente
+        el idioma para elegir el ratio de estimación adecuado.
+
+        Args:
+            text: Contenido de contexto a registrar.
+            description: Descripción para el historial. Default: ``"Context"``.
+
+        Returns:
+            Número estimado de tokens agregados.
+        """
         # Detectar idioma
         lang = self._detect_language(text)
         tokens = estimate_tokens(text, lang)
@@ -156,41 +223,96 @@ class TokenManager:
         return tokens
 
     def add_tools(self, schemas_text: str) -> int:
-        """Registra tokens de tool schemas."""
+        """Registra tokens de tool schemas.
+
+        Reemplaza el conteo anterior (los schemas se reemplazan
+        en cada request, no se acumulan).
+
+        Args:
+            schemas_text: Texto de los schemas de function calling.
+
+        Returns:
+            Número estimado de tokens de los schemas.
+        """
         tokens = estimate_tokens(schemas_text, "code")
         self.tools_tokens = tokens
         self._log("tools", tokens, "Tool schemas")
         return tokens
 
     def add_tool_result(self, text: str, tool_name: str = "") -> int:
-        """Registra tokens del resultado de una herramienta."""
+        """Registra tokens del resultado de una herramienta.
+
+        Acumula en context_tokens (los resultados de tools son
+        parte del contexto de la conversación).
+
+        Args:
+            text: Contenido del resultado de la herramienta.
+            tool_name: Nombre de la herramienta (para el historial).
+                Default: ``""``.
+
+        Returns:
+            Número estimado de tokens agregados.
+        """
         tokens = estimate_tokens(text)
         self.context_tokens += tokens
         self._log("tool_result", tokens, f"Tool result: {tool_name}")
         return tokens
 
     def add_response(self, text: str) -> int:
-        """Registra tokens de la respuesta del modelo."""
+        """Registra tokens de la respuesta del modelo.
+
+        Acumula tokens de todas las respuestas del modelo en la sesión.
+
+        Args:
+            text: Contenido de la respuesta del modelo.
+
+        Returns:
+            Número estimado de tokens de la respuesta.
+        """
         tokens = estimate_tokens(text)
         self.response_tokens += tokens
         self._log("response", tokens, "Model response")
         return tokens
 
     def budget_for_response(self) -> int:
-        """Retorna cuantos tokens quedan para la respuesta."""
+        """Retorna cuantos tokens quedan para la respuesta.
+
+        Calcula el espacio restante como ``context_size - used``,
+        pero garantiza al menos el 40% del contexto (BUDGET_RESPONSE).
+
+        Returns:
+            Número de tokens disponibles para la respuesta del modelo.
+        """
         used = self.system_tokens + self.context_tokens + self.tools_tokens
         max_response = int(self.context_size * BUDGET_RESPONSE)
         remaining = self.context_size - used
         return max(remaining, max_response)
 
     def needs_compression(self) -> bool:
-        """Determina si el contexto necesita compresion."""
+        """Determina si el contexto necesita compresion.
+
+        Returns:
+            True si los tokens usados (system + context + tools)
+            exceden el 60% del contexto (1 - BUDGET_RESPONSE).
+        """
         used = self.system_tokens + self.context_tokens + self.tools_tokens
         threshold = self.context_size * (1 - BUDGET_RESPONSE)
         return used > threshold
 
     def compression_level(self) -> str:
-        """Retorna el nivel de compresion necesario: none, light, medium, heavy."""
+        """Retorna el nivel de compresion necesario.
+
+        Evalúa la ratio de uso y determina el nivel de compresión:
+
+        - ``"none"``: No se necesita compresión.
+        - ``"light"``: Recortar resultados de herramientas largos (>1500 chars)
+          y respuestas del asistente (>2000 chars).
+        - ``"medium"``: Resumir mensajes antiguos, mantener system + últimos 4.
+        - ``"heavy"``: Solo mantener system prompt + últimos 2 intercambios.
+
+        Returns:
+            Uno de ``"none"``, ``"light"``, ``"medium"``, ``"heavy"``.
+        """
         used = self.system_tokens + self.context_tokens + self.tools_tokens
         available = self.context_size * BUDGET_RESPONSE
 
@@ -206,12 +328,24 @@ class TokenManager:
         else:
             return "heavy"    # Compresion agresiva: solo mantener ultimos N mensajes
 
-    def compress(self, messages: list, level: str = None) -> list:
+    def compress(
+        self,
+        messages: list[dict[str, Any]],
+        level: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Comprime mensajes para ajustar al presupuesto de tokens.
 
         Args:
-            messages: Lista de mensajes de la conversacion
-            level: Nivel de compresion: none, light, medium, heavy (auto-detect si None)
+            messages: Lista de mensajes de la conversacion (dicts con
+                keys ``"role"`` y ``"content"``).
+            level: Nivel de compresion: ``"none"``, ``"light"``,
+                ``"medium"``, ``"heavy"``. Si es None, se detecta
+                automáticamente con ``compression_level()``.
+                Default: None.
+
+        Returns:
+            Lista de mensajes comprimidos. Puede ser más corta que
+            la original.
         """
         if level is None:
             level = self.compression_level()
@@ -229,9 +363,19 @@ class TokenManager:
         else:
             return self._compress_heavy(messages)
 
-    def _compress_light(self, messages: list) -> list:
-        """Compresion ligera: truncar resultados de herramientas largos."""
-        compressed = []
+    def _compress_light(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Compresion ligera: truncar resultados de herramientas largos.
+
+        Trunca resultados de herramientas con más de 1500 caracteres
+        y respuestas del asistente con más de 2000 caracteres.
+
+        Args:
+            messages: Lista de mensajes originales.
+
+        Returns:
+            Lista de mensajes con textos largos truncados.
+        """
+        compressed: list[dict[str, Any]] = []
         for msg in messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
@@ -249,8 +393,18 @@ class TokenManager:
 
         return compressed
 
-    def _compress_medium(self, messages: list) -> list:
-        """Compresion media: resumir mensajes antiguos, mantener recientes."""
+    def _compress_medium(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Compresion media: resumir mensajes antiguos, mantener recientes.
+
+        Mantiene el system prompt y los últimos 4 mensajes completos.
+        Los mensajes antiguos se condensan en un resumen de sistema.
+
+        Args:
+            messages: Lista de mensajes originales.
+
+        Returns:
+            Lista de mensajes con historial antiguo resumido.
+        """
         if len(messages) <= 4:
             return messages
 
@@ -265,7 +419,7 @@ class TokenManager:
             return messages
 
         # Crear resumen compacto
-        summary_parts = []
+        summary_parts: list[str] = []
         for msg in old_msgs:
             role = msg.get("role", "")
             content = msg.get("content", "")[:200]
@@ -283,8 +437,18 @@ class TokenManager:
 
         return compressed
 
-    def _compress_heavy(self, messages: list) -> list:
-        """Compresion pesada: solo mantener system + ultimos 2 intercambios."""
+    def _compress_heavy(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Compresion pesada: solo mantener system + ultimos 2 intercambios.
+
+        Descarta todo el historial excepto el system prompt y los
+        últimos 4 mensajes (2 intercambios user/assistant).
+
+        Args:
+            messages: Lista de mensajes originales.
+
+        Returns:
+            Lista reducida a system + últimos 4 mensajes.
+        """
         system_msgs = [m for m in messages if m.get("role") == "system"]
 
         # Solo ultimos 2 intercambios (4 mensajes: 2 user + 2 assistant)
@@ -292,8 +456,15 @@ class TokenManager:
 
         return system_msgs + recent
 
-    def stats(self) -> dict:
-        """Retorna estadisticas de uso de tokens."""
+    def stats(self) -> dict[str, Any]:
+        """Retorna estadisticas de uso de tokens.
+
+        Returns:
+            Diccionario con keys: ``context_size``, ``used``,
+            ``remaining``, ``utilization_pct``, ``breakdown``
+            (dict con system/context/tools/response), ``compressions``,
+            ``needs_compression``, ``compression_level``.
+        """
         used = self.system_tokens + self.context_tokens + self.tools_tokens + self.response_tokens
         remaining = max(0, self.context_size - used)
         utilization = (used / self.context_size * 100) if self.context_size > 0 else 0
@@ -315,9 +486,13 @@ class TokenManager:
         }
 
     def format_stats(self) -> str:
-        """Retorna estadisticas formateadas para mostrar al usuario."""
+        """Retorna estadisticas formateadas para mostrar al usuario.
+
+        Returns:
+            String legible con desglose de tokens y estado de compresión.
+        """
         s = self.stats()
-        parts = [
+        parts: list[str] = [
             f"Gestion de Tokens:",
             f"  Modelo: {self.context_size:,} tokens de contexto",
             f"  Usados: {s['used']:,} ({s['utilization_pct']}%)",
@@ -338,7 +513,19 @@ class TokenManager:
         return "\n".join(parts)
 
     def _detect_language(self, text: str) -> str:
-        """Detecta el idioma predominante del texto (simple)."""
+        """Detecta el idioma predominante del texto (simple).
+
+        Heurística basada en caracteres especiales:
+        - Si tiene >3 caracteres españoles (áéíóúñ¿¡) → ``"spanish"``
+        - Si tiene >5% de caracteres de código ({}()[];=<>) → ``"code"``
+        - En otro caso → ``"default"``
+
+        Args:
+            text: Texto a analizar.
+
+        Returns:
+            Uno de ``"spanish"``, ``"code"`` o ``"default"``.
+        """
         # Heuristica basica
         spanish_chars = len(re.findall(r'[áéíóúñ¿¡]', text.lower()))
         if spanish_chars > 3:
@@ -351,8 +538,15 @@ class TokenManager:
 
         return "default"
 
-    def _log(self, token_type: str, tokens: int, description: str):
-        """Registra en el historial de tokens."""
+    def _log(self, token_type: str, tokens: int, description: str) -> None:
+        """Registra en el historial de tokens.
+
+        Args:
+            token_type: Tipo de token (``"system"``, ``"context"``,
+                ``"tools"``, ``"tool_result"``, ``"response"``).
+            tokens: Número de tokens estimados.
+            description: Descripción de la entrada.
+        """
         self.history.append({
             "timestamp": datetime.now().isoformat(),
             "type": token_type,

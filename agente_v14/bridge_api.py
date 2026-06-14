@@ -6,19 +6,20 @@ Expone el agente ReAct completo (tools, memory, streaming)
 como API REST para la interfaz Next.js.
 
 Endpoints:
-- GET  /api/status     - Estado del sistema
-- GET  /api/models     - Modelos disponibles
-- GET  /api/tools      - Lista de herramientas
-- GET  /api/memory     - Stats de memoria
-- POST /api/memory/save - Guardar sesion
+- GET  /api/status      - Estado del sistema
+- GET  /api/models      - Modelos disponibles
+- GET  /api/tools       - Lista de herramientas
+- GET  /api/memory      - Stats de memoria
+- POST /api/memory/save  - Guardar sesion
 - POST /api/memory/clear - Limpiar sesion
-- GET  /api/config     - Configuracion actual
-- POST /api/execute    - Ejecutar una herramienta directamente
-- POST /api/chat       - Chat completo con streaming SSE
+- GET  /api/config      - Configuracion actual (non-sensitive)
+- GET  /api/sessions    - Listar sesiones guardadas
+- POST /api/execute     - Ejecutar una herramienta directamente
+- POST /api/chat        - Chat completo con streaming SSE
 - POST /api/chat/simple - Chat directo con Ollama
-- POST /api/upload     - Subir archivos
-- GET  /api/history    - Historial de conversacion
-- GET  /api/health     - Health check
+- POST /api/upload      - Subir archivos
+- GET  /api/history     - Historial de conversacion
+- GET  /api/health      - Health check
 
 Ejecutar: python bridge_api.py
 Puerto: 8000
@@ -35,8 +36,11 @@ import threading
 import traceback
 import shutil
 import logging
+import signal
+import uuid
+import glob as glob_mod
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
 
 # Agregar directorio del agente al path
@@ -44,7 +48,7 @@ AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if AGENT_DIR not in sys.path:
     sys.path.insert(0, AGENT_DIR)
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Security
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Security, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -64,14 +68,22 @@ except Exception as e:
 # --- App ---
 app = FastAPI(
     title="ZAI Agent Bridge API",
-    version="16.5.0",
-    description="API completa para el Agente Autonomo v16 - con autenticacion opcional",
+    version="17.0.0",
+    description="API completa para el Agente Autonomo v17 - con autenticacion opcional, request tracking, y validacion",
 )
 
 # --- Configuracion de seguridad ---
 _BRIDGE_TOKEN = os.environ.get("BRIDGE_TOKEN", "")  # Token vacio = modo local (sin auth)
-_ALLOWED_ORIGINS = os.environ.get("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
 _AUTH_ENABLED = bool(_BRIDGE_TOKEN)  # Solo autenticar si se configuro un token
+
+# --- CORS from environment ---
+# Default to secure local origins; override with CORS_ORIGINS env var (comma-separated)
+_DEFAULT_CORS_ORIGINS = "http://localhost:3000,http://localhost:3001"
+_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get("CORS_ORIGINS", _DEFAULT_CORS_ORIGINS).split(",")
+    if origin.strip()
+]
 
 app.add_middleware(
     CORSMiddleware,
@@ -81,6 +93,81 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "Accept"],  # Solo headers necesarios
 )
 
+# --- Request validation constants ---
+_MAX_BODY_SIZE = 10 * 1024 * 1024  # 10 MB
+# POST endpoints that accept multipart/form-data (upload)
+_MULTIPART_PATHS = {"/api/upload"}
+
+# --- Production error handling ---
+_PRODUCTION = os.environ.get("ENV", "development") == "production"
+
+# --- Logger for bridge ---
+_bridge_logger = logging.getLogger("bridge_api")
+
+
+# ============================================================
+# REQUEST ID TRACKING MIDDLEWARE
+# ============================================================
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """Genera un UUID por request, lo agrega como X-Request-ID header y lo almacena en request.state."""
+    request_id = str(uuid.uuid4())
+    request.state.request_id = request_id
+    request.state.request_start = time.time()
+
+    response = await call_next(request)
+
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+
+# ============================================================
+# REQUEST VALIDATION MIDDLEWARE
+# ============================================================
+
+@app.middleware("http")
+async def request_validation_middleware(request: Request, call_next):
+    """Valida Content-Type para POST y tamano del body."""
+    # Validate Content-Type for POST requests (except multipart paths)
+    if request.method == "POST" and request.url.path not in _MULTIPART_PATHS:
+        content_type = request.headers.get("content-type", "")
+        if content_type and not content_type.startswith("application/json"):
+            request_id = getattr(request.state, "request_id", "unknown")
+            return JSONResponse(
+                status_code=415,
+                content=_error_body(
+                    detail="Content-Type must be application/json",
+                    request_id=request_id,
+                ),
+                headers={"X-Request-ID": request_id},
+            )
+
+    # Validate body size via Content-Length header (quick check)
+    if request.method in ("POST", "PUT", "PATCH"):
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > _MAX_BODY_SIZE:
+                    request_id = getattr(request.state, "request_id", "unknown")
+                    return JSONResponse(
+                        status_code=413,
+                        content=_error_body(
+                            detail=f"Request body too large. Max size: {_MAX_BODY_SIZE // (1024*1024)}MB",
+                            request_id=request_id,
+                        ),
+                        headers={"X-Request-ID": request_id},
+                    )
+            except (ValueError, TypeError):
+                pass
+
+    response = await call_next(request)
+    return response
+
+
+# ============================================================
+# RATE LIMIT MIDDLEWARE
+# ============================================================
 
 @app.middleware("http")
 async def rate_limit_middleware(request, call_next):
@@ -92,19 +179,24 @@ async def rate_limit_middleware(request, call_next):
     client_ip = request.client.host if request.client else "unknown"
     err = _check_rate_limit(client_ip)
     if err:
+        request_id = getattr(request.state, "request_id", "unknown")
         return JSONResponse(
             status_code=429,
-            content={"detail": err},
-            headers={"Retry-After": str(_rate_limit_window)},
+            content=_error_body(detail=err, request_id=request_id),
+            headers={
+                "Retry-After": str(_rate_limit_window),
+                "X-Request-ID": request_id,
+            },
         )
     return await call_next(request)
+
 
 # --- Seguridad Bearer Token ---
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 async def verify_token(credentials: HTTPAuthorizationCredentials = Security(_bearer_scheme)):
     """Verifica el token Bearer si la autenticacion esta habilitada.
-    
+
     Si BRIDGE_TOKEN no esta configurado (modo local), permite todo.
     Si BRIDGE_TOKEN esta configurado, requiere token valido.
     """
@@ -138,6 +230,61 @@ def _check_rate_limit(client_ip: str) -> Optional[str]:
     return None
 
 
+# ============================================================
+# ERROR RESPONSE HELPERS
+# ============================================================
+
+def _error_body(detail: str, request_id: str = "unknown", internal_detail: str = None) -> dict:
+    """Construye un cuerpo de error estandarizado.
+
+    In production mode, hides internal_detail if provided.
+    Always includes: detail, request_id, timestamp.
+    """
+    body = {
+        "detail": detail,
+        "request_id": request_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    # In non-production, include internal details for debugging
+    if internal_detail and not _PRODUCTION:
+        body["internal_detail"] = internal_detail
+    return body
+
+
+# ============================================================
+# CUSTOM EXCEPTION HANDLER
+# ============================================================
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Todas las HTTPException responses incluyen request_id y timestamp."""
+    request_id = getattr(request.state, "request_id", "unknown")
+    # In production, truncate detail if too long
+    detail = str(exc.detail)
+    if _PRODUCTION and len(detail) > 200:
+        detail = detail[:200] + "..."
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=_error_body(detail=detail, request_id=request_id),
+        headers={"X-Request-ID": request_id},
+    )
+
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception):
+    """Catch-all: any unhandled exception returns structured 500."""
+    request_id = getattr(request.state, "request_id", "unknown")
+    _bridge_logger.error(f"[{request_id}] Unhandled exception: {exc}", exc_info=True)
+    detail = "Internal server error" if _PRODUCTION else f"Internal server error: {str(exc)}"
+    if _PRODUCTION and len(detail) > 200:
+        detail = detail[:200] + "..."
+    return JSONResponse(
+        status_code=500,
+        content=_error_body(detail=detail, request_id=request_id),
+        headers={"X-Request-ID": request_id},
+    )
+
+
 # --- Singleton del agente ---
 _agent: Optional[ReactAgent] = None
 _memory: Optional[TripleMemory] = None
@@ -146,9 +293,6 @@ _busy = False  # Flag: el agente esta procesando
 _agent_lock = threading.Lock()  # Protege acceso a _agent, _memory, _busy
 _upload_dir = os.path.join(os.path.expanduser("~"), ".ia-local", "uploads")
 os.makedirs(_upload_dir, exist_ok=True)
-
-# --- Production error handling ---
-_PRODUCTION = os.environ.get("ENV", "development") == "production"
 
 
 def get_agent() -> ReactAgent:
@@ -212,14 +356,15 @@ async def health():
             req = urllib.request.Request("http://localhost:11434/api/tags", method="GET")
             with urllib.request.urlopen(req, timeout=2) as resp:
                 ollama_status = "ok"
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Error verificando Ollama en health endpoint: {e}")
             ollama_status = "unreachable"
     return {
         "status": "ok",
         "agent": AGENT_AVAILABLE,
         "ollama": ollama_status,
         "busy": _busy,
-        "version": "16.5.0",
+        "version": "17.0.0",
         "uptime": int(time.time() - _start_time),
         "auth_enabled": _AUTH_ENABLED,
         "memory_loaded": _memory is not None,
@@ -238,8 +383,8 @@ async def status(auth=Depends(verify_token)):
         data = json.loads(resp.read())
         models = data.get("models", [])
         ollama_ok = True
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Error conectando a Ollama en status endpoint: {e}")
 
     uptime = int(time.time() - _start_time)
 
@@ -250,7 +395,7 @@ async def status(auth=Depends(verify_token)):
         "connected": ollama_ok,
         "agent_available": AGENT_AVAILABLE,
         "busy": _busy,
-        "version": "16.5.0",
+        "version": "17.0.0",
         "tools_count": tool_count,
         "models": [
             {
@@ -384,10 +529,35 @@ async def memory_clear(auth=Depends(verify_token)):
 
 @app.get("/api/config")
 async def config(auth=Depends(verify_token)):
-    """Configuracion actual del agente."""
+    """Configuracion actual del agente (non-sensitive only).
+
+    Returns: model, temperature, max_tokens, tools_count, memory_type,
+    and other non-sensitive configuration.
+    """
     try:
         import config as cfg
+
+        # Determine memory type from current memory instance
+        memory_type = "none"
+        if _memory is not None:
+            memory_type = type(_memory.long_term).__name__
+
+        # Determine active model
+        active_model = None
+        if AGENT_AVAILABLE:
+            active_model = getattr(ollama, 'model', None)
+
+        # Tools count
+        tools_count = len(TOOL_FUNCTIONS) if AGENT_AVAILABLE else 0
+
         return {
+            # Core model config
+            "model": active_model,
+            "temperature": getattr(cfg, 'TEMPERATURE', 0.7),  # Default if not in config
+            "max_tokens": getattr(cfg, 'MAX_TOKENS', 4096),    # Default if not in config
+            "tools_count": tools_count,
+            "memory_type": memory_type,
+            # Behavioral config
             "deep_thinking_mode": cfg.DEEP_THINKING_MODE,
             "max_react_iterations": cfg.MAX_REACT_ITERATIONS,
             "max_conversation_memory": cfg.MAX_CONVERSATION_MEMORY,
@@ -403,7 +573,63 @@ async def config(auth=Depends(verify_token)):
             "web_search_cache_ttl": cfg.WEB_SEARCH_CACHE_TTL,
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error leyendo config: {e}")
+        _bridge_logger.error(f"Error leyendo config: {e}")
+        raise HTTPException(status_code=500, detail="Error leyendo configuracion")
+
+
+@app.get("/api/sessions")
+async def sessions(auth=Depends(verify_token)):
+    """Lista sesiones guardadas del agente.
+
+    Returns: list of {session_id, date, message_count}
+    """
+    if not AGENT_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Agente no disponible.")
+
+    sessions_list = []
+    try:
+        # Scan LEARN_DIR for session files
+        from config import LEARN_DIR
+        session_pattern = os.path.join(LEARN_DIR, "session*.json")
+        for filepath in glob_mod.glob(session_pattern):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                # Extract session info
+                filename = os.path.basename(filepath)
+                session_id = filename.replace(".json", "")
+                saved_at = data.get("saved_at", "")
+                messages = data.get("short_term", [])
+                message_count = len(messages) if isinstance(messages, list) else 0
+
+                # Format date
+                date_str = saved_at
+                if saved_at:
+                    try:
+                        dt = datetime.fromisoformat(saved_at)
+                        date_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                    except (ValueError, TypeError):
+                        pass
+
+                sessions_list.append({
+                    "session_id": session_id,
+                    "date": date_str,
+                    "message_count": message_count,
+                })
+            except (json.JSONDecodeError, OSError, KeyError) as e:
+                _bridge_logger.debug(f"Error reading session file {filepath}: {e}")
+                continue
+
+        # Sort by date descending (newest first)
+        sessions_list.sort(key=lambda s: s.get("date", ""), reverse=True)
+
+    except Exception as e:
+        _bridge_logger.warning(f"Error listing sessions: {e}")
+
+    return {
+        "sessions": sessions_list,
+        "count": len(sessions_list),
+    }
 
 
 @app.post("/api/execute")
@@ -526,9 +752,17 @@ async def upload_files(files: List[UploadFile] = File(...), auth=Depends(verify_
     uploaded = []
     for file in files:
         try:
+            # Validate individual file size
+            content = await file.read()
+            if len(content) > _MAX_BODY_SIZE:
+                uploaded.append({
+                    "name": file.filename,
+                    "error": f"File too large. Max size: {_MAX_BODY_SIZE // (1024*1024)}MB",
+                })
+                continue
+
             file_path = os.path.join(_upload_dir, file.filename)
             with open(file_path, "wb") as f:
-                content = await file.read()
                 f.write(content)
             uploaded.append({
                 "name": file.filename,
@@ -567,9 +801,6 @@ async def history(limit: int = 50, auth=Depends(verify_token)):
     }
 
 
-
-
-
 # ============================================================
 # STREAMING HELPERS
 # ============================================================
@@ -588,8 +819,7 @@ def _agent_runner(agent: ReactAgent, message: str, q: queue.Queue):
         # Senal de fin
         q.put(None)
     except Exception as e:
-        print(f"[ERROR] _agent_runner: {e}")
-        traceback.print_exc()
+        _bridge_logger.error(f"Agent runner error: {e}", exc_info=True)
         # Never expose raw JSON key names as error messages
         err_msg = str(e)
         if any(k in err_msg for k in ['pensamiento', 'accion', 'respuesta_final', 'params']):
@@ -687,10 +917,49 @@ async def _stream_agent_threaded(agent: ReactAgent, message: str):
                 yield f"data: {json.dumps({'type': 'error', 'data': str(event_data)}, ensure_ascii=False)}\n\n"
 
     except Exception as e:
-        print(f"[ERROR] _stream_agent_threaded: {e}")
-        traceback.print_exc()
+        _bridge_logger.error(f"Stream error: {e}", exc_info=True)
         err_msg = "Stream error" if _PRODUCTION else f"Stream error: {str(e)}"
         yield f"data: {json.dumps({'type': 'error', 'data': err_msg}, ensure_ascii=False)}\n\n"
+
+
+# ============================================================
+# GRACEFUL SHUTDOWN
+# ============================================================
+
+_shutdown_event = threading.Event()
+_server_instance = None  # Will hold uvicorn server reference
+
+
+def _signal_handler(signum, frame):
+    """Handle SIGTERM/SIGINT for graceful shutdown."""
+    sig_name = signal.Signals(signum).name
+    _bridge_logger.info(f"Received {sig_name}, initiating graceful shutdown...")
+    print(f"\n[SHUTDOWN] Received {sig_name}, shutting down gracefully...")
+
+    # Save session if memory is loaded
+    if _memory is not None:
+        try:
+            _memory.save_session()
+            _bridge_logger.info("Session saved before shutdown")
+            print("[SHUTDOWN] Session saved.")
+        except Exception as e:
+            _bridge_logger.warning(f"Could not save session during shutdown: {e}")
+            print(f"[SHUTDOWN] Warning: Could not save session: {e}")
+
+    # Signal shutdown
+    _shutdown_event.set()
+
+    # If we have a server instance, trigger its shutdown
+    if _server_instance is not None:
+        _server_instance.should_exit = True
+
+    _bridge_logger.info("Shutdown complete")
+    print("[SHUTDOWN] Goodbye.")
+
+
+# Register signal handlers
+signal.signal(signal.SIGTERM, _signal_handler)
+signal.signal(signal.SIGINT, _signal_handler)
 
 
 # --- Main ---
@@ -698,17 +967,24 @@ async def _stream_agent_threaded(agent: ReactAgent, message: str):
 if __name__ == "__main__":
     import uvicorn
     print("=" * 60)
-    print("  ZAI Agent Bridge API v16.4")
+    print("  ZAI Agent Bridge API v17.0")
     print("  Puerto: 8000")
     print("  Agente:", "DISPONIBLE" if AGENT_AVAILABLE else "NO DISPONIBLE")
     print("  Threading: ACTIVADO (no bloquea event loop)")
     print("  Endpoints: /api/status, /api/chat, /api/tools,")
-    print("             /api/memory, /api/config, /api/execute,")
-    print("             /api/upload, /api/history, /api/health")
+    print("             /api/memory, /api/config, /api/sessions,")
+    print("             /api/execute, /api/upload, /api/history,")
+    print("             /api/health")
     print("=" * 60)
     host = os.environ.get("BRIDGE_HOST", "127.0.0.1")  # Default: localhost only
     port = int(os.environ.get("BRIDGE_PORT", "8000"))
     print(f"  Auth: {'HABILITADA (token configurado)' if _AUTH_ENABLED else 'DESHABILITADA (modo local)'}")
     print(f"  Rate limit: {_rate_limit_max} req/{_rate_limit_window}s por IP")
+    print(f"  CORS origins: {_ALLOWED_ORIGINS}")
+    print(f"  Max body size: {_MAX_BODY_SIZE // (1024*1024)}MB")
+    print(f"  Request ID tracking: ENABLED")
+    print(f"  Environment: {'PRODUCTION' if _PRODUCTION else 'DEVELOPMENT'}")
     print(f"  Host: {host}:{port}")
-    uvicorn.run(app, host=host, port=port)
+    config = uvicorn.Config(app, host=host, port=port)
+    _server_instance = uvicorn.Server(config)
+    _server_instance.run()

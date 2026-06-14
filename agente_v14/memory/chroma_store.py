@@ -88,14 +88,14 @@ class ChromaVectorStore:
             metadata = collection.metadata
             if metadata and "hnsw:dim" in metadata:
                 return int(metadata["hnsw:dim"])
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error obteniendo dimension desde metadata de coleccion: {e}")
         try:
             peek_result = collection.peek(limit=1)
             if peek_result and peek_result.get("embeddings") and len(peek_result["embeddings"]) > 0:
                 return len(peek_result["embeddings"][0])
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error obteniendo dimension via peek de coleccion: {e}")
         return None
 
     def _validate_collection_dimension(self):
@@ -130,8 +130,8 @@ class ChromaVectorStore:
         try:
             self._client.delete_collection(name="agent_memory")
             logger.info("Coleccion 'agent_memory' eliminada para recreacion")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error eliminando coleccion existente (puede no existir): {e}")
         metadata = {"hnsw:space": "cosine"}
         if self._embedding_dim is not None:
             metadata["hnsw:dim"] = self._embedding_dim
@@ -161,7 +161,8 @@ class ChromaVectorStore:
 
             return existing
 
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Error obteniendo coleccion existente, creando nueva: {e}")
             # La coleccion no existe — crear nueva
             metadata = {"hnsw:space": "cosine"}
             if self._embedding_dim is not None:
@@ -252,8 +253,8 @@ class ChromaVectorStore:
                 logger.warning(f"Dimension mismatch en _is_duplicate, recreando coleccion...")
                 try:
                     self._handle_dimension_error(embedding)
-                except Exception:
-                    pass
+                except Exception as e2:
+                    logger.debug(f"Error manejando dimension error en _is_duplicate: {e2}")
             else:
                 logger.debug(f"Error verificando duplicado semantico: {e}")
         return False
@@ -355,8 +356,8 @@ class ChromaVectorStore:
                                     documents=[text[:500]],
                                     metadatas=[meta]
                                 )
-                            except Exception:
-                                pass
+                            except Exception as e2:
+                                logger.debug(f"Error guardando entrada sin embedding como fallback: {e2}")
                             return entry_id
                     else:
                         logger.debug(f"Error al insertar en ChromaDB (no dimension): {e}")
@@ -388,8 +389,8 @@ class ChromaVectorStore:
         )
         try:
             self._client.delete_collection(name="agent_memory")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error eliminando coleccion en _handle_dimension_error: {e}")
         metadata = {"hnsw:space": "cosine"}
         if new_dim:
             metadata["hnsw:dim"] = new_dim
@@ -481,8 +482,8 @@ class ChromaVectorStore:
                 logger.warning(f"Dimension mismatch en query, recreando coleccion...")
                 try:
                     self._handle_dimension_error(query_embedding)
-                except Exception:
-                    pass
+                except Exception as e2:
+                    logger.debug(f"Error manejando dimension error en query: {e2}")
             else:
                 logger.warning(f"Error en busqueda ChromaDB: {e}")
             return self._text_search(query, limit)

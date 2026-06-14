@@ -5,26 +5,46 @@ AGENTE v14 - Re-ranker Multi-Señal
 Segunda fase de evaluacion que reordena candidatos usando
 multiples señales de relevancia combinadas.
 
-Señales:
-1. Semantica (similitud coseno)
-2. Lexica (BM25 / cobertura de terminos)
-3. Frescura (decaimiento temporal)
-4. Cobertura de terminos
-5. Bonus por tipo de contenido
+Multi-Signal Reranking:
+    Cada candidato recibe un score compuesto por 5 señales
+    normalizadas a [0, 1], ponderadas segun el tipo de consulta:
 
-Pesos adaptativos segun tipo de consulta detectado.
+    1. Semantica (similitud coseno): Mide la similitud vectorial
+       entre la query y el documento. Alta para consultas conceptuales.
+    2. Lexica (BM25 / cobertura de terminos): Mide la coincidencia
+       de terminos especificos. Alta para consultas exactas (IDs, codigos).
+    3. Frescura (decaimiento temporal): Mide la recencia del documento.
+       Usa half-life diferenciado por tipo de contenido:
+       knowledge=365d, correction=180d, lesson=90d, experience=60d,
+       task=14d, conversation=7d, note=30d.
+    4. Cobertura de terminos: Fraccion de terminos de la query
+       presentes en el documento (sin stemming).
+    5. Bonus por tipo de contenido: Prioriza ciertos tipos de
+       metadata (knowledge=1.0, correction=0.9, lesson=0.85, etc.).
+
+    Pesos adaptativos segun tipo de consulta (detectado por
+    QueryClassifier):
+    - factual: semantica alta (0.40), lexica baja (0.20)
+    - exact: lexica alta (0.40), cobertura alta (0.25)
+    - temporal: frescura alta (0.35)
+    - general: balanceado con sesgo semantico (0.35)
+
 =============================================================
 """
 
+from __future__ import annotations
+
+import math
 import logging
 from datetime import datetime
+from typing import Any
 
 from config import logger
 from memory.bm25 import tokenize, tokenize_minimal
 
 # Half-life diferenciado por tipo de contenido (en dias)
 # Debe coincidir con DECAY_HALF_LIFE_BY_TYPE de triple_memory.py
-DECAY_HALF_LIFE_BY_TYPE = {
+DECAY_HALF_LIFE_BY_TYPE: dict[str, int] = {
     "knowledge": 365,
     "correction": 180,
     "lesson": 90,
@@ -33,29 +53,34 @@ DECAY_HALF_LIFE_BY_TYPE = {
     "conversation": 7,
     "note": 30,
 }
-DEFAULT_HALF_LIFE = 30  # Half-life por defecto
+DEFAULT_HALF_LIFE: int = 30  # Half-life por defecto
 
 
 # ============================================================
 # CLASIFICADOR DE TIPO DE CONSULTA
 # ============================================================
 class QueryClassifier:
-    """Clasifica consultas por tipo para ajustar pesos del re-ranker."""
+    """Clasifica consultas por tipo para ajustar pesos del re-ranker.
+
+    Usa patrones heuristicos en español e inglés para determinar
+    si una consulta es de tipo factual, exact, temporal, o general.
+    La clasificación afecta los pesos de las señales en el re-ranker.
+    """
 
     # Patrones heuristicos para clasificacion
-    FACTUAL_PATTERNS = [
+    FACTUAL_PATTERNS: list[str] = [
         "que es", "que son", "que significa", "definicion", "concepto",
         "como funciona", "como se usa", "explica", "describe",
         "what is", "how does", "explain", "describe",
         "diferencia entre", "comparar", "ventaja",
     ]
-    EXACT_PATTERNS = [
+    EXACT_PATTERNS: list[str] = [
         "donde dice", "busca", "encuentra", "archivo",
         "error", "codigo", "funcion", "clase", "variable",
         "where is", "find", "grep", "search for",
         "linea", "implementacion", "definicion de",
     ]
-    TEMPORAL_PATTERNS = [
+    TEMPORAL_PATTERNS: list[str] = [
         "ayer", "antes", "anterior", "ultimo", "reciente",
         "hace", "semana pasada", "mes pasado",
         "yesterday", "last time", "recently", "before",
@@ -63,16 +88,25 @@ class QueryClassifier:
     ]
 
     @staticmethod
-    def classify(query):
+    def classify(query: str) -> tuple[str, float]:
         """Clasifica una consulta en: factual, exact, temporal, o general.
 
-        Retorna: (tipo, confianza) donde tipo es uno de los anteriores
-        y confianza es 0.0-1.0.
+        Aplica normalización de acentos y caracteres especiales antes
+        del matching para soportar consultas en español con o sin
+        acentos.
+
+        Args:
+            query: Texto de la consulta del usuario.
+
+        Returns:
+            Tupla ``(tipo, confianza)`` donde tipo es uno de
+            ``"factual"``, ``"exact"``, ``"temporal"`` o ``"general"``,
+            y confianza es un valor entre 0.0 y 1.0.
         """
         query_lower = query.lower()
 
         # Scoring por tipo
-        scores = {"factual": 0, "exact": 0, "temporal": 0}
+        scores: dict[str, int] = {"factual": 0, "exact": 0, "temporal": 0}
 
         # Normalizar: remover ¿¡ y acentos para mejor matching en español
         query_normalized = query_lower.replace("¿", "").replace("¡", "")
@@ -106,7 +140,7 @@ class QueryClassifier:
 # ============================================================
 # PESOS ADAPTATIVOS POR TIPO DE CONSULTA
 # ============================================================
-QUERY_TYPE_WEIGHTS = {
+QUERY_TYPE_WEIGHTS: dict[str, dict[str, float]] = {
     "factual": {
         "semantic": 0.40,   # Alta importancia semantica para consultas conceptuales
         "lexical": 0.20,    # BM25 menos importante para conceptos
@@ -138,7 +172,7 @@ QUERY_TYPE_WEIGHTS = {
 }
 
 # Bonus por tipo de metadata
-METADATA_TYPE_BONUS = {
+METADATA_TYPE_BONUS: dict[str, float] = {
     "knowledge": 1.0,      # Conocimiento factual: maxima prioridad
     "correction": 0.9,     # Correcciones del usuario: alta prioridad
     "lesson": 0.85,        # Lecciones aprendidas
@@ -157,26 +191,49 @@ class MultiSignalReranker:
 
     Se inserta entre la fase de recuperacion y la construccion
     de contexto para mejorar la calidad de los resultados top-k.
+
+    El re-ranking funciona en 3 pasos:
+    1. Clasificar la consulta (factual/exact/temporal/general)
+    2. Calcular 5 señales normalizadas [0,1] para cada candidato
+    3. Combinar señales con pesos adaptativos segun tipo de consulta
+
+    Si la confianza de la clasificacion es baja (<0.5), se interpolan
+    los pesos del tipo detectado con los pesos generales.
+
+    Args:
+        use_adaptive_weights: Si True, ajusta los pesos de las señales
+            segun el tipo de consulta detectado. Si False, usa siempre
+            los pesos generales. Default: True.
     """
 
     # Pesos por defecto (general)
-    DEFAULT_WEIGHTS = QUERY_TYPE_WEIGHTS["general"]
+    DEFAULT_WEIGHTS: dict[str, float] = QUERY_TYPE_WEIGHTS["general"]
 
-    def __init__(self, use_adaptive_weights=True):
+    def __init__(self, use_adaptive_weights: bool = True) -> None:
         self.use_adaptive = use_adaptive_weights
         self.classifier = QueryClassifier()
-        self._stats = {"reranked": 0, "query_types": {}}
+        self._stats: dict[str, Any] = {"reranked": 0, "query_types": {}}
 
-    def rerank(self, query, candidates, limit=5):
+    def rerank(
+        self,
+        query: str,
+        candidates: list[dict[str, Any]],
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
         """Re-rankear candidatos usando multi-señal.
 
         Args:
-            query: Texto de la consulta original
-            candidates: Lista de resultados candidatos (dicts con score, text, metadata)
-            limit: Numero maximo de resultados a retornar
+            query: Texto de la consulta original.
+            candidates: Lista de resultados candidatos (dicts con keys
+                como ``score``, ``text``, ``metadata``, ``bm25_score``,
+                ``decay``, ``created``, ``raw_similarity``, etc.).
+            limit: Numero maximo de resultados a retornar. Default: 5.
 
         Returns:
-            Lista de candidatos re-rankeados con rerank_score y signals.
+            Lista de candidatos re-rankeados (ordenados por
+            ``rerank_score`` descendente) con las keys adicionales:
+            ``rerank_score``, ``signals`` (dict de señal → valor),
+            y ``query_type``.
         """
         if not candidates:
             return []
@@ -201,7 +258,7 @@ class MultiSignalReranker:
         self._stats["query_types"][query_type] = self._stats["query_types"].get(query_type, 0) + 1
 
         # Calcular señales para cada candidato
-        scored = []
+        scored: list[dict[str, Any]] = []
         for candidate in candidates:
             signals = self._compute_signals(query, candidate, weights)
             final_score = sum(signals[k] * weights[k] for k in weights)
@@ -216,12 +273,39 @@ class MultiSignalReranker:
         scored.sort(key=lambda x: x["rerank_score"], reverse=True)
         return scored[:limit]
 
-    def _compute_signals(self, query, candidate, weights):
+    def _compute_signals(
+        self,
+        query: str,
+        candidate: dict[str, Any],
+        weights: dict[str, float],
+    ) -> dict[str, float]:
         """Computa las 5 señales de relevancia para un candidato.
 
-        Cada señal se normaliza a [0, 1].
+        Cada señal se normaliza a [0, 1]:
+
+        1. **semantic**: Similitud coseno del embedding (``raw_similarity``
+           o ``score`` del candidato).
+        2. **lexical**: Score BM25 normalizado (dividido por 10), o
+           estimación por cobertura de stems si no hay BM25 score.
+        3. **freshness**: 1 - decaimiento temporal, con half-life
+           diferenciado por tipo de contenido.
+        4. **coverage**: Fracción de términos de la query (sin stemming)
+           presentes en el documento.
+        5. **type_bonus**: Bonus según tipo de metadata (knowledge=1.0,
+           correction=0.9, etc.).
+
+        Args:
+            query: Texto de la consulta original.
+            candidate: Diccionario del candidato con sus datos.
+            weights: Diccionario de pesos por señal (usado para
+                determinar qué señales calcular).
+
+        Returns:
+            Diccionario con keys ``semantic``, ``lexical``,
+            ``freshness``, ``coverage``, ``type_bonus``, cada una
+            con un valor float en [0, 1].
         """
-        signals = {}
+        signals: dict[str, float] = {}
 
         # 1. Señal semantica (similitud coseno)
         raw_sim = candidate.get("raw_similarity", candidate.get("score", 0))
@@ -238,7 +322,8 @@ class MultiSignalReranker:
                 doc_stems = set(tokenize(candidate.get("text", "")))
                 if query_stems and doc_stems:
                     signals["lexical"] = len(query_stems & doc_stems) / len(query_stems)
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Error calculando señal lexica con tokenización: {e}")
                 signals["lexical"] = 0.0
 
         # 3. Señal de frescura (1 - decaimiento temporal diferenciado)
@@ -261,7 +346,8 @@ class MultiSignalReranker:
                 signals["coverage"] = len(query_stems & doc_stems) / len(query_stems)
             else:
                 signals["coverage"] = 0.0
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Error calculando cobertura de términos: {e}")
             signals["coverage"] = 0.0
 
         # 5. Bonus por tipo de contenido
@@ -269,11 +355,28 @@ class MultiSignalReranker:
 
         return signals
 
-    def _compute_freshness(self, created_at, metadata=None):
-        """Computa frescura basada en fecha de creacion y tipo de contenido (0-1).
+    def _compute_freshness(
+        self,
+        created_at: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> float:
+        """Computa frescura basada en fecha de creacion y tipo de contenido.
 
-        Usa half-life diferenciado: conocimiento factual decae lento (365 dias),
-        tareas decaen rapido (14 dias), conversacion muy rapido (7 dias).
+        Usa half-life diferenciado: conocimiento factual decae lento
+        (365 dias), tareas decaen rapido (14 dias), conversacion muy
+        rapido (7 dias). La fórmula es::
+
+            freshness = 1 - exp(-0.693 * days_old / half_life)
+
+        Args:
+            created_at: Fecha de creacion en formato ISO 8601.
+            metadata: Metadatos del documento, pueden contener la
+                key ``"type"`` para determinar el half-life.
+
+        Returns:
+            Valor entre 0.0 y 1.0. 0.5 si no hay fecha disponible
+            (neutral), 1.0 si es muy reciente, cercano a 0.0 si
+            es muy antiguo.
         """
         if not created_at:
             return 0.5  # Neutral si no hay fecha
@@ -289,14 +392,26 @@ class MultiSignalReranker:
                     half_life = DECAY_HALF_LIFE_BY_TYPE[content_type]
 
             # Decaimiento exponencial con half-life diferenciado
-            import math
             freshness = 1.0 - math.exp(-0.693 * days_old / half_life)
             return max(0, min(1, freshness))
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Error calculando frescura: {e}")
             return 0.5
 
-    def _compute_type_bonus(self, metadata):
-        """Computa bonus segun tipo de contenido (0-1)."""
+    def _compute_type_bonus(self, metadata: dict[str, Any] | None) -> float:
+        """Computa bonus segun tipo de contenido.
+
+        Revisa el ``type`` y ``source`` en los metadatos del documento
+        y retorna un bonus normalizado según ``METADATA_TYPE_BONUS``.
+
+        Args:
+            metadata: Metadatos del documento, pueden contener keys
+                ``"type"`` y ``"source"``.
+
+        Returns:
+            Valor entre 0.0 y 1.0. 0.3 si no hay metadatos o no
+            se reconoce el tipo (neutral).
+        """
         if not metadata:
             return 0.3  # Neutral
 
@@ -314,6 +429,11 @@ class MultiSignalReranker:
 
         return 0.3  # Default neutral
 
-    def stats(self):
-        """Retorna estadisticas del re-ranker."""
+    def stats(self) -> dict[str, Any]:
+        """Retorna estadisticas del re-ranker.
+
+        Returns:
+            Diccionario con keys ``reranked`` (contador total) y
+            ``query_types`` (dict de tipo → contador).
+        """
         return self._stats.copy()

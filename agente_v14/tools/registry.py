@@ -21,34 +21,48 @@ Uso:
 =============================================================
 """
 
+from __future__ import annotations
+
 import inspect
 import functools
+from typing import Any, Callable
 
 # ============================================================
 # REGISTROS GLOBALES
 # ============================================================
 
-TOOL_FUNCTIONS = {}   # {name: callable}
-TOOL_SCHEMAS = []     # [{type: "function", function: {...}}, ...]
+TOOL_FUNCTIONS: dict[str, Callable] = {}   # {name: callable}
+TOOL_SCHEMAS: list[dict] = []     # [{type: "function", function: {...}}, ...]
 
 # Metadata extendida por herramienta
-_TOOL_METADATA = {}   # {name: {"func": callable, "schema": dict|None, "description": str}}
+_TOOL_METADATA: dict[str, dict] = {}   # {name: {"func": callable, "schema": dict|None, "description": str}}
 
 
 # ============================================================
 # FUNCION DE REGISTRO MANUAL
 # ============================================================
 
-def register_tool(name: str, func, schema: dict = None, *, overwrite: bool = False) -> None:
+def register_tool(
+    name: str,
+    func: Callable,
+    schema: dict | None = None,
+    *,
+    overwrite: bool = False,
+) -> None:
     """Registra una herramienta manualmente en el registry.
 
     Args:
-        name: Nombre de la herramienta (clave en TOOL_FUNCTIONS)
-        func: Funcion callable a registrar
+        name: Nombre de la herramienta (clave en TOOL_FUNCTIONS).
+        func: Funcion callable a registrar.
         schema: Schema de function calling para Ollama (formato completo).
-                Si es None, se intenta generar uno basico automaticamente.
+            Si es None, se intenta generar uno basico automaticamente.
+            Puede ser el schema completo con ``"type"``/``"function"`` keys,
+            o solo la parte ``"function"`` (se envuelve automaticamente).
         overwrite: Si True, permite sobrescribir una herramienta existente.
-                   Si False (default), NO sobrescribe y emite warning.
+            Si False (default), NO sobrescribe y emite warning.
+
+    Raises:
+        TypeError: Si func no es callable.
     """
     if not callable(func):
         raise TypeError(f"register_tool: func debe ser callable, se recibio {type(func)}")
@@ -105,24 +119,37 @@ def register_tool(name: str, func, schema: dict = None, *, overwrite: bool = Fal
 # DECORADOR @tool
 # ============================================================
 
-def tool(func=None, *, schema: dict = None):
+def tool(
+    func: Callable | None = None,
+    *,
+    schema: dict | None = None,
+) -> Callable | Callable[[Callable], Callable]:
     """Decorador para registrar automaticamente una herramienta.
 
-    Soporta dos formas de uso:
+    Soporta tres formas de uso::
 
         @tool
         def mi_func():
             pass
 
-        @tool(schema={"name": "mi_func", ...})
+        @tool()
+        def mi_func():
+            pass
+
+        @tool(schema={\"name\": \"mi_func\", ...})
         def mi_func():
             pass
 
     Args:
-        func: La funcion a decorar (cuando se usa sin parentesis)
-        schema: Schema de function calling para Ollama (opcional)
+        func: La funcion a decorar (cuando se usa sin parentesis).
+        schema: Schema de function calling para Ollama (opcional).
+
+    Returns:
+        El wrapper de la funcion decorada con atributos ``_is_tool``,
+        ``_tool_name`` y ``_tool_schema``, o un decorador si se usa con
+        argumentos.
     """
-    def decorator(fn):
+    def decorator(fn: Callable) -> Callable:
         # Obtener nombre de la herramienta
         name = fn.__name__
 
@@ -135,7 +162,7 @@ def tool(func=None, *, schema: dict = None):
         fn._tool_schema = schema
 
         @functools.wraps(fn)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
             return fn(*args, **kwargs)
 
         # Preservar marca en el wrapper tambien
@@ -157,16 +184,21 @@ def tool(func=None, *, schema: dict = None):
 # AUTO-GENERACION DE SCHEMAS
 # ============================================================
 
-def _build_auto_schema(name: str, func, description: str) -> dict | None:
+def _build_auto_schema(name: str, func: Callable, description: str) -> dict | None:
     """Genera un schema de function calling basico desde type hints.
 
+    Inspecciona la signatura de la funcion para extraer parametros,
+    sus tipos y descripciones (desde la seccion Args: del docstring),
+    y construye un schema compatible con el formato Ollama function calling.
+
     Args:
-        name: Nombre de la herramienta
-        func: Funcion a inspeccionar
-        description: Descripcion (del docstring)
+        name: Nombre de la herramienta.
+        func: Funcion a inspeccionar.
+        description: Descripcion extraida del docstring de la funcion.
 
     Returns:
-        Schema en formato Ollama o None si no se puede generar
+        Schema en formato Ollama (``{"type": "function", "function": {...}}``)
+        o None si no se puede obtener la signatura de la funcion.
     """
     try:
         sig = inspect.signature(func)
@@ -233,7 +265,20 @@ def _build_auto_schema(name: str, func, description: str) -> dict | None:
 
 
 def _extract_param_description(docstring: str | None, param_name: str) -> str | None:
-    """Extrae la descripcion de un parametro del docstring (formato Args:)."""
+    """Extrae la descripcion de un parametro del docstring (formato Args:).
+
+    Parsea la seccion ``Args:`` del docstring buscando la descripcion
+    asociada al parametro dado. Soporta formatos como:
+        ``param_name: descripcion``
+        ``param (tipo): descripcion``
+
+    Args:
+        docstring: El docstring completo de la funcion, o None.
+        param_name: Nombre del parametro a buscar.
+
+    Returns:
+        La descripcion del parametro, o None si no se encuentra.
+    """
     if not docstring:
         return None
 
@@ -267,22 +312,41 @@ def _extract_param_description(docstring: str | None, param_name: str) -> str | 
 # ============================================================
 
 def get_tool_metadata(name: str) -> dict | None:
-    """Retorna la metadata completa de una herramienta registrada."""
+    """Retorna la metadata completa de una herramienta registrada.
+
+    Args:
+        name: Nombre de la herramienta.
+
+    Returns:
+        Diccionario con keys ``"func"``, ``"schema"`` y ``"description"``,
+        o None si la herramienta no esta registrada.
+    """
     return _TOOL_METADATA.get(name)
 
 
 def list_tools() -> list[str]:
-    """Retorna los nombres de todas las herramientas registradas."""
+    """Retorna los nombres de todas las herramientas registradas.
+
+    Returns:
+        Lista de nombres (str) de herramientas registradas.
+    """
     return list(TOOL_FUNCTIONS.keys())
 
 
 def tool_count() -> int:
-    """Retorna la cantidad de herramientas registradas."""
+    """Retorna la cantidad de herramientas registradas.
+
+    Returns:
+        Numero entero de herramientas registradas.
+    """
     return len(TOOL_FUNCTIONS)
 
 
 def clear_registry() -> None:
-    """Limpia todo el registry. Util para testing."""
+    """Limpia todo el registry. Util para testing.
+
+    Vacia TOOL_FUNCTIONS, TOOL_SCHEMAS y _TOOL_METADATA.
+    """
     TOOL_FUNCTIONS.clear()
     TOOL_SCHEMAS.clear()
     _TOOL_METADATA.clear()

@@ -313,11 +313,12 @@ class MCPServer:
             try:
                 self.process.terminate()
                 await asyncio.wait_for(self.process.wait(), timeout=5.0)
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Error terminando proceso MCP {self.name}: {e}")
                 try:
                     self.process.kill()
-                except Exception:
-                    pass
+                except Exception as e2:
+                    logger.debug(f"Error matando proceso MCP {self.name}: {e2}")
 
         self.connected = False
         self.tools = []

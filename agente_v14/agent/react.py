@@ -455,8 +455,8 @@ class ReactAgent:
                         if improved and len(improved) > len(full_text):
                             full_text = improved
                             yield {"type": "text", "data": "\n\n[Respuesta mejorada] " + improved}
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Error en reflexion metacognitiva de mejora: {e}")
 
                 # Respuesta final - terminar
                 for lesson in reflection.get("lessons", []):
@@ -1085,8 +1085,8 @@ class ReactAgent:
             web_knowledge = get_web_learned(new_message)
             if web_knowledge:
                 system_content += f"\n\n--- CONOCIMIENTO WEB APRENDIDO ---\n{web_knowledge}"
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error cargando conocimiento web aprendido: {e}")
 
         messages = [{"role": "system", "content": system_content}]
 
@@ -1106,8 +1106,8 @@ class ReactAgent:
             if os.path.exists(USER_PROFILE_FILE):
                 with open(USER_PROFILE_FILE, "r", encoding="utf-8") as f:
                     return json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error cargando perfil de usuario: {e}")
         return {}
 
     # ----------------------------------------------------------
@@ -1129,8 +1129,8 @@ class ReactAgent:
             if dirs:
                 latest = max(dirs, key=lambda d: os.path.getmtime(os.path.join(REPOS_DIR, d)))
                 return os.path.join(REPOS_DIR, latest)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error buscando ruta del repo: {e}")
         return REPOS_DIR
 
     def _parse_json(self, text):
@@ -1139,8 +1139,8 @@ class ReactAgent:
             result = json.loads(text)
             if isinstance(result, dict):
                 return result
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error parseando JSON directo: {e}")
         patterns = [
             r'```json\s*(.*?)\s*```',
             r'```\s*(.*?)\s*```',
@@ -1152,7 +1152,8 @@ class ReactAgent:
                     result = json.loads(match.group(1))
                     if isinstance(result, dict):
                         return result
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Error parseando JSON de code block: {e}")
                     continue
         # Intentar parsear multiples JSONs en el texto
         # Cada JSON es una accion separada del ReAct
@@ -1176,8 +1177,8 @@ class ReactAgent:
         if match:
             try:
                 return json.loads(match.group(1))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Error parseando JSON en ultimo intento regex: {e}")
         return None
 
     def _extract_all_jsons(self, text):
@@ -1206,8 +1207,8 @@ class ReactAgent:
                     parsed = json.loads(text[start:end])
                     if isinstance(parsed, dict):
                         results.append(parsed)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Error parseando JSON candidato en posicion {start}: {e}")
                 i = end
             else:
                 i = start + 1
@@ -1265,10 +1266,11 @@ class ReactAgent:
                         tools=[TOOL_SCHEMAS[0]]
                     )
                     return True
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Error probando tool calling con modelo {model}: {e}")
                     continue
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error detectando soporte de tool calling: {e}")
         return False
 
     def _save_interaction(self, user_message, final_response):
@@ -1299,5 +1301,5 @@ class ReactAgent:
                 from tools.web import get_web_learned
                 web_knowledge = get_web_learned(user_message)
                 # El conocimiento ya se guardo automaticamente en _auto_learn_from_search
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Error guardando conocimiento web aprendido: {e}")

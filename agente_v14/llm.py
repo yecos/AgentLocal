@@ -266,8 +266,8 @@ class OllamaClient:
                 with open(cache_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 return data.get("embed_model")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error cargando cache de modelo de embeddings: {e}")
         return None
 
     def _save_embed_model_cache(self, model_name):
@@ -276,8 +276,8 @@ class OllamaClient:
             cache_file = os.path.join(LEARN_DIR, "embed_model_cache.json")
             with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump({"embed_model": model_name, "saved_at": datetime.now().isoformat()}, f)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error guardando cache de modelo de embeddings: {e}")
 
     # ----------------------------------------------------------
     # DETECCION DE GPU
@@ -753,8 +753,8 @@ class OllamaClient:
                     else:
                         if content:
                             return content
-                except Exception:
-                    pass
+                except Exception as e2:
+                    logger.debug(f"Retry sin think param fallo: {e2}")
         except Exception as e:
             logger.debug(f"Client method failed: {e}")
         return None

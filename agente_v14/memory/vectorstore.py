@@ -47,8 +47,8 @@ def _get_hmac_key():
             # Proteger permisos del archivo de clave
             try:
                 os.chmod(_HMAC_KEY_FILE, 0o600)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Error protegiendo permisos de clave HMAC: {e}")
     except Exception as e:
         logger.debug(f"Error inicializando clave HMAC: {e}")
         _hmac_key = b"fallback-key-not-secure"  # Fallback para modo sin persistencia
@@ -158,16 +158,33 @@ class VectorStore:
                 else:
                     logger.warning("Vectores pickle legacy sin HMAC - migrando a formato seguro")
                     # Intentar migrar desde pickle legacy (solo si HMAC falla por formato viejo)
+                    # SECURITY: This pickle.loads() is ONLY for one-time migration from legacy format.
+                    # After migration, data is re-saved in safe HMAC+JSON format.
+                    # Do NOT use pickle for any other purpose.
                     import pickle
                     try:
-                        vectors = pickle.loads(data)
-                        if isinstance(vectors, dict):
-                            self._vectors_cache = vectors
-                            self._save_vectors(vectors)  # Re-guardar en formato seguro
-                            logger.info("Vectores migrados de pickle a formato seguro HMAC+JSON")
-                            return self._vectors_cache
-                    except Exception:
-                        pass
+                        # Size limit check: max 50MB for safety
+                        MAX_MIGRATION_SIZE = 50 * 1024 * 1024  # 50 MB
+                        if len(data) > MAX_MIGRATION_SIZE:
+                            logger.warning(f"Legacy pickle file too large ({len(data)} bytes > {MAX_MIGRATION_SIZE}), skipping migration")
+                        else:
+                            vectors = pickle.loads(data)
+                            # Validate that loaded data is a dict with string keys and list values
+                            if isinstance(vectors, dict):
+                                valid = True
+                                for k, v in vectors.items():
+                                    if not isinstance(k, str) or not isinstance(v, list):
+                                        valid = False
+                                        break
+                                if valid:
+                                    self._vectors_cache = vectors
+                                    self._save_vectors(vectors)  # Re-guardar en formato seguro
+                                    logger.warning(f"MIGRACION: Vectores migrados de pickle legacy a formato seguro HMAC+JSON ({len(vectors)} vectores)")
+                                    return self._vectors_cache
+                                else:
+                                    logger.warning("Legacy pickle data has invalid structure (expected dict[str, list]), skipping migration")
+                    except Exception as e:
+                        logger.debug(f"Error migrando vectores pickle legacy: {e}")
         except Exception as e:
             logger.debug(f"Error cargando vectores con formato seguro: {e}")
         # 2. Fallback: JSON legacy

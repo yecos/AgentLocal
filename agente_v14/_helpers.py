@@ -163,9 +163,18 @@ def check_imports():
         ("agent.schemas", "from agent.schemas import SYSTEM_PROMPT"),
     ]
 
+    # SECURITY: Only allow safe import patterns via regex validation before exec()
+    import re
+    _SAFE_IMPORT_PATTERN = re.compile(
+        r'^from\s+[a-zA-Z_][a-zA-Z0-9_.]*\s+import\s+[a-zA-Z_][a-zA-Z0-9_,\s]*$'
+    )
+
     failed = 0
     for name, code in tests:
         try:
+            if not _SAFE_IMPORT_PATTERN.match(code.strip()):
+                print(f"WARN:{name}: import pattern not recognized as safe 'from X import Y', skipping exec: {code.strip()}")
+                continue
             exec(code)
             print(f"OK:{name}")
         except Exception as e:

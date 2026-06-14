@@ -604,7 +604,8 @@ def _render_sidebar():
         st.subheader("🤖 Modelo")
         try:
             available_models = ollama._fetch_available_models() or []
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Error obteniendo modelos disponibles: {e}")
             available_models = []
 
         if available_models:
