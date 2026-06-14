@@ -19,8 +19,7 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "comando": {"type": "string", "description": "Comando a ejecutar"},
-                    "confirmar_peligroso": {"type": "boolean", "description": "True si el usuario confirmo un comando peligroso"}
+                    "comando": {"type": "string", "description": "Comando a ejecutar"}
                 },
                 "required": ["comando"]
             }

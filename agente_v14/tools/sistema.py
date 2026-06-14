@@ -56,16 +56,22 @@ PROCESOS_CRITICOS = {
 
 
 def ejecutar_comando(comando: str, cwd: str = None, confirmar_peligroso: bool = False) -> str:
-    """Ejecuta un comando en la terminal con VALIDACION de seguridad."""
+    """Ejecuta un comando en la terminal con VALIDACION de seguridad.
+    
+    NOTA: confirmar_peligroso solo puede ser True si el USUARIO lo confirma
+    directamente en la UI, NO via tool call del LLM.
+    """
     # Sanitizar input del usuario
     comando = sanitize_input(comando)
     cmd_lower = comando.lower()
 
     # Validar comandos peligrosos
+    # SECURITY: confirmar_peligroso solo funciona desde la UI del usuario,
+    # nunca desde tool calls del LLM (el schema no lo expone)
     if is_dangerous_command(comando) and not confirmar_peligroso:
         logger.warning(f"Comando peligroso bloqueado: {comando}")
         return (f"COMANDO PELIGROSO detectado.\n"
-                f"Si estas seguro, dime: 'ejecuta confirmado: {comando}'")
+                f"Si estas seguro, confirma desde la interfaz de usuario.")
 
     # Timeout adaptativo
     timeout = DEFAULT_TIMEOUT

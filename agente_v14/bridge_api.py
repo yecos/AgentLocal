@@ -42,9 +42,10 @@ AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if AGENT_DIR not in sys.path:
     sys.path.insert(0, AGENT_DIR)
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
 # --- Importar agente ---
@@ -61,23 +62,46 @@ except Exception as e:
 # --- App ---
 app = FastAPI(
     title="ZAI Agent Bridge API",
-    version="16.4.0",
-    description="API completa para el Agente Autonomo v16",
+    version="16.5.0",
+    description="API completa para el Agente Autonomo v16 - con autenticacion opcional",
 )
+
+# --- Configuracion de seguridad ---
+_BRIDGE_TOKEN = os.environ.get("BRIDGE_TOKEN", "")  # Token vacio = modo local (sin auth)
+_ALLOWED_ORIGINS = os.environ.get("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+_AUTH_ENABLED = bool(_BRIDGE_TOKEN)  # Solo autenticar si se configuro un token
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- Seguridad Bearer Token ---
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+async def verify_token(credentials: HTTPAuthorizationCredentials = Security(_bearer_scheme)):
+    """Verifica el token Bearer si la autenticacion esta habilitada.
+    
+    Si BRIDGE_TOKEN no esta configurado (modo local), permite todo.
+    Si BRIDGE_TOKEN esta configurado, requiere token valido.
+    """
+    if not _AUTH_ENABLED:
+        return True  # Modo local: sin autenticacion
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="Token de autenticacion requerido")
+    if credentials.credentials != _BRIDGE_TOKEN:
+        raise HTTPException(status_code=403, detail="Token invalido")
+    return True
 
 # --- Singleton del agente ---
 _agent: Optional[ReactAgent] = None
 _memory: Optional[TripleMemory] = None
 _start_time = time.time()
 _busy = False  # Flag: el agente esta procesando
+_agent_lock = threading.Lock()  # Protege acceso a _agent, _memory, _busy
 _upload_dir = os.path.join(os.path.expanduser("~"), ".ia-local", "uploads")
 os.makedirs(_upload_dir, exist_ok=True)
 
@@ -85,22 +109,24 @@ os.makedirs(_upload_dir, exist_ok=True)
 def get_agent() -> ReactAgent:
     """Obtiene o crea la instancia singleton del agente."""
     global _agent, _memory
-    if _agent is None:
-        if not AGENT_AVAILABLE:
-            raise HTTPException(status_code=503, detail="Agente no disponible. Verifica que Ollama esté corriendo.")
-        _memory = TripleMemory()
-        _memory.load_session()  # Cargar sesión persistente
-        _agent = ReactAgent(memory=_memory)
-    return _agent
+    with _agent_lock:
+        if _agent is None:
+            if not AGENT_AVAILABLE:
+                raise HTTPException(status_code=503, detail="Agente no disponible. Verifica que Ollama esté corriendo.")
+            _memory = TripleMemory()
+            _memory.load_session()  # Cargar sesión persistente
+            _agent = ReactAgent(memory=_memory)
+        return _agent
 
 
 def get_memory() -> TripleMemory:
     """Obtiene la instancia de memoria."""
     global _memory
-    if _memory is None:
-        _memory = TripleMemory()
-        _memory.load_session()
-    return _memory
+    with _agent_lock:
+        if _memory is None:
+            _memory = TripleMemory()
+            _memory.load_session()
+        return _memory
 
 
 # --- Models ---
@@ -130,8 +156,21 @@ class ModelSwitchRequest(BaseModel):
 # ENDPOINTS
 # ============================================================
 
+@app.get("/api/health")
+async def health():
+    """Health check - rapido, nunca bloquea, no requiere auth."""
+    return {
+        "status": "ok",
+        "agent": AGENT_AVAILABLE,
+        "busy": _busy,
+        "version": "16.5.0",
+        "uptime": int(time.time() - _start_time),
+        "auth_enabled": _AUTH_ENABLED,
+    }
+
+
 @app.get("/api/status")
-async def status():
+async def status(auth=Depends(verify_token)):
     """Estado del sistema."""
     # Verificar Ollama
     ollama_ok = False
@@ -154,7 +193,7 @@ async def status():
         "connected": ollama_ok,
         "agent_available": AGENT_AVAILABLE,
         "busy": _busy,
-        "version": "16.4.0",
+        "version": "16.5.0",
         "tools_count": tool_count,
         "models": [
             {
@@ -172,7 +211,7 @@ async def status():
 
 
 @app.get("/api/models")
-async def models():
+async def models(auth=Depends(verify_token)):
     """Lista de modelos disponibles."""
     try:
         import urllib.request
@@ -196,7 +235,7 @@ async def models():
 
 
 @app.post("/api/models/switch")
-async def switch_model(request: ModelSwitchRequest):
+async def switch_model(request: ModelSwitchRequest, auth=Depends(verify_token)):
     """Cambia el modelo activo."""
     if not AGENT_AVAILABLE:
         raise HTTPException(status_code=503, detail="Agente no disponible.")
@@ -211,7 +250,7 @@ async def switch_model(request: ModelSwitchRequest):
 
 
 @app.get("/api/tools")
-async def tools():
+async def tools(auth=Depends(verify_token)):
     """Lista de herramientas disponibles con sus schemas."""
     if not AGENT_AVAILABLE:
         raise HTTPException(status_code=503, detail="Agente no disponible.")
@@ -243,7 +282,7 @@ async def tools():
 
 
 @app.get("/api/memory")
-async def memory_stats():
+async def memory_stats(auth=Depends(verify_token)):
     """Estadisticas de la memoria del agente."""
     if not AGENT_AVAILABLE:
         raise HTTPException(status_code=503, detail="Agente no disponible.")
@@ -263,7 +302,7 @@ async def memory_stats():
 
 
 @app.post("/api/memory/save")
-async def memory_save():
+async def memory_save(auth=Depends(verify_token)):
     """Guarda la sesion de memoria."""
     if not AGENT_AVAILABLE:
         raise HTTPException(status_code=503, detail="Agente no disponible.")
@@ -274,7 +313,7 @@ async def memory_save():
 
 
 @app.post("/api/memory/clear")
-async def memory_clear():
+async def memory_clear(auth=Depends(verify_token)):
     """Limpia la sesion de memoria."""
     global _agent
     if not AGENT_AVAILABLE:
@@ -287,7 +326,7 @@ async def memory_clear():
 
 
 @app.get("/api/config")
-async def config():
+async def config(auth=Depends(verify_token)):
     """Configuracion actual del agente."""
     try:
         import config as cfg
@@ -311,7 +350,7 @@ async def config():
 
 
 @app.post("/api/execute")
-async def execute_tool(request: ExecuteRequest):
+async def execute_tool(request: ExecuteRequest, auth=Depends(verify_token)):
     """Ejecuta una herramienta directamente."""
     if not AGENT_AVAILABLE:
         raise HTTPException(status_code=503, detail="Agente no disponible.")
@@ -359,7 +398,7 @@ async def execute_tool(request: ExecuteRequest):
 
 
 @app.post("/api/chat")
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, auth=Depends(verify_token)):
     """Chat con el agente completo. Streaming SSE por defecto."""
     if not AGENT_AVAILABLE:
         raise HTTPException(status_code=503, detail="Agente no disponible.")
@@ -397,7 +436,7 @@ async def chat(request: ChatRequest):
 
 
 @app.post("/api/chat/simple")
-async def chat_simple(request: ChatRequest):
+async def chat_simple(request: ChatRequest, auth=Depends(verify_token)):
     """Chat simple directo con Ollama, sin el agente ReAct."""
     try:
         import urllib.request
@@ -425,7 +464,7 @@ async def chat_simple(request: ChatRequest):
 
 
 @app.post("/api/upload")
-async def upload_files(files: List[UploadFile] = File(...)):
+async def upload_files(files: List[UploadFile] = File(...), auth=Depends(verify_token)):
     """Sube archivos para procesar con el agente."""
     uploaded = []
     for file in files:
@@ -450,7 +489,7 @@ async def upload_files(files: List[UploadFile] = File(...)):
 
 
 @app.get("/api/history")
-async def history(limit: int = 50):
+async def history(limit: int = 50, auth=Depends(verify_token)):
     """Historial de conversacion."""
     if not AGENT_AVAILABLE:
         raise HTTPException(status_code=503, detail="Agente no disponible.")
@@ -471,16 +510,7 @@ async def history(limit: int = 50):
     }
 
 
-@app.get("/api/health")
-async def health():
-    """Health check - rapido, nunca bloquea."""
-    return {
-        "status": "ok",
-        "agent": AGENT_AVAILABLE,
-        "busy": _busy,
-        "version": "16.4.0",
-        "uptime": int(time.time() - _start_time),
-    }
+
 
 
 # ============================================================
@@ -493,7 +523,8 @@ def _agent_runner(agent: ReactAgent, message: str, q: queue.Queue):
     Pone cada evento en la queue para que el async generator lo consuma.
     """
     global _busy
-    _busy = True
+    with _agent_lock:
+        _busy = True
     try:
         for event in agent.run_stream(message):
             q.put(event)
@@ -509,7 +540,8 @@ def _agent_runner(agent: ReactAgent, message: str, q: queue.Queue):
         q.put({"type": "error", "data": err_msg})
         q.put(None)
     finally:
-        _busy = False
+        with _agent_lock:
+            _busy = False
 
 
 async def _stream_agent_threaded(agent: ReactAgent, message: str):
@@ -613,4 +645,8 @@ if __name__ == "__main__":
     print("             /api/memory, /api/config, /api/execute,")
     print("             /api/upload, /api/history, /api/health")
     print("=" * 60)
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    host = os.environ.get("BRIDGE_HOST", "127.0.0.1")  # Default: localhost only
+    port = int(os.environ.get("BRIDGE_PORT", "8000"))
+    print(f"  Auth: {'HABILITADA (token configurado)' if _AUTH_ENABLED else 'DESHABILITADA (modo local)'}")
+    print(f"  Host: {host}:{port}")
+    uvicorn.run(app, host=host, port=port)

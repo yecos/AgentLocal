@@ -65,8 +65,9 @@ COMANDOS_SEGUROS = [
     "npx", "pnpm",
 ]
 
-# Patrones de inyeccion de prompts
+# Patrones de inyeccion de prompts (ingles + español)
 PATRONES_INYECCION_PROMPT = [
+    # Ingles
     r"ignore\s+(all\s+)?previous\s+(instructions|prompts)",
     r"forget\s+(all\s+)?previous\s+(instructions|prompts|context)",
     r"disregard\s+(all\s+)?previous",
@@ -83,6 +84,20 @@ PATRONES_INYECCION_PROMPT = [
     r"reveal\s+(your|the|system)\s+(prompt|instructions)",
     r"show\s+me\s+(your|the|system)\s+(prompt|instructions)",
     r"what\s+(are|is)\s+your\s+(system|hidden)\s+(prompt|instructions)",
+    # Español
+    r"ignora\s+(todas?\s+)?las?\s+(instrucciones|prompts|indicaciones)\s+(anteriores|previas)",
+    r"olvida\s+(todas?\s+)?las?\s+(instrucciones|prompts|indicaciones)\s+(anteriores|previas)",
+    r"desconoce\s+(todas?\s+)?las?\s+(instrucciones|indicaciones)\s+(anteriores|previas)",
+    r"eres\s+ahora\s+",
+    r"nuev[oa]s?\s+instrucciones?\s*:",
+    r"sobrepasa\s+(la\s+)?(seguridad|restricciones|proteccion)",
+    r"finge\s+(que\s+eres|ser)",
+    r"modo\s+(desarrollador|administrador|DAN)",
+    r"elude?\s+(la\s+)?(seguridad|proteccion|filtro)",
+    r"desactiva?\s+(la\s+)?(seguridad|proteccion|filtro)",
+    r"revela?\s+(tu|el|las?)\s+(prompt|instrucciones|indicaciones)\s+(del\s+)?(sistema|ocult[oa]s?)",
+    r"muestr[aeo]\s+(tu|el|tu)\s+(prompt|instrucciones|indicaciones)\s+(del\s+)?(sistema|ocult[oa]s?)",
+    r"cu[aá]les?\s+(son|es)\s+(tus?\s+)?(instrucciones|prompt)\s+(del\s+)?(sistema|ocult[oa]s?)",
 ]
 
 _PATRONES_INYECCION_COMPILADOS = [

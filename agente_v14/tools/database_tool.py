@@ -58,6 +58,8 @@ def db_connect(db_path: str, db_type: str = "sqlite") -> dict:
     if db_type == "sqlite":
         # Validar ruta
         validated = validate_path(db_path)
+        if "ACCESO DENEGADO" in str(validated):
+            return {"success": False, "error": validated, "connection_id": None}
         if not validated:
             # Si no existe, permitir crear nueva
             parent_dir = os.path.dirname(db_path)
