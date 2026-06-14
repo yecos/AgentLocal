@@ -1040,6 +1040,131 @@ async def cancel_chat(auth=Depends(verify_token)):
     return {"status": "ok", "message": "Cancelacion solicitada."}
 
 
+# ============================================================
+# ORCHESTRATOR, CIRCUIT BREAKER, AUTO-EVOLVE, MCP ENDPOINTS
+# ============================================================
+
+@app.get("/api/orchestrator/status")
+async def orchestrator_status(auth=Depends(verify_token)):
+    """Estado del orquestador multi-agente."""
+    try:
+        from agent.orchestrator import Orchestrator, detect_subagent_needs
+        return {
+            "available": True,
+            "strategies": ["SEQUENTIAL", "PARALLEL", "ADAPTIVE"],
+            "subagent_types": list(detect_subagent_needs.__doc__ or ["researcher", "coder", "analyst", "writer"]),
+        }
+    except ImportError:
+        return {"available": False, "reason": "Orchestrator module not importable"}
+    except Exception as e:
+        return {"available": False, "reason": str(e)[:200]}
+
+
+class OrchestrateRequest(BaseModel):
+    task: str
+    strategy: Optional[str] = "ADAPTIVE"  # SEQUENTIAL, PARALLEL, ADAPTIVE
+    max_subagents: Optional[int] = 3
+
+
+@app.post("/api/orchestrator/run")
+async def orchestrator_run(request: OrchestrateRequest, auth=Depends(verify_token)):
+    """Ejecuta una tarea compleja usando el orquestador multi-agente."""
+    if not AGENT_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Agente no disponible.")
+
+    try:
+        from agent.orchestrator import Orchestrator
+        orc = Orchestrator()
+        result = orc.orchestrate(
+            task=request.task,
+            strategy=request.strategy,
+            max_subagents=request.max_subagents,
+        )
+        return {"success": True, "result": str(result)[:5000]}
+    except ImportError:
+        raise HTTPException(status_code=504, detail="Orchestrator no disponible.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error en orquestacion: {str(e)[:200]}")
+
+
+@app.get("/api/circuit-breaker/status")
+async def circuit_breaker_status(auth=Depends(verify_token)):
+    """Estado de todos los circuit breakers."""
+    try:
+        from agent.circuit_breaker import CircuitBreakerManager
+        # Try to get the global instance, or create one
+        cb = CircuitBreakerManager()
+        return {
+            "available": True,
+            "circuits": cb.get_all_status() if hasattr(cb, 'get_all_status') else {},
+        }
+    except ImportError:
+        return {"available": False, "reason": "Circuit breaker module not importable"}
+    except Exception as e:
+        return {"available": False, "circuits": {}, "error": str(e)[:200]}
+
+
+@app.post("/api/circuit-breaker/reset/{tool_name}")
+async def circuit_breaker_reset(tool_name: str, auth=Depends(verify_token)):
+    """Resetea un circuit breaker especifico."""
+    try:
+        from agent.circuit_breaker import CircuitBreakerManager
+        cb = CircuitBreakerManager()
+        if hasattr(cb, 'reset'):
+            cb.reset(tool_name)
+        return {"status": "ok", "message": f"Circuit breaker '{tool_name}' reseteado"}
+    except ImportError:
+        raise HTTPException(status_code=504, detail="Circuit breaker no disponible.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.post("/api/auto-evolve")
+async def auto_evolve(focus: Optional[str] = None, auth=Depends(verify_token)):
+    """Ejecuta el ciclo de auto-evolucion del agente."""
+    if not AGENT_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Agente no disponible.")
+
+    try:
+        from agent.auto_evolve import AutoEvolver
+        evolver = AutoEvolver()
+        result = evolver.evolve(focus=focus)
+        return {"success": True, "result": str(result)[:5000]}
+    except ImportError:
+        raise HTTPException(status_code=504, detail="Auto-evolve no disponible.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error en auto-evolucion: {str(e)[:200]}")
+
+
+@app.get("/api/auto-evolve/log")
+async def auto_evolve_log(auth=Depends(verify_token)):
+    """Historial de auto-evolucion."""
+    try:
+        from agent.auto_evolve import EVOLVE_LOG
+        import os
+        if os.path.exists(EVOLVE_LOG):
+            with open(EVOLVE_LOG, "r") as f:
+                data = json.load(f)
+            return {"available": True, "log": data}
+        return {"available": True, "log": []}
+    except ImportError:
+        return {"available": False, "log": []}
+    except Exception as e:
+        return {"available": False, "log": [], "error": str(e)[:200]}
+
+
+@app.get("/api/mcp/status")
+async def mcp_status(auth=Depends(verify_token)):
+    """Estado del cliente MCP."""
+    try:
+        from mcp.client import MCPClient
+        return {"available": True, "servers": []}
+    except ImportError:
+        return {"available": False, "reason": "MCP client module not importable"}
+    except Exception as e:
+        return {"available": False, "reason": str(e)[:200]}
+
+
 @app.get("/api/history")
 async def history(limit: int = 50, auth=Depends(verify_token)):
     """Historial de conversacion."""

@@ -1999,6 +1999,54 @@ function ConfirmationDialog({
   );
 }
 
+// ─── Advanced Module Status Component ──────────────────────────────────────
+
+function AdvancedModuleStatus({ name, endpoint }: { name: string; endpoint: string }) {
+  const [status, setStatus] = useState<"loading" | "available" | "unavailable">("loading");
+
+  useEffect(() => {
+    const check = async () => {
+      try {
+        const token = process.env.NEXT_PUBLIC_BRIDGE_TOKEN;
+        const headers: Record<string, string> = {};
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+        const res = await fetch(`http://localhost:8000${endpoint}`, { headers, signal: AbortSignal.timeout(3000) });
+        if (res.ok) {
+          const data = await res.json();
+          setStatus(data.available !== false ? "available" : "unavailable");
+        } else {
+          setStatus("unavailable");
+        }
+      } catch {
+        setStatus("unavailable");
+      }
+    };
+    check();
+  }, [endpoint]);
+
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-[9px] text-[var(--zai-text-dim)]">{name}</span>
+      <div className="flex items-center gap-1">
+        <Circle
+          size={4}
+          className={
+            status === "available"
+              ? "fill-[#00ff88] text-[#00ff88]"
+              : status === "unavailable"
+              ? "fill-[#ff3333] text-[#ff3333]"
+              : "fill-[#ffd93d] text-[#ffd93d]"
+          }
+        />
+        <span className="text-[9px] text-[var(--zai-text-dim)]">
+          {status === "loading" ? "..." : status === "available" ? "OK" : "OFF"}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+
 // ─── Main Component ──────────────────────────────────────────────────────────
 
 export default function AgentLocalInterface() {
@@ -3907,8 +3955,27 @@ export default function AgentLocalInterface() {
             )}
 
             {/* Footer */}
-            <div className="pt-6">
-              <div className="text-[8px] text-[var(--zai-text-dim)] text-center tracking-[0.4em] uppercase">
+            <div className="pt-4">
+              {/* ADVANCED MODULES STATUS */}
+              <section>
+                <div className="flex items-center gap-1.5 mb-2">
+                  <Server size={9} className="text-[var(--zai-text-dim)]" />
+                  <span className="text-[9px] tracking-[0.2em] text-[var(--zai-text-dim)] uppercase">
+                    Advanced
+                  </span>
+                </div>
+                <div className="space-y-1.5">
+                  {[
+                    { name: "Orchestrator", endpoint: "/api/orchestrator/status" },
+                    { name: "Circuit Breaker", endpoint: "/api/circuit-breaker/status" },
+                    { name: "Auto-Evolve", endpoint: "/api/auto-evolve/log" },
+                    { name: "MCP Client", endpoint: "/api/mcp/status" },
+                  ].map((mod) => (
+                    <AdvancedModuleStatus key={mod.name} name={mod.name} endpoint={mod.endpoint} />
+                  ))}
+                </div>
+              </section>
+              <div className="mt-4 text-[8px] text-[var(--zai-text-dim)] text-center tracking-[0.4em] uppercase">
                 AgentLocal v1.0
               </div>
             </div>
