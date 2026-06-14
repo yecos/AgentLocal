@@ -540,6 +540,50 @@ async def tools(auth=Depends(verify_token)):
                 "parameters": func.get("parameters", {}),
             }
 
+    # Tool categorization based on name prefixes
+    _TOOL_CATEGORIES = {
+        "ejecutar_": "sistema", "procesos_": "sistema", "matar_": "sistema",
+        "programar_": "sistema", "ejecutar_subagente": "sistema", "listar_subagentes": "sistema",
+        "orquestar": "sistema", "limpiar_contexto": "sistema", "estadisticas": "sistema",
+        "configurar_": "sistema", "listar_api_keys": "sistema", "diagnosticar_error": "sistema",
+        "leer_archivo": "archivos", "escribir_archivo": "archivos", "listar_archivos": "archivos",
+        "listar_glob": "archivos", "buscar_en_archivos": "archivos", "buscar_patron": "archivos",
+        "leer_archivo_comprimido": "archivos", "leer_csv": "datos", "leer_xlsx": "datos",
+        "leer_docx": "archivos", "leer_pptx": "archivos", "leer_pdf": "archivos",
+        "leer_epub": "archivos", "leer_documento": "archivos", "leer_imagen_ocr": "archivos",
+        "buscar_reemplazar": "archivos", "editar_lineas": "archivos", "insertar_en_linea": "archivos",
+        "analizar_proyecto": "proyecto", "clonar_repositorio": "proyecto",
+        "instalar_dependencias": "proyecto", "git_operacion": "proyecto",
+        "consultar_sqlite": "datos", "crear_proyecto_web": "proyecto",
+        "ejecutar_archivo": "sistema", "ejecutar_tests": "sistema",
+        "buscar_web": "web", "buscar_web_cloud": "web", "busqueda_profunda": "web",
+        "leer_web": "web", "resumir_url": "web", "scrapear_web": "web",
+        "automatizar_web": "web", "llamar_api": "web", "abrir_aplicacion": "sistema",
+        "abrir_url": "web", "buscar_youtube": "web", "buscar_imagenes": "web",
+        "escribir_portapapeles": "sistema", "leer_portapapeles": "sistema",
+        "generar_codigo": "generacion", "crear_docx": "generacion", "crear_pdf": "generacion",
+        "crear_pptx": "generacion", "crear_xlsx": "generacion", "crear_grafico": "generacion",
+        "crear_grafico_avanzado": "generacion", "crear_diagrama": "generacion",
+        "generar_mermaid": "generacion", "crear_dashboard": "generacion",
+        "generar_imagen": "multimedia", "generar_imagen_cloud": "multimedia",
+        "editar_imagen": "multimedia", "editar_multiples": "multimedia",
+        "generacion_batch": "generacion",
+        "analizar_imagen": "multimedia", "analizar_imagen_cloud": "multimedia",
+        "analizar_video": "multimedia", "texto_a_voz": "multimedia",
+        "llm_cloud_chat": "multimedia",
+        "parsear_datos": "datos", "limpiar_datos": "datos", "merge_datos": "datos",
+        "tabla_pivote": "datos", "exportar_datos": "datos",
+        "enviar_email": "comunicacion", "leer_email": "comunicacion",
+        "crear_nota": "memoria", "ver_notas": "memoria",
+        "planificar_tarea": "planificacion", "listar_tareas": "planificacion",
+    }
+
+    def _get_category(name: str) -> str:
+        for prefix, cat in _TOOL_CATEGORIES.items():
+            if name.startswith(prefix) or name == prefix:
+                return cat
+        return "general"
+
     tools_list = []
     for name in sorted(TOOL_FUNCTIONS.keys()):
         schema = schema_map.get(name, {})
@@ -548,6 +592,7 @@ async def tools(auth=Depends(verify_token)):
             "description": schema.get("description", ""),
             "parameters": schema.get("parameters", {}),
             "available": True,
+            "category": _get_category(name),
         })
 
     return {

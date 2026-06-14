@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { Toaster, toast } from "sonner";
 import {
   ChevronDown,
   ChevronRight,
@@ -27,6 +28,8 @@ import {
   X,
   AlertTriangle,
   Sparkles,
+  Copy,
+  Check,
 } from "lucide-react";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -114,9 +117,37 @@ function cleanThinking(text: string): string {
     .trim();
 }
 
+// ─── Copy Button for Code Blocks ──────────────────────────────────────────
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard API not available
+    }
+  };
+
+  return (
+    <button
+      onClick={handleCopy}
+      className="absolute top-1 right-1 p-1 text-[#555] hover:text-[#e0e0e0] transition-colors"
+      aria-label={copied ? "Copied" : "Copy code"}
+      title={copied ? "Copied!" : "Copy code"}
+    >
+      {copied ? <Check size={12} /> : <Copy size={12} />}
+    </button>
+  );
+}
+
 // ─── Tool Call Card Component ────────────────────────────────────────────────
 
 function ToolCallCard({ toolCall }: { toolCall: ToolCall }) {
+  const [expanded, setExpanded] = useState(false);
   const statusColors = {
     loading: "text-[#ffd93d] border-[rgba(255,217,61,0.2)]",
     success: "text-[#00ff88] border-[rgba(0,255,136,0.2)]",
@@ -127,6 +158,10 @@ function ToolCallCard({ toolCall }: { toolCall: ToolCall }) {
     success: "✓",
     error: "✗",
   };
+
+  const resultText = toolCall.result || "";
+  const isTruncated = resultText.length > 500;
+  const displayResult = expanded ? resultText : resultText.slice(0, 500);
 
   return (
     <div
@@ -150,10 +185,38 @@ function ToolCallCard({ toolCall }: { toolCall: ToolCall }) {
             )
           </span>
         )}
+        {resultText && (
+          <button
+            onClick={() => {
+              navigator.clipboard.writeText(resultText).then(() => toast.success("Result copied"));
+            }}
+            className="ml-auto text-[#555] hover:text-[#e0e0e0] transition-colors"
+            aria-label="Copy tool result"
+            title="Copy result"
+          >
+            <Copy size={10} />
+          </button>
+        )}
       </div>
-      {toolCall.result && (
-        <div className="mt-1.5 text-[11px] text-[#888] max-h-24 overflow-y-auto whitespace-pre-wrap border-l border-[rgba(255,255,255,0.06)] pl-2">
-          {toolCall.result.slice(0, 500)}
+      {resultText && (
+        <div className="mt-1.5 text-[11px] text-[#888] max-h-64 overflow-y-auto whitespace-pre-wrap border-l border-[rgba(255,255,255,0.06)] pl-2">
+          {displayResult}
+          {isTruncated && !expanded && (
+            <button
+              onClick={() => setExpanded(true)}
+              className="text-[#00d4ff] hover:underline ml-1"
+            >
+              Show all ({resultText.length} chars)
+            </button>
+          )}
+          {expanded && isTruncated && (
+            <button
+              onClick={() => setExpanded(false)}
+              className="text-[#555] hover:underline ml-1"
+            >
+              Collapse
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -364,14 +427,17 @@ function ChatMessage({
                     const match = /language-(\w+)/.exec(className || "");
                     const inline = !match;
                     return !inline ? (
-                      <SyntaxHighlighter
-                        style={oneDark}
-                        language={match[1]}
-                        PreTag="div"
-                        className="!bg-[rgba(255,255,255,0.04)] !border !border-[rgba(255,255,255,0.06)] !rounded-sm !my-2 !text-[12px]"
-                      >
-                        {String(children).replace(/\n$/, "")}
-                      </SyntaxHighlighter>
+                      <div className="relative">
+                        <CopyButton text={String(children).replace(/\n$/, "")} />
+                        <SyntaxHighlighter
+                          style={oneDark}
+                          language={match[1]}
+                          PreTag="div"
+                          className="!bg-[rgba(255,255,255,0.04)] !border !border-[rgba(255,255,255,0.06)] !rounded-sm !my-2 !text-[12px]"
+                        >
+                          {String(children).replace(/\n$/, "")}
+                        </SyntaxHighlighter>
+                      </div>
                     ) : (
                       <code
                         className="px-1 py-0.5 bg-[rgba(255,255,255,0.06)] text-[#00d4ff] text-[13px]"
@@ -644,6 +710,7 @@ export default function AgentLocalInterface() {
         });
       }
     } catch {
+      toast.error("Failed to connect to agent");
       setStatus({
         connected: false,
         agentAvailable: false,
@@ -795,7 +862,7 @@ export default function AgentLocalInterface() {
       (window as any).webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
-      // Web Speech API not available
+      toast.error("Voice input is not supported in this browser. Try Chrome or Edge.");
       return;
     }
 
@@ -1251,6 +1318,18 @@ export default function AgentLocalInterface() {
           "var(--font-geist-mono), 'JetBrains Mono', 'Fira Code', ui-monospace, monospace",
       }}
     >
+      <Toaster
+        position="top-right"
+        toastOptions={{
+          style: {
+            background: "#111",
+            color: "#e0e0e0",
+            border: "1px solid rgba(255,255,255,0.1)",
+            fontFamily: "inherit",
+            fontSize: "12px",
+          },
+        }}
+      />
       {/* ─── Top Bar ─────────────────────────────────────────────────────── */}
       <header className="flex items-center justify-between h-9 px-4 border-b border-[rgba(255,255,255,0.06)] shrink-0 select-none">
         <div className="flex items-center gap-3">
