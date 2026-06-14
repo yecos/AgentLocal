@@ -2546,14 +2546,39 @@ export default function AgentLocalInterface() {
 
   const fileObjectsRef = useRef<File[]>([]);
 
+  const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB per file
+  const MAX_TOTAL_SIZE = 100 * 1024 * 1024; // 100 MB total
+  const DANGEROUS_EXTENSIONS = [".exe", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".msi", ".scr", ".com", ".wsf"];
+
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
 
     const newFiles: UploadedFile[] = [];
     const newFileObjects: File[] = [];
+    let totalSize = uploadedFiles.reduce((sum, f) => sum + f.size, 0);
+    let rejected = 0;
+
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
+      const ext = file.name.toLowerCase().slice(file.name.lastIndexOf("."));
+      // Reject dangerous extensions
+      if (DANGEROUS_EXTENSIONS.includes(ext)) {
+        rejected++;
+        continue;
+      }
+      // Reject oversized files
+      if (file.size > MAX_FILE_SIZE) {
+        toast.error(`${file.name} exceeds 50 MB limit`);
+        rejected++;
+        continue;
+      }
+      // Reject if total would exceed limit
+      if (totalSize + file.size > MAX_TOTAL_SIZE) {
+        toast.error("Total upload size exceeds 100 MB limit");
+        break;
+      }
+      totalSize += file.size;
       newFiles.push({
         name: file.name,
         size: file.size,
@@ -2561,8 +2586,13 @@ export default function AgentLocalInterface() {
       });
       newFileObjects.push(file);
     }
-    setUploadedFiles((prev) => [...prev, ...newFiles]);
-    fileObjectsRef.current = [...fileObjectsRef.current, ...newFileObjects];
+    if (rejected > 0) {
+      toast.warning(`${rejected} file(s) rejected (unsafe type or too large)`);
+    }
+    if (newFiles.length > 0) {
+      setUploadedFiles((prev) => [...prev, ...newFiles]);
+      fileObjectsRef.current = [...fileObjectsRef.current, ...newFileObjects];
+    }
 
     // Reset file input
     if (fileInputRef.current) {
@@ -3424,6 +3454,7 @@ export default function AgentLocalInterface() {
                     ref={fileInputRef}
                     type="file"
                     multiple
+                    accept=".txt,.md,.py,.js,.ts,.tsx,.jsx,.json,.csv,.xml,.yaml,.yml,.html,.css,.pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg,.gif,.svg,.webp,.zip,.tar,.gz,.c,.cpp,.h,.hpp,.java,.rb,.go,.rs,.sh,.bash,.sql,.r,.ipynb"
                     className="hidden"
                     onChange={handleFileSelect}
                   />
