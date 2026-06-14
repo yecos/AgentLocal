@@ -561,14 +561,7 @@ class TestReactAgentPipeline(unittest.TestCase):
         mock_mem.remember.return_value = "id1"
 
         with patch("agent.react.TripleMemory", return_value=mock_mem), \
-             patch("agent.react.learning"), \
-             patch("agent.react.get_orchestrator", return_value=None), \
-             patch("agent.react.get_router", return_value=None), \
-             patch("agent.react.get_intent_parser", return_value=None), \
-             patch("agent.react.SKILLS_ENRICHMENT_AVAILABLE", False), \
-             patch("agent.react.MODEL_ROUTER_AVAILABLE", False), \
-             patch("agent.react.ORCHESTRATOR_AVAILABLE", False), \
-             patch("agent.react.DIRECT_INTENT_AVAILABLE", False):
+             patch("agent.react.learning"):
 
             agent = ReactAgent(memory=mock_mem)
             agent.supports_tool_calling = False  # Force JSON fallback mode
@@ -578,15 +571,21 @@ class TestReactAgentPipeline(unittest.TestCase):
         """ReactAgent.run() with a simple query should return a response."""
         agent = self._create_agent()
 
-        with patch("llm.ollama.generate", return_value="I'm doing well, thanks for asking!"), \
-             patch("llm.ollama.get_embedding", return_value=[0.1] * 384), \
-             patch("llm.ollama.cosine_similarity_batch", return_value={}), \
-             patch("agent.react.enrich_prompt_with_skills", side_effect=lambda p, s="": s), \
-             patch("agent.react.TOOL_FUNCTIONS", {}), \
-             patch("agent.react.TOOL_SCHEMAS", []):
-            response, log = agent.run("Hello, how are you?")
-            self.assertIsNotNone(response)
-            self.assertIsInstance(response, str)
+        import agent.react as react_mod
+        original_funcs = react_mod.TOOL_FUNCTIONS
+        original_schemas = react_mod.TOOL_SCHEMAS
+        react_mod.TOOL_FUNCTIONS = {}
+        react_mod.TOOL_SCHEMAS = []
+        try:
+            with patch("llm.ollama.generate", return_value="I'm doing well, thanks for asking!"), \
+                 patch("llm.ollama.get_embedding", return_value=[0.1] * 384), \
+                 patch("llm.ollama.cosine_similarity_batch", return_value={}):
+                response, log = agent.run("Hello, how are you?")
+                self.assertIsNotNone(response)
+                self.assertIsInstance(response, str)
+        finally:
+            react_mod.TOOL_FUNCTIONS = original_funcs
+            react_mod.TOOL_SCHEMAS = original_schemas
 
     def test_tool_using_query(self):
         """ReactAgent.run() with a tool-using query should invoke the tool."""
@@ -622,14 +621,20 @@ class TestReactAgentPipeline(unittest.TestCase):
                     "final_answer": "Here are the files: file1.txt, file2.txt"
                 })
 
-        with patch("llm.ollama.generate", side_effect=mock_gen_side_effect), \
-             patch("llm.ollama.get_embedding", return_value=[0.1] * 384), \
-             patch("llm.ollama.cosine_similarity_batch", return_value={}), \
-             patch("agent.react.enrich_prompt_with_skills", side_effect=lambda p, s="": s), \
-             patch("agent.react.TOOL_FUNCTIONS", mock_tool_funcs), \
-             patch("agent.react.TOOL_SCHEMAS", mock_tool_schemas):
-            response, log = agent.run("List the files in the current directory")
-            self.assertIsNotNone(response)
+        import agent.react as react_mod
+        original_funcs = react_mod.TOOL_FUNCTIONS
+        original_schemas = react_mod.TOOL_SCHEMAS
+        react_mod.TOOL_FUNCTIONS = mock_tool_funcs
+        react_mod.TOOL_SCHEMAS = mock_tool_schemas
+        try:
+            with patch("llm.ollama.generate", side_effect=mock_gen_side_effect), \
+                 patch("llm.ollama.get_embedding", return_value=[0.1] * 384), \
+                 patch("llm.ollama.cosine_similarity_batch", return_value={}):
+                response, log = agent.run("List the files in the current directory")
+                self.assertIsNotNone(response)
+        finally:
+            react_mod.TOOL_FUNCTIONS = original_funcs
+            react_mod.TOOL_SCHEMAS = original_schemas
 
     def test_iteration_limit_respected(self):
         """ReactAgent should stop at iteration_budget, not loop forever."""
@@ -647,22 +652,27 @@ class TestReactAgentPipeline(unittest.TestCase):
             }
         }]
 
-        with patch("llm.ollama.generate", return_value=json.dumps({
-            "thought": "Need more info",
-            "tool_name": "buscar_web",
-            "tool_params": {"consulta": "test"},
-            "final_answer": ""
-        })), \
-             patch("llm.ollama.get_embedding", return_value=[0.1] * 384), \
-             patch("llm.ollama.cosine_similarity_batch", return_value={}), \
-             patch("agent.react.enrich_prompt_with_skills", side_effect=lambda p, s="": s), \
-             patch("agent.react.TOOL_FUNCTIONS", mock_tool_funcs), \
-             patch("agent.react.TOOL_SCHEMAS", mock_tool_schemas), \
-             patch("agent.react.UNLIMITED_TOOLS", {"buscar_web"}):
-            response, log = agent.run("Complex query that needs tools")
-            # The agent should have stopped (not hung)
-            self.assertIsNotNone(response)
-            self.assertGreater(len(log), 0)
+        import agent.react as react_mod
+        original_funcs = react_mod.TOOL_FUNCTIONS
+        original_schemas = react_mod.TOOL_SCHEMAS
+        react_mod.TOOL_FUNCTIONS = mock_tool_funcs
+        react_mod.TOOL_SCHEMAS = mock_tool_schemas
+        try:
+            with patch("llm.ollama.generate", return_value=json.dumps({
+                "thought": "Need more info",
+                "tool_name": "buscar_web",
+                "tool_params": {"consulta": "test"},
+                "final_answer": ""
+            })), \
+                 patch("llm.ollama.get_embedding", return_value=[0.1] * 384), \
+                 patch("llm.ollama.cosine_similarity_batch", return_value={}):
+                response, log = agent.run("Complex query that needs tools")
+                # The agent should have stopped (not hung)
+                self.assertIsNotNone(response)
+                self.assertGreater(len(log), 0)
+        finally:
+            react_mod.TOOL_FUNCTIONS = original_funcs
+            react_mod.TOOL_SCHEMAS = original_schemas
 
     def test_error_recovery_malformed_json(self):
         """ReactAgent should recover when LLM returns malformed JSON."""
@@ -681,14 +691,20 @@ class TestReactAgentPipeline(unittest.TestCase):
                     "final_answer": "I processed your request"
                 })
 
-        with patch("llm.ollama.generate", side_effect=mock_gen_malformed), \
-             patch("llm.ollama.get_embedding", return_value=[0.1] * 384), \
-             patch("llm.ollama.cosine_similarity_batch", return_value={}), \
-             patch("agent.react.enrich_prompt_with_skills", side_effect=lambda p, s="": s), \
-             patch("agent.react.TOOL_FUNCTIONS", {}), \
-             patch("agent.react.TOOL_SCHEMAS", []):
-            response, log = agent.run("Tell me something")
-            self.assertIsNotNone(response)
+        import agent.react as react_mod
+        original_funcs = react_mod.TOOL_FUNCTIONS
+        original_schemas = react_mod.TOOL_SCHEMAS
+        react_mod.TOOL_FUNCTIONS = {}
+        react_mod.TOOL_SCHEMAS = []
+        try:
+            with patch("llm.ollama.generate", side_effect=mock_gen_malformed), \
+                 patch("llm.ollama.get_embedding", return_value=[0.1] * 384), \
+                 patch("llm.ollama.cosine_similarity_batch", return_value={}):
+                response, log = agent.run("Tell me something")
+                self.assertIsNotNone(response)
+        finally:
+            react_mod.TOOL_FUNCTIONS = original_funcs
+            react_mod.TOOL_SCHEMAS = original_schemas
 
 
 # ============================================================
