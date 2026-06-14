@@ -1,0 +1,1080 @@
+     1→"""
+     2→=============================================================
+     3→AGENTE v16 - Sistema de Sub-Agentes con Herramientas Reales
+     4→=============================================================
+     5→Sub-agentes que ejecutan un mini-ReAct loop con herramientas reales.
+     6→Cada sub-agente puede pensar, seleccionar herramientas, ejecutarlas,
+     7→observar resultados y decidir su proxima accion.
+     8→
+     9→Flujo:
+    10→1. Recibe tarea + contexto + herramientas disponibles
+    11→2. LLM analiza la tarea y decide si necesita herramientas
+    12→3. Si necesita herramienta: la ejecuta, observa resultado, repite
+    13→4. Si no necesita herramienta: genera respuesta final
+    14→5. Resultado se guarda en contexto compartido
+    15→
+    16→Mejoras v16 vs v15:
+    17→- Sub-agentes ejecutan herramientas REALES (no solo texto)
+    18→- Mini-ReAct loop con max iteraciones configurable
+    19→- Tool schemas filtrados por tipo de sub-agente
+    20→- Observacion de resultados de herramientas
+    21→- Rate limiting por sub-agente
+    22→- Logging detallado de cada iteracion
+    23→=============================================================
+    24→"""
+    25→
+    26→import os
+    27→import re
+    28→import json
+    29→import time
+    30→import logging
+    31→import threading
+    32→import concurrent.futures
+    33→from datetime import datetime
+    34→from config import LEARN_DIR, MAX_TOOL_OUTPUT, logger
+    35→
+    36→
+    37→# ============================================================
+    38→# CONFIGURACION DE SUB-AGENTES
+    39→# ============================================================
+    40→
+    41→SUBAGENT_TYPES = {
+    42→    "researcher": {
+    43→        "description": "Busca y recopila informacion de multiples fuentes",
+    44→        "system_prompt": (
+    45→            "Eres un agente investigador especializado. Tu trabajo es buscar, "
+    46→            "recopilar y sintetizar informacion de multiples fuentes. "
+    47→            "Se preciso, cita fuentes, y organiza la informacion de forma clara. "
+    48→            "Cuando necesites informacion, USA las herramientas de busqueda. "
+    49→            "Responde en espanol."
+    50→        ),
+    51→        "tools": ["buscar_web", "resumir_url", "scrapear_web", "leer_documento",
+    52→                  "leer_archivo", "busqueda_profunda"],
+    53→        "max_iterations": 4,
+    54→    },
+    55→    "coder": {
+    56→        "description": "Genera, analiza y modifica codigo",
+    57→        "system_prompt": (
+    58→            "Eres un agente programador especializado. Tu trabajo es generar, "
+    59→            "analizar y modificar codigo. Escribe codigo limpio, documentado y funcional. "
+    60→            "Cuando necesites leer archivos, ejecutar codigo o crear proyectos, "
+    61→            "USA las herramientas disponibles. Responde en espanol."
+    62→        ),
+    63→        "tools": ["generar_codigo", "ejecutar_python", "ejecutar_bash",
+    64→                  "ejecutar_nodo", "leer_archivo", "escribir_archivo",
+    65→                  "listar_archivos", "buscar_en_archivos", "buscar_patron",
+    66→                  "editar_multiples"],
+    67→        "max_iterations": 4,
+    68→    },
+    69→    "analyst": {
+    70→        "description": "Analiza datos, calcula estadisticas y genera insights",
+    71→        "system_prompt": (
+    72→            "Eres un agente analista de datos especializado. Tu trabajo es analizar datos, "
+    73→            "calcular estadisticas, identificar patrones y generar insights accionables. "
+    74→            "Presenta resultados de forma clara con numeros y visualizaciones. "
+    75→            "USA las herramientas de datos y visualizacion disponibles. "
+    76→            "Responde en espanol."
+    77→        ),
+    78→        "tools": ["estadisticas", "transformar_datos", "crear_grafico_avanzado",
+    79→                  "limpiar_datos", "tabla_pivote", "merge_datos", "parsear_datos",
+    80→                  "exportar_datos", "ejecutar_python", "leer_csv", "leer_xlsx"],
+    81→        "max_iterations": 4,
+    82→    },
+    83→    "writer": {
+    84→        "description": "Redacta y crea contenido textual y documentos",
+    85→        "system_prompt": (
+    86→            "Eres un agente escritor especializado. Tu trabajo es redactar contenido "
+    87→            "de alta calidad: articulos, resumenes, documentos, correos, etc. "
+    88→            "Escribe de forma clara, profesional y bien estructurada. "
+    89→            "Si necesitas crear documentos, USA las herramientas de creacion. "
+    90→            "Responde en espanol."
+    91→        ),
+    92→        "tools": ["crear_docx", "crear_pdf", "crear_xlsx", "crear_pptx",
+    93→                  "escribir_archivo", "leer_archivo", "buscar_web",
+    94→                  "crear_grafico_avanzado"],
+    95→        "max_iterations": 3,
+    96→    },
+    97→    "reviewer": {
+    98→        "description": "Revisa y critica resultados de otros agentes",
+    99→        "system_prompt": (
+   100→            "Eres un agente revisor especializado. Tu trabajo es revisar el trabajo "
+   101→            "de otros agentes, identificar errores, inconsistencias o mejoras posibles. "
+   102→            "Se constructivo y especifico en tus criticas. "
+   103→            "USA las herramientas para verificar hechos y leer archivos. "
+   104→            "Responde en espanol."
+   105→        ),
+   106→        "tools": ["leer_archivo", "buscar_web", "buscar_en_archivos",
+   107→                  "buscar_patron", "listar_archivos", "resumir_url"],
+   108→        "max_iterations": 3,
+   109→    },
+   110→    "designer": {
+   111→        "description": "Crea visualizaciones, diagramas y contenido grafico",
+   112→        "system_prompt": (
+   113→            "Eres un agente disenador especializado. Tu trabajo es crear "
+   114→            "visualizaciones de datos, diagramas, graficos y contenido visual. "
+   115→            "USA las herramientas de visualizacion y diagramas disponibles. "
+   116→            "Responde en espanol."
+   117→        ),
+   118→        "tools": ["crear_grafico_avanzado", "crear_dashboard", "crear_diagrama",
+   119→                  "generar_mermaid", "editar_imagen", "generar_imagen"],
+   120→        "max_iterations": 3,
+   121→    },
+   122→    "webdev": {
+   123→        "description": "Crea proyectos web y aplicaciones",
+   124→        "system_prompt": (
+   125→            "Eres un agente desarrollador web especializado. Tu trabajo es crear "
+   126→            "proyectos web completos: sitios, aplicaciones, APIs. "
+   127→            "USA las herramientas de desarrollo web y codigo disponibles. "
+   128→            "Responde en espanol."
+   129→        ),
+   130→        "tools": ["crear_proyecto_web", "generar_codigo", "escribir_archivo",
+   131→                  "leer_archivo", "editar_multiples", "generacion_batch",
+   132→                  "ejecutar_bash", "ejecutar_nodo", "listar_archivos"],
+   133→        "max_iterations": 4,
+   134→    },
+   135→    "general": {
+   136→        "description": "Agente general para tareas variadas",
+   137→        "system_prompt": (
+   138→            "Eres un agente general versatil. Puedes realizar cualquier tipo de tarea "
+   139→            "usando las herramientas disponibles. Se eficiente y preciso. "
+   140→            "USA las herramientas cuando las necesites. "
+   141→            "Responde en espanol."
+   142→        ),
+   143→        "tools": [],  # Todas las herramientas disponibles
+   144→        "max_iterations": 4,
+   145→    },
+   146→}
+   147→
+   148→
+   149→# ============================================================
+   150→# CONTEXTO COMPARTIDO
+   151→# ============================================================
+   152→
+   153→class SharedContext:
+   154→    """Contexto compartido entre sub-agentes para comunicacion."""
+   155→
+   156→    def __init__(self):
+   157→        self._data = {}
+   158→        self._lock = threading.Lock()
+   159→
+   160→    def set(self, key: str, value):
+   161→        with self._lock:
+   162→            self._data[key] = value
+   163→
+   164→    def get(self, key: str, default=None):
+   165→        with self._lock:
+   166→            return self._data.get(key, default)
+   167→
+   168→    def update(self, data: dict):
+   169→        with self._lock:
+   170→            self._data.update(data)
+   171→
+   172→    def snapshot(self) -> dict:
+   173→        with self._lock:
+   174→            return dict(self._data)
+   175→
+   176→    def clear(self):
+   177→        with self._lock:
+   178→            self._data.clear()
+   179→
+   180→
+   181→# Contexto global compartido
+   182→_shared_context = SharedContext()
+   183→
+   184→
+   185→# ============================================================
+   186→# MINI REACT LOOP PARA SUB-AGENTES
+   187→# ============================================================
+   188→
+   189→class SubAgentReAct:
+   190→    """Motor ReAct mini para sub-agentes con ejecucion real de herramientas."""
+   191→
+   192→    def __init__(self, tipo: str, tarea: str, contexto: str = "",
+   193→                 timeout: int = 120, max_iter: int = 4):
+   194→        self.tipo = tipo
+   195→        self.tarea = tarea
+   196→        self.contexto = contexto
+   197→        self.timeout = timeout
+   198→        self.max_iter = max_iter
+   199→        self.config = SUBAGENT_TYPES.get(tipo, SUBAGENT_TYPES["general"])
+   200→        self.tool_names = self.config.get("tools", [])
+   201→        self.log = []
+   202→        self.tool_calls = 0
+   203→        self.max_tool_calls = 8  # Limite de llamadas a herramientas por sub-agente
+   204→
+   205→    def run(self) -> str:
+   206→        """Ejecuta el mini-ReAct loop del sub-agente."""
+   207→        logger.info(f"Sub-agente [{self.tipo}] iniciado: {self.tarea[:80]}...")
+   208→
+   209→        start_time = time.time()
+   210→
+   211→        # Obtener herramientas y schemas disponibles
+   212→        tools, schemas = self._get_available_tools()
+   213→
+   214→        if not tools:
+   215→            # Sin herramientas: ejecutar como chat simple
+   216→            result = self._run_simple_chat()
+   217→        else:
+   218→            # Con herramientas: ejecutar ReAct loop
+   219→            result = self._run_react_loop(tools, schemas)
+   220→
+   221→        elapsed = time.time() - start_time
+   222→
+   223→        # Guardar en contexto compartido
+   224→        result_key = f"subagent_{self.tipo}_{int(start_time)}"
+   225→        _shared_context.set(result_key, {
+   226→            "type": self.tipo,
+   227→            "task": self.tarea,
+   228→            "result": result[:2000],
+   229→            "tool_calls": self.tool_calls,
+   230→            "elapsed": elapsed,
+   231→            "timestamp": datetime.now().isoformat(),
+   232→        })
+   233→
+   234→        logger.info(
+   235→            f"Sub-agente [{self.tipo}] completado en {elapsed:.1f}s "
+   236→            f"({self.tool_calls} tool calls)"
+   237→        )
+   238→
+   239→        return result
+   240→
+   241→    def _get_available_tools(self):
+   242→        """Obtiene las herramientas y schemas disponibles para este sub-agente."""
+   243→        try:
+   244→            from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS
+   245→        except ImportError:
+   246→            return {}, []
+   247→
+   248→        # Si no hay tool_names definidos, usar todas
+   249→        if not self.tool_names:
+   250→            return dict(TOOL_FUNCTIONS), list(TOOL_SCHEMAS)
+   251→
+   252→        # Filtrar solo las herramientas de este sub-agente
+   253→        tools = {}
+   254→        schemas = []
+   255→        schema_by_name = {
+   256→            s.get("function", {}).get("name"): s for s in TOOL_SCHEMAS
+   257→        }
+   258→
+   259→        for name in self.tool_names:
+   260→            if name in TOOL_FUNCTIONS:
+   261→                tools[name] = TOOL_FUNCTIONS[name]
+   262→                if name in schema_by_name:
+   263→                    schemas.append(schema_by_name[name])
+   264→
+   265→        return tools, schemas
+   266→
+   267→    def _run_simple_chat(self) -> str:
+   268→        """Ejecuta el sub-agente como chat simple (sin herramientas)."""
+   269→        system_prompt = self.config["system_prompt"]
+   270→
+   271→        user_prompt = f"TAREA: {self.tarea}\n"
+   272→        if self.contexto:
+   273→            user_prompt += f"\nCONTEXTO:\n{self.contexto[:2000]}\n"
+   274→        user_prompt += "\nRealiza la tarea de forma completa y precisa."
+   275→
+   276→        return self._call_llm(system_prompt, user_prompt)
+   277→
+   278→    def _run_react_loop(self, tools: dict, schemas: list) -> str:
+   279→        """Ejecuta el mini-ReAct loop con herramientas reales."""
+   280→        system_prompt = self._build_system_prompt(tools)
+   281→
+   282→        # Mensajes de la conversacion
+   283→        messages = [
+   284→            {"role": "system", "content": system_prompt},
+   285→        ]
+   286→
+   287→        # Primer mensaje del usuario
+   288→        user_msg = f"TAREA: {self.tarea}\n"
+   289→        if self.contexto:
+   290→            user_msg += f"\nCONTEXTO PREVIO:\n{self.contexto[:2000]}\n"
+   291→        user_msg += "\nRealiza la tarea usando las herramientas disponibles cuando sea necesario."
+   292→        messages.append({"role": "user", "content": user_msg})
+   293→
+   294→        # Intentar con function calling nativo primero
+   295→        result = self._react_with_native_tools(messages, tools, schemas)
+   296→        if result is not None:
+   297→            return result
+   298→
+   299→        # Fallback: ReAct con JSON manual
+   300→        return self._react_with_json(messages, tools)
+   301→
+   302→    def _react_with_native_tools(self, messages: list, tools: dict, schemas: list) -> str | None:
+   303→        """ReAct loop usando function calling nativo de Ollama."""
+   304→        try:
+   305→            from llm import ollama
+   306→        except ImportError:
+   307→            return None
+   308→
+   309→        for iteration in range(self.max_iter):
+   310→            if self.tool_calls >= self.max_tool_calls:
+   311→                logger.debug(f"Sub-agente [{self.tipo}] max tool calls alcanzado")
+   312→                break
+   313→
+   314→            try:
+   315→                # Llamar al LLM con herramientas
+   316→                if hasattr(ollama, '_try_chat_http'):
+   317→                    response = self._call_llm_with_tools_http(messages, schemas)
+   318→                elif hasattr(ollama, 'chat'):
+   319→                    response = ollama.chat(
+   320→                        messages=messages,
+   321→                        tools=schemas if schemas else None,
+   322→                        stream=False,
+   323→                    )
+   324→                else:
+   325→                    return None
+   326→
+   327→                if not response:
+   328→                    break
+   329→
+   330→                # Extraer respuesta y tool calls
+   331→                msg = response if isinstance(response, dict) else {}
+   332→                content = msg.get("message", {}).get("content", "")
+   333→                tool_calls = msg.get("message", {}).get("tool_calls", [])
+   334→
+   335→                if tool_calls:
+   336→                    # Ejecutar cada tool call
+   337→                    messages.append(msg.get("message", {"role": "assistant"}))
+   338→
+   339→                    for tc in tool_calls:
+   340→                        func = tc.get("function", {})
+   341→                        tool_name = func.get("name", "")
+   342→                        tool_args = func.get("arguments", {})
+   343→
+   344→                        if tool_name in tools:
+   345→                            # Ejecutar la herramienta
+   346→                            observation = self._execute_tool(tools[tool_name], tool_name, tool_args)
+   347→                            messages.append({
+   348→                                "role": "tool",
+   349→                                "name": tool_name,
+   350→                                "content": observation[:MAX_TOOL_OUTPUT],
+   351→                            })
+   352→                        else:
+   353→                            messages.append({
+   354→                                "role": "tool",
+   355→                                "name": tool_name,
+   356→                                "content": f"ERROR: Herramienta '{tool_name}' no disponible.",
+   357→                            })
+   358→
+   359→                elif content:
+   360→                    # Sin tool calls = respuesta final
+   361→                    return content.strip()
+   362→
+   363→            except Exception as e:
+   364→                logger.debug(f"Sub-agente [{self.tipo}] error en iteracion {iteration}: {e}")
+   365→                break
+   366→
+   367→        # Si llegamos aqui, pedir respuesta final
+   368→        messages.append({
+   369→            "role": "user",
+   370→            "content": "Por favor, proporciona tu respuesta final basada en lo que encontraste."
+   371→        })
+   372→        return self._call_llm_messages(messages)
+   373→
+   374→    def _react_with_json(self, messages: list, tools: dict) -> str:
+   375→        """ReAct loop usando JSON manual (fallback)."""
+   376→        tool_list = ", ".join(tools.keys())
+   377→
+   378→        # Agregar instrucciones de formato JSON al system prompt
+   379→        json_instructions = (
+   380→            f"\n\nHERRAMIENTAS DISPONIBLES: {tool_list}\n\n"
+   381→            f"Si necesitas usar una herramienta, responde con JSON:\n"
+   382→            f'{{"pensamiento": "tu razonamiento", '
+   383→            f'"herramienta": "nombre_herramienta", '
+   384→            f'"parametros": {{...}}, '
+   385→            f'"respuesta": ""}}\n\n'
+   386→            f"Si NO necesitas herramientas, responde con JSON:\n"
+   387→            f'{{"pensamiento": "tu razonamiento", '
+   388→            f'"herramienta": "", '
+   389→            f'"parametros": {{}}, '
+   390→            f'"respuesta": "tu respuesta final"}}\n\n'
+   391→            f"IMPORTANTE: Responde SIEMPRE en formato JSON valido."
+   392→        )
+   393→
+   394→        # Reconstruir mensajes con instrucciones JSON
+   395→        json_messages = [{"role": "system", "content": messages[0]["content"] + json_instructions}]
+   396→        if len(messages) > 1:
+   397→            user_msg = messages[1]["content"]
+   398→            json_messages.append({"role": "user", "content": user_msg})
+   399→
+   400→        for iteration in range(self.max_iter):
+   401→            if self.tool_calls >= self.max_tool_calls:
+   402→                break
+   403→
+   404→            try:
+   405→                response_text = self._call_llm_messages(json_messages)
+   406→                if not response_text:
+   407→                    break
+   408→
+   409→                # Intentar parsear como JSON
+   410→                parsed = self._parse_json_response(response_text)
+   411→
+   412→                if not parsed:
+   413→                    # No es JSON, tratar como respuesta final
+   414→                    return response_text.strip()
+   415→
+   416→                tool_name = parsed.get("herramienta", parsed.get("tool", ""))
+   417→                tool_args = parsed.get("parametros", parsed.get("params", {}))
+   418→                final_answer = parsed.get("respuesta", parsed.get("answer", ""))
+   419→
+   420→                if final_answer and not tool_name:
+   421→                    # Respuesta final sin herramientas
+   422→                    return final_answer.strip()
+   423→
+   424→                if tool_name and tool_name in tools:
+   425→                    # Ejecutar herramienta
+   426→                    observation = self._execute_tool(tools[tool_name], tool_name, tool_args)
+   427→
+   428→                    # Agregar al contexto
+   429→                    json_messages.append({
+   430→                        "role": "assistant",
+   431→                        "content": response_text[:500]
+   432→                    })
+   433→                    json_messages.append({
+   434→                        "role": "user",
+   435→                        "content": (
+   436→                            f"Resultado de {tool_name}: {observation[:1500]}\n\n"
+   437→                            f"Continua con la tarea o proporciona tu respuesta final."
+   438→                        )
+   439→                    })
+   440→                else:
+   441→                    # Herramienta no reconocida o respuesta final
+   442→                    if final_answer:
+   443→                        return final_answer.strip()
+   444→                    return response_text.strip()
+   445→
+   446→            except Exception as e:
+   447→                logger.debug(f"Sub-agente [{self.tipo}] JSON react error: {e}")
+   448→                break
+   449→
+   450→        # Pedir respuesta final
+   451→        json_messages.append({
+   452→            "role": "user",
+   453→            "content": "Proporciona tu respuesta final."
+   454→        })
+   455→        return self._call_llm_messages(json_messages)
+   456→
+   457→    def _execute_tool(self, func: callable, name: str, args: dict) -> str:
+   458→        """Ejecuta una herramienta y retorna el resultado."""
+   459→        self.tool_calls += 1
+   460→        logger.info(f"Sub-agente [{self.tipo}] ejecutando: {name}({list(args.keys())})")
+   461→
+   462→        try:
+   463→            # Sanitizar argumentos
+   464→            clean_args = {}
+   465→            for k, v in args.items():
+   466→                if isinstance(v, (str, int, float, bool)):
+   467→                    clean_args[k] = v
+   468→                elif isinstance(v, (list, dict)):
+   469→                    clean_args[k] = json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) and not isinstance(v, str) else str(v)
+   470→                else:
+   471→                    clean_args[k] = str(v)
+   472→
+   473→            result = func(**clean_args)
+   474→
+   475→            if not isinstance(result, str):
+   476→                result = str(result)
+   477→
+   478→            # Truncar si es muy largo
+   479→            if len(result) > MAX_TOOL_OUTPUT:
+   480→                result = result[:MAX_TOOL_OUTPUT] + "\n... [truncado]"
+   481→
+   482→            self.log.append({
+   483→                "iteration": self.tool_calls,
+   484→                "tool": name,
+   485→                "args": {k: str(v)[:100] for k, v in clean_args.items()},
+   486→                "result_length": len(result),
+   487→            })
+   488→
+   489→            return result
+   490→
+   491→        except TypeError as e:
+   492→            # Intentar con argumentos como strings simples
+   493→            try:
+   494→                # Si la funcion espera argumentos posicionales
+   495→                sig = _get_func_signature(func)
+   496→                if sig:
+   497→                    positional_args = []
+   498→                    for param_name in sig:
+   499→                        if param_name in args:
+   500→                            positional_args.append(str(args[param_name]))
+   501→                    if positional_args:
+   502→                        result = func(*positional_args)
+   503→                        if not isinstance(result, str):
+   504→                            result = str(result)
+   505→                        return result[:MAX_TOOL_OUTPUT]
+   506→            except Exception:
+   507→                pass
+   508→
+   509→            error_msg = f"Error ejecutando {name}: {e}"
+   510→            logger.debug(error_msg)
+   511→            return error_msg
+   512→
+   513→        except Exception as e:
+   514→            error_msg = f"Error ejecutando {name}: {e}"
+   515→            logger.error(f"Sub-agente [{self.tipo}] tool error: {e}")
+   516→            return error_msg
+   517→
+   518→    def _build_system_prompt(self, tools: dict) -> str:
+   519→        """Construye el system prompt del sub-agente con lista de herramientas."""
+   520→        base_prompt = self.config["system_prompt"]
+   521→
+   522→        tool_descriptions = []
+   523→        for name, func in tools.items():
+   524→            doc = func.__doc__ or ""
+   525→            first_line = doc.strip().split("\n")[0].strip() if doc else ""
+   526→            tool_descriptions.append(f"  - {name}: {first_line}")
+   527→
+   528→        tools_section = (
+   529→            f"\n\nHERRAMIENTAS DISPONIBLES ({len(tools)}):\n"
+   530→            + "\n".join(tool_descriptions)
+   531→            + "\n\nUsa las herramientas cuando las necesites para completar la tarea. "
+   532→            "No inventes informacion - busca o lee archivos si necesitas datos reales."
+   533→        )
+   534→
+   535→        return base_prompt + tools_section
+   536→
+   537→    def _call_llm(self, system_prompt: str, user_prompt: str) -> str:
+   538→        """Llamada simple al LLM."""
+   539→        try:
+   540→            from llm import ollama
+   541→
+   542→            messages = [
+   543→                {"role": "system", "content": system_prompt},
+   544→                {"role": "user", "content": user_prompt},
+   545→            ]
+   546→
+   547→            return self._call_llm_messages(messages)
+   548→
+   549→        except Exception as e:
+   550→            return f"ERROR: No se pudo ejecutar el sub-agente: {e}"
+   551→
+   552→    def _call_llm_messages(self, messages: list) -> str:
+   553→        """Llamada al LLM con mensajes completos."""
+   554→        try:
+   555→            from llm import ollama
+   556→
+   557→            if hasattr(ollama, 'chat'):
+   558→                response = ollama.chat(messages=messages, stream=False)
+   559→                if isinstance(response, dict):
+   560→                    return response.get("message", {}).get("content", str(response))
+   561→                elif isinstance(response, str):
+   562→                    return response
+   563→                return str(response)
+   564→            elif hasattr(ollama, 'generate'):
+   565→                # Concatenar mensajes en un solo prompt
+   566→                parts = []
+   567→                for m in messages:
+   568→                    role = m.get("role", "user")
+   569→                    content = m.get("content", "")
+   570→                    if role == "system":
+   571→                        parts.append(f"SISTEMA: {content}")
+   572→                    elif role == "user":
+   573→                        parts.append(f"USUARIO: {content}")
+   574→                    elif role == "assistant":
+   575→                        parts.append(f"ASISTENTE: {content}")
+   576→                    elif role == "tool":
+   577→                        parts.append(f"RESULTADO HERRAMIENTA: {content}")
+   578→
+   579→                return ollama.generate("\n\n".join(parts))
+   580→
+   581→            return "ERROR: No hay metodo de comunicacion con el LLM."
+   582→
+   583→        except ImportError:
+   584→            return self._call_llm_cli(messages)
+   585→        except Exception as e:
+   586→            return f"ERROR LLM: {e}"
+   587→
+   588→    def _call_llm_with_tools_http(self, messages: list, schemas: list) -> dict | None:
+   589→        """Llamada al LLM via HTTP con tools (para function calling nativo)."""
+   590→        try:
+   591→            from llm import ollama
+   592→            import httpx
+   593→
+   594→            # Detectar modelo
+   595→            model = None
+   596→            if hasattr(ollama, '_chat_model'):
+   597→                model = ollama._chat_model
+   598→            elif hasattr(ollama, 'chat_model'):
+   599→                model = ollama.chat_model
+   600→            if not model:
+   601→                return None
+   602→
+   603→            # Construir payload
+   604→            payload = {
+   605→                "model": model,
+   606→                "messages": messages,
+   607→                "tools": schemas,
+   608→                "stream": False,
+   609→            }
+   610→
+   611→            # Encontrar host
+   612→            host = "http://localhost:11434"
+   613→            if hasattr(ollama, '_host'):
+   614→                host = ollama._host
+   615→            elif hasattr(ollama, 'host'):
+   616→                host = ollama.host
+   617→
+   618→            response = httpx.post(
+   619→                f"{host}/api/chat",
+   620→                json=payload,
+   621→                timeout=self.timeout,
+   622→            )
+   623→
+   624→            if response.status_code == 200:
+   625→                return response.json()
+   626→
+   627→        except Exception as e:
+   628→            logger.debug(f"HTTP tool calling fallo: {e}")
+   629→
+   630→        return None
+   631→
+   632→    def _call_llm_cli(self, messages: list) -> str:
+   633→        """Fallback: LLM via CLI de ollama."""
+   634→        import subprocess
+   635→
+   636→        try:
+   637→            # Detectar modelo
+   638→            result = subprocess.run(
+   639→                ['ollama', 'list'], capture_output=True, text=True, timeout=5
+   640→            )
+   641→            models = result.stdout.strip().split('\n')
+   642→            chat_model = None
+   643→            for line in models:
+   644→                model_name = line.split()[0] if line.strip() else ""
+   645→                for pattern in ["qwen", "llama", "mistral", "gemma"]:
+   646→                    if pattern in model_name.lower():
+   647→                        chat_model = model_name
+   648→                        break
+   649→                if chat_model:
+   650→                    break
+   651→
+   652→            if not chat_model:
+   653→                return "ERROR: No se encontro modelo de chat."
+   654→
+   655→            # Concatenar mensajes
+   656→            full_prompt = "\n\n".join(
+   657→                f"{m.get('role', 'user').upper()}: {m.get('content', '')}"
+   658→                for m in messages
+   659→            )
+   660→
+   661→            result = subprocess.run(
+   662→                ['ollama', 'run', chat_model, full_prompt],
+   663→                capture_output=True, text=True, timeout=self.timeout
+   664→            )
+   665→
+   666→            if result.returncode == 0:
+   667→                return result.stdout.strip()
+   668→            return f"ERROR: {result.stderr[:500]}"
+   669→
+   670→        except FileNotFoundError:
+   671→            return "ERROR: Ollama no instalado."
+   672→        except subprocess.TimeoutExpired:
+   673→            return f"ERROR: Timeout de {self.timeout}s."
+   674→        except Exception as e:
+   675→            return f"ERROR: {e}"
+   676→
+   677→    def _parse_json_response(self, text: str) -> dict | None:
+   678→        """Intenta parsear una respuesta JSON del LLM."""
+   679→        text = text.strip()
+   680→
+   681→        # Intentar directo
+   682→        try:
+   683→            result = json.loads(text)
+   684→            if isinstance(result, dict):
+   685→                return result
+   686→        except json.JSONDecodeError:
+   687→            pass
+   688→
+   689→        # Buscar JSON en la respuesta
+   690→        patterns = [
+   691→            r'```json\s*(.*?)\s*```',
+   692→            r'```\s*(.*?)\s*```',
+   693→            r'\{[^{}]*"herramienta"[^{}]*\}',
+   694→            r'\{[^{}]*"tool"[^{}]*\}',
+   695→            r'\{.*\}',
+   696→        ]
+   697→
+   698→        for pattern in patterns:
+   699→            match = re.search(pattern, text, re.DOTALL)
+   700→            if match:
+   701→                try:
+   702→                    json_str = match.group(1) if '```' in pattern else match.group()
+   703→                    result = json.loads(json_str)
+   704→                    if isinstance(result, dict):
+   705→                        return result
+   706→                except json.JSONDecodeError:
+   707→                    continue
+   708→
+   709→        return None
+   710→
+   711→
+   712→# ============================================================
+   713→# FUNCIONES AUXILIARES
+   714→# ============================================================
+   715→
+   716→def _get_func_signature(func):
+   717→    """Obtiene los nombres de parametros de una funcion."""
+   718→    import inspect
+   719→    try:
+   720→        sig = inspect.signature(func)
+   721→        return [
+   722→            name for name, param in sig.parameters.items()
+   723→            if name not in ('self', 'cls')
+   724→        ]
+   725→    except (ValueError, TypeError):
+   726→        return None
+   727→
+   728→
+   729→# ============================================================
+   730→# API PUBLICA
+   731→# ============================================================
+   732→
+   733→def ejecutar_subagente(
+   734→    tipo: str,
+   735→    tarea: str,
+   736→    contexto: str = "",
+   737→    timeout: int = 120,
+   738→    max_iteraciones: int = None,
+   739→) -> str:
+   740→    """Ejecuta un sub-agente especializado con herramientas reales.
+   741→
+   742→    El sub-agente ejecuta un mini-ReAct loop: piensa, selecciona
+   743→    herramientas, las ejecuta, observa resultados y decide su
+   744→    proxima accion hasta completar la tarea.
+   745→
+   746→    Args:
+   747→        tipo: Tipo de sub-agente: researcher, coder, analyst, writer, reviewer, designer, webdev, general
+   748→        tarea: Descripcion de la tarea a realizar
+   749→        contexto: Contexto adicional para el sub-agente (informacion previa)
+   750→        timeout: Timeout en segundos (default 120)
+   751→        max_iteraciones: Maximo de iteraciones ReAct (default: segun tipo)
+   752→    """
+   753→    tipo = tipo.lower().strip()
+   754→    if tipo not in SUBAGENT_TYPES:
+   755→        return (f"ERROR: Tipo de sub-agente '{tipo}' no reconocido.\n"
+   756→                f"Tipos disponibles: {', '.join(SUBAGENT_TYPES.keys())}")
+   757→
+   758→    config = SUBAGENT_TYPES[tipo]
+   759→    max_iter = max_iteraciones or config["max_iterations"]
+   760→
+   761→    agent = SubAgentReAct(tipo, tarea, contexto, timeout, max_iter)
+   762→    return agent.run()
+   763→
+   764→
+   765→def ejecutar_paralelo(tareas: str, agregar_resultados: bool = True) -> str:
+   766→    """Ejecuta multiples sub-agentes en paralelo con herramientas reales.
+   767→
+   768→    Cada sub-agente ejecuta su propio mini-ReAct loop de forma
+   769→    independiente y los resultados se sintetizan al final.
+   770→
+   771→    Args:
+   772→        tareas: Lista JSON de tareas: [{"tipo": "researcher", "tarea": "..."}, ...]
+   773→        agregar_resultados: Si True, agrega y sintetiza todos los resultados
+   774→    """
+   775→    try:
+   776→        task_list = json.loads(tareas)
+   777→    except json.JSONDecodeError:
+   778→        return "ERROR: Formato de tareas invalido. Usa JSON: [{tipo, tarea}, ...]"
+   779→
+   780→    if not task_list:
+   781→        return "ERROR: Lista de tareas vacia."
+   782→
+   783→    if len(task_list) > 8:
+   784→        return "ERROR: Maximo 8 sub-agentes en paralelo."
+   785→
+   786→    # Validar tareas
+   787→    for t in task_list:
+   788→        tipo = t.get("tipo", "general")
+   789→        if tipo not in SUBAGENT_TYPES:
+   790→            return f"ERROR: Tipo '{tipo}' no reconocido en tarea: {t.get('tarea', '?')}"
+   791→
+   792→    logger.info(f"Ejecutando {len(task_list)} sub-agentes en paralelo...")
+   793→
+   794→    results = {}
+   795→    errors = {}
+   796→
+   797→    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(task_list), 4)) as executor:
+   798→        future_to_task = {}
+   799→
+   800→        for i, task in enumerate(task_list):
+   801→            tipo = task.get("tipo", "general")
+   802→            tarea = task.get("tarea", task.get("task", ""))
+   803→            contexto = task.get("contexto", task.get("context", ""))
+   804→            timeout = task.get("timeout", 120)
+   805→
+   806→            future = executor.submit(ejecutar_subagente, tipo, tarea, contexto, timeout)
+   807→            future_to_task[future] = (i, tipo, tarea)
+   808→
+   809→        for future in concurrent.futures.as_completed(future_to_task):
+   810→            i, tipo, tarea = future_to_task[future]
+   811→            try:
+   812→                result = future.result(timeout=180)
+   813→                results[i] = {
+   814→                    "tipo": tipo,
+   815→                    "tarea": tarea[:80],
+   816→                    "resultado": result,
+   817→                }
+   818→            except Exception as e:
+   819→                errors[i] = {
+   820→                    "tipo": tipo,
+   821→                    "tarea": tarea[:80],
+   822→                    "error": str(e),
+   823→                }
+   824→
+   825→    # Construir respuesta
+   826→    parts = [f"Sub-agentes ejecutados: {len(results)} exitosos, {len(errors)} errores\n"]
+   827→
+   828→    for i in sorted(results.keys()):
+   829→        r = results[i]
+   830→        parts.append(f"\n--- Sub-agente [{r['tipo']}] ---")
+   831→        parts.append(f"Tarea: {r['tarea']}")
+   832→        parts.append(f"Resultado:\n{r['resultado']}")
+   833→
+   834→    if errors:
+   835→        parts.append(f"\n--- ERRORES ---")
+   836→        for i in sorted(errors.keys()):
+   837→            e = errors[i]
+   838→            parts.append(f"[{e['tipo']}] {e['tarea']}: {e['error']}")
+   839→
+   840→    # Sintesis final si se solicita
+   841→    if agregar_resultados and len(results) > 1:
+   842→        synthesis = _synthesize_results(results)
+   843→        if synthesis:
+   844→            parts.append(f"\n--- SINTESIS ---")
+   845→            parts.append(synthesis)
+   846→
+   847→    return "\n".join(parts)
+   848→
+   849→
+   850→def _synthesize_results(results: dict) -> str:
+   851→    """Sintetiza los resultados de multiples sub-agentes."""
+   852→    try:
+   853→        from llm import ollama
+   854→
+   855→        summaries = []
+   856→        for i in sorted(results.keys()):
+   857→            r = results[i]
+   858→            summaries.append(f"[{r['tipo']}] {r['tarea']}: {r['resultado'][:500]}")
+   859→
+   860→        prompt = (
+   861→            "Sintetiza los siguientes resultados de sub-agentes en un resumen "
+   862→            "coherente y unificado. Destaca los hallazgos clave, contradicciones, "
+   863→            "y conclusiones:\n\n" + "\n\n".join(summaries)
+   864→        )
+   865→
+   866→        if hasattr(ollama, 'generate'):
+   867→            return ollama.generate(prompt)
+   868→        elif hasattr(ollama, 'chat'):
+   869→            response = ollama.chat(
+   870→                messages=[{"role": "user", "content": prompt}],
+   871→                stream=False,
+   872→            )
+   873→            if isinstance(response, dict):
+   874→                return response.get("message", {}).get("content", "")
+   875→            return str(response)
+   876→
+   877→    except Exception as e:
+   878→        logger.debug(f"Sintesis fallo: {e}")
+   879→
+   880→    return ""
+   881→
+   882→
+   883→# ============================================================
+   884→# ORQUESTACION AVANZADA
+   885→# ============================================================
+   886→
+   887→def orquestar(tarea_principal: str, estrategia: str = "auto",
+   888→              max_subagentes: int = 4) -> str:
+   889→    """Orquesta automaticamente sub-agentes para una tarea compleja.
+   890→    Divide la tarea, asigna sub-agentes y sintetiza resultados.
+   891→    Cada sub-agente ejecuta herramientas reales via mini-ReAct.
+   892→
+   893→    Args:
+   894→        tarea_principal: Descripcion de la tarea compleja
+   895→        estrategia: Estrategia: auto, secuencial, paralelo, mixto
+   896→        max_subagentes: Maximo numero de sub-agentes a usar
+   897→    """
+   898→    logger.info(f"Orquestando tarea: {tarea_principal[:100]}...")
+   899→
+   900→    # Paso 1: Planificacion
+   901→    plan = _plan_task(tarea_principal, max_subagentes)
+   902→
+   903→    if not plan:
+   904→        return "ERROR: No se pudo planificar la tarea. Intenta con una descripcion mas especifica."
+   905→
+   906→    # Paso 2: Ejecucion segun estrategia
+   907→    if estrategia == "auto":
+   908→        has_deps = any(t.get("depende_de") for t in plan)
+   909→        estrategia = "secuencial" if has_deps else "paralelo"
+   910→
+   911→    if estrategia == "paralelo":
+   912→        result = _execute_parallel(plan, tarea_principal)
+   913→    elif estrategia == "secuencial":
+   914→        result = _execute_sequential(plan, tarea_principal)
+   915→    else:
+   916→        result = _execute_mixed(plan, tarea_principal)
+   917→
+   918→    return result
+   919→
+   920→
+   921→def _plan_task(tarea: str, max_subagentes: int) -> list:
+   922→    """Planifica subtareas usando el LLM."""
+   923→    try:
+   924→        from llm import ollama
+   925→
+   926→        prompt = f"""Divide la siguiente tarea en subtareas para sub-agentes especializados.
+   927→Tipos disponibles: {', '.join(SUBAGENT_TYPES.keys())}
+   928→
+   929→TAREA: {tarea}
+   930→
+   931→Responde SOLO con un JSON array, sin markdown, sin explicaciones:
+   932→[{{"tipo": "researcher", "tarea": "descripcion de la subtarea", "depende_de": null}},
+   933→ ...]
+   934→
+   935→Maximo {max_subagentes} subtareas. Cada subtarea debe ser independiente o tener dependencias claras."""
+   936→
+   937→        if hasattr(ollama, 'generate'):
+   938→            response = ollama.generate(prompt)
+   939→        elif hasattr(ollama, 'chat'):
+   940→            resp = ollama.chat(
+   941→                messages=[{"role": "user", "content": prompt}],
+   942→                stream=False,
+   943→            )
+   944→            response = resp.get("message", {}).get("content", "") if isinstance(resp, dict) else str(resp)
+   945→        else:
+   946→            return []
+   947→
+   948→        return _extract_json_list(response)
+   949→
+   950→    except Exception as e:
+   951→        logger.error(f"Planificacion fallo: {e}")
+   952→        return []
+   953→
+   954→
+   955→def _execute_parallel(plan: list, tarea_principal: str) -> str:
+   956→    tareas_json = json.dumps(plan, ensure_ascii=False)
+   957→    return ejecutar_paralelo(tareas_json, agregar_resultados=True)
+   958→
+   959→
+   960→def _execute_sequential(plan: list, tarea_principal: str) -> str:
+   961→    all_results = []
+   962→    accumulated_context = ""
+   963→
+   964→    for i, subtask in enumerate(plan):
+   965→        tipo = subtask.get("tipo", "general")
+   966→        tarea = subtask.get("tarea", "")
+   967→        contexto = accumulated_context
+   968→
+   969→        result = ejecutar_subagente(tipo, tarea, contexto)
+   970→
+   971→        all_results.append(f"--- Sub-agente [{tipo}] (paso {i+1}/{len(plan)}) ---\n{result}")
+   972→        accumulated_context += f"\n[Paso {i+1}] {tarea[:50]}: {result[:500]}"
+   973→
+   974→    return "\n\n".join(all_results)
+   975→
+   976→
+   977→def _execute_mixed(plan: list, tarea_principal: str) -> str:
+   978→    levels = _group_by_dependency(plan)
+   979→    all_results = []
+   980→    accumulated_context = ""
+   981→
+   982→    for level, tasks in levels.items():
+   983→        if len(tasks) == 1:
+   984→            t = tasks[0]
+   985→            result = ejecutar_subagente(t["tipo"], t["tarea"], accumulated_context)
+   986→            all_results.append(f"--- [{t['tipo']}] (nivel {level}) ---\n{result}")
+   987→        else:
+   988→            tareas_json = json.dumps(tasks, ensure_ascii=False)
+   989→            result = ejecutar_paralelo(tareas_json, agregar_resultados=False)
+   990→            all_results.append(f"--- Nivel {level} (paralelo, {len(tasks)} agentes) ---\n{result}")
+   991→
+   992→        accumulated_context += f"\n[Nivel {level}]: {result[:500]}"
+   993→
+   994→    return "\n\n".join(all_results)
+   995→
+   996→
+   997→def _group_by_dependency(plan: list) -> dict:
+   998→    levels = {}
+   999→    for i, task in enumerate(plan):
+  1000→        dep = task.get("depende_de")
+  1001→        level = 0
+  1002→        if dep is not None:
+  1003→            for j, other in enumerate(plan):
+  1004→                if j == dep or (isinstance(dep, str) and str(j) == dep):
+  1005→                    level = max(level, 1)
+  1006→                    break
+  1007→        levels.setdefault(level, []).append(task)
+  1008→    return levels
+  1009→
+  1010→
+  1011→def _extract_json_list(text: str) -> list:
+  1012→    text = text.strip()
+  1013→    try:
+  1014→        result = json.loads(text)
+  1015→        if isinstance(result, list):
+  1016→            return result
+  1017→    except json.JSONDecodeError:
+  1018→        pass
+  1019→
+  1020→    patterns = [
+  1021→        r'```json\s*(.*?)\s*```',
+  1022→        r'```\s*(.*?)\s*```',
+  1023→        r'\[.*\]',
+  1024→    ]
+  1025→    for pattern in patterns:
+  1026→        match = re.search(pattern, text, re.DOTALL)
+  1027→        if match:
+  1028→            try:
+  1029→                result = json.loads(match.group(1) if '```' in pattern else match.group())
+  1030→                if isinstance(result, list):
+  1031→                    return result
+  1032→            except json.JSONDecodeError:
+  1033→                continue
+  1034→
+  1035→    return []
+  1036→
+  1037→
+  1038→# ============================================================
+  1039→# UTILIDADES
+  1040→# ============================================================
+  1041→
+  1042→def listar_subagentes() -> str:
+  1043→    """Lista los tipos de sub-agentes disponibles y sus capacidades."""
+  1044→    parts = [f"Sub-agentes disponibles ({len(SUBAGENT_TYPES)}):\n"]
+  1045→    for tipo, config in SUBAGENT_TYPES.items():
+  1046→        parts.append(f"  [{tipo}]")
+  1047→        parts.append(f"    Descripcion: {config['description']}")
+  1048→        parts.append(f"    Herramientas: {', '.join(config['tools']) or 'todas'}")
+  1049→        parts.append(f"    Max iteraciones: {config['max_iterations']}")
+  1050→        parts.append("")
+  1051→
+  1052→    return "\n".join(parts)
+  1053→
+  1054→
+  1055→def ver_contexto_compartido() -> str:
+  1056→    """Muestra el contenido del contexto compartido entre sub-agentes."""
+  1057→    ctx = _shared_context.snapshot()
+  1058→    if not ctx:
+  1059→        return "Contexto compartido vacio."
+  1060→
+  1061→    parts = [f"Contexto compartido ({len(ctx)} entradas):\n"]
+  1062→    for key, value in ctx.items():
+  1063→        if isinstance(value, dict):
+  1064→            parts.append(f"  {key}:")
+  1065→            parts.append(f"    Tipo: {value.get('type', '?')}")
+  1066→            parts.append(f"    Tarea: {value.get('task', '?')[:80]}")
+  1067→            parts.append(f"    Tool calls: {value.get('tool_calls', 0)}")
+  1068→            parts.append(f"    Tiempo: {value.get('elapsed', 0):.1f}s")
+  1069→        else:
+  1070→            parts.append(f"  {key}: {str(value)[:100]}")
+  1071→
+  1072→    return "\n".join(parts)
+  1073→
+  1074→
+  1075→def limpiar_contexto() -> str:
+  1076→    """Limpia el contexto compartido."""
+  1077→    count = len(_shared_context.snapshot())
+  1078→    _shared_context.clear()
+  1079→    return f"Contexto compartido limpiado ({count} entradas eliminadas)."
+  1080→

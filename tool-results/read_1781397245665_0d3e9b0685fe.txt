@@ -1,0 +1,778 @@
+     1→"""
+     2→=============================================================
+     3→AGENTE v16 - Herramientas Cloud (APIs externas como fallback)
+     4→=============================================================
+     5→Provee acceso a APIs cloud cuando las herramientas locales fallan
+     6→o no estan disponibles:
+     7→
+     8→- Busqueda web: Google Custom Search, Bing (fallback a DDG local)
+     9→- Generacion de imagenes: Replicate, Stability AI, OpenAI DALL-E
+    10→- LLM cloud: OpenAI, Anthropic, Google Gemini (fallback a Ollama local)
+    11→- Vision cloud: OpenAI Vision, Google Vision (fallback a Ollama VLM)
+    12→
+    13→Configuracion: Las API keys se leen desde:
+    14→1. Variables de entorno (AGENTE_GOOGLE_KEY, AGENTE_OPENAI_KEY, etc.)
+    15→2. Archivo ~/.ia-local/api_keys.json
+    16→
+    17→Si no hay API keys configuradas, se usa el fallback local automaticamente.
+    18→=============================================================
+    19→"""
+    20→
+    21→import os
+    22→import json
+    23→import logging
+    24→import base64
+    25→import urllib.request
+    26→import urllib.parse
+    27→import urllib.error
+    28→from config import LEARN_DIR, logger
+    29→
+    30→
+    31→# ============================================================
+    32→# GESTION DE API KEYS
+    33→# ============================================================
+    34→
+    35→_keys_cache = None
+    36→
+    37→def _load_api_keys() -> dict:
+    38→    """Carga API keys desde env vars y archivo de configuracion."""
+    39→    global _keys_cache
+    40→    if _keys_cache is not None:
+    41→        return _keys_cache
+    42→
+    43→    keys = {}
+    44→
+    45→    # 1. Desde variables de entorno
+    46→    env_map = {
+    47→        "google": ["AGENTE_GOOGLE_KEY", "GOOGLE_API_KEY", "GCS_API_KEY"],
+    48→        "google_cx": ["AGENTE_GOOGLE_CX", "GOOGLE_CX", "GCS_CX"],
+    49→        "openai": ["AGENTE_OPENAI_KEY", "OPENAI_API_KEY"],
+    50→        "anthropic": ["AGENTE_ANTHROPIC_KEY", "ANTHROPIC_API_KEY"],
+    51→        "stability": ["AGENTE_STABILITY_KEY", "STABILITY_API_KEY"],
+    52→        "replicate": ["AGENTE_REPLICATE_KEY", "REPLICATE_API_TOKEN"],
+    53→        "huggingface": ["AGENTE_HF_KEY", "HUGGINGFACE_API_KEY", "HF_API_KEY"],
+    54→        "google_gemini": ["AGENTE_GEMINI_KEY", "GEMINI_API_KEY", "GOOGLE_GEMINI_KEY"],
+    55→    }
+    56→
+    57→    for key_name, env_names in env_map.items():
+    58→        for env_name in env_names:
+    59→            val = os.environ.get(env_name, "").strip()
+    60→            if val:
+    61→                keys[key_name] = val
+    62→                break
+    63→
+    64→    # 2. Desde archivo de configuracion
+    65→    keys_file = os.path.join(LEARN_DIR, "api_keys.json")
+    66→    if os.path.exists(keys_file):
+    67→        try:
+    68→            with open(keys_file, "r", encoding="utf-8") as f:
+    69→                file_keys = json.load(f)
+    70→                for k, v in file_keys.items():
+    71→                    if v and str(v).strip():
+    72→                        keys[k] = str(v).strip()
+    73→        except Exception as e:
+    74→            logger.debug(f"Error leyendo api_keys.json: {e}")
+    75→
+    76→    _keys_cache = keys
+    77→    return keys
+    78→
+    79→
+    80→def get_api_key(service: str) -> str:
+    81→    """Obtiene la API key para un servicio. Retorna string vacio si no hay."""
+    82→    keys = _load_api_keys()
+    83→    return keys.get(service, "")
+    84→
+    85→
+    86→def configurar_api_key(servicio: str, clave: str) -> str:
+    87→    """Configura una API key para un servicio cloud.
+    88→
+    89→    Args:
+    90→        servicio: Nombre del servicio: google, openai, anthropic, stability, replicate, huggingface, google_gemini
+    91→        clave: API key del servicio
+    92→    """
+    93→    global _keys_cache
+    94→
+    95→    keys_file = os.path.join(LEARN_DIR, "api_keys.json")
+    96→
+    97→    # Cargar existentes
+    98→    existing = {}
+    99→    if os.path.exists(keys_file):
+   100→        try:
+   101→            with open(keys_file, "r", encoding="utf-8") as f:
+   102→                existing = json.load(f)
+   103→        except Exception:
+   104→            pass
+   105→
+   106→    # Agregar/actualizar
+   107→    existing[servicio] = clave
+   108→
+   109→    # Guardar
+   110→    try:
+   111→        os.makedirs(os.path.dirname(keys_file), exist_ok=True)
+   112→        with open(keys_file, "w", encoding="utf-8") as f:
+   113→            json.dump(existing, f, indent=2, ensure_ascii=False)
+   114→        logger.info(f"API key configurada para: {servicio}")
+   115→    except Exception as e:
+   116→        return f"ERROR guardando API key: {e}"
+   117→
+   118→    # Invalidar cache
+   119→    _keys_cache = None
+   120→
+   121→    return f"API key para '{servicio}' configurada correctamente."
+   122→
+   123→
+   124→def listar_api_keys() -> str:
+   125→    """Lista los servicios cloud con API keys configuradas."""
+   126→    keys = _load_api_keys()
+   127→
+   128→    services = {
+   129→        "google": "Google Custom Search",
+   130→        "google_cx": "Google Custom Search CX",
+   131→        "openai": "OpenAI (GPT, DALL-E, Vision)",
+   132→        "anthropic": "Anthropic (Claude)",
+   133→        "stability": "Stability AI (Stable Diffusion)",
+   134→        "replicate": "Replicate (Modelos ML)",
+   135→        "huggingface": "Hugging Face",
+   136→        "google_gemini": "Google Gemini",
+   137→    }
+   138→
+   139→    parts = ["Servicios cloud configurados:\n"]
+   140→    for key_name, label in services.items():
+   141→        has_key = key_name in keys and keys[key_name]
+   142→        status = "CONFIGURADO" if has_key else "no configurado"
+   143→        masked = keys.get(key_name, "")[:8] + "..." if has_key else ""
+   144→        parts.append(f"  {label}: {status} {masked}")
+   145→
+   146→    parts.append("\nPara configurar: configurar_api_key('openai', 'sk-...')")
+   147→    parts.append("O define variables de entorno: AGENTE_OPENAI_KEY, AGENTE_GOOGLE_KEY, etc.")
+   148→
+   149→    return "\n".join(parts)
+   150→
+   151→
+   152→# ============================================================
+   153→# BUSQUEDA WEB CLOUD
+   154→# ============================================================
+   155→
+   156→def buscar_web_cloud(consulta: str, num_resultados: int = 8) -> str | None:
+   157→    """Busca en internet usando APIs cloud (Google Custom Search).
+   158→    Retorna None si no hay API keys configuradas.
+   159→
+   160→    Args:
+   161→        consulta: Texto de busqueda
+   162→        num_resultados: Numero de resultados (max 10)
+   163→    """
+   164→    api_key = get_api_key("google")
+   165→    cx = get_api_key("google_cx")
+   166→
+   167→    if not api_key or not cx:
+   168→        return None
+   169→
+   170→    try:
+   171→        encoded = urllib.parse.quote(consulta)
+   172→        url = (
+   173→            f"https://www.googleapis.com/customsearch/v1?"
+   174→            f"key={api_key}&cx={cx}&q={encoded}&num={min(num_resultados, 10)}"
+   175→        )
+   176→
+   177→        req = urllib.request.Request(url, headers={"User-Agent": "AgenteLocal/1.0"})
+   178→        with urllib.request.urlopen(req, timeout=10) as resp:
+   179→            data = json.loads(resp.read().decode("utf-8"))
+   180→
+   181→        items = data.get("items", [])
+   182→        if not items:
+   183→            return None
+   184→
+   185→        results = ["Resultados web (Google):"]
+   186→        for i, item in enumerate(items):
+   187→            title = item.get("title", "").strip()
+   188→            link = item.get("link", "")
+   189→            snippet = item.get("snippet", "").strip()
+   190→
+   191→            results.append(f"{i+1}. {title}")
+   192→            if snippet:
+   193→                results.append(f"   {snippet}")
+   194→            if link:
+   195→                results.append(f"   {link}")
+   196→
+   197→        return "\n".join(results)
+   198→
+   199→    except urllib.error.HTTPError as e:
+   200→        logger.debug(f"Google Search API error: {e.code} {e.reason}")
+   201→        return None
+   202→    except Exception as e:
+   203→        logger.debug(f"Google Search fallo: {e}")
+   204→        return None
+   205→
+   206→
+   207→# ============================================================
+   208→# GENERACION DE IMAGENES CLOUD
+   209→# ============================================================
+   210→
+   211→def generar_imagen_cloud(descripcion: str, ruta: str = "",
+   212→                         tamano: str = "1024x1024") -> str | None:
+   213→    """Genera una imagen usando APIs cloud (OpenAI DALL-E, Stability AI, Replicate).
+   214→    Retorna None si no hay API keys o falla.
+   215→
+   216→    Args:
+   217→        descripcion: Descripcion de la imagen a generar
+   218→        ruta: Ruta donde guardar la imagen (opcional)
+   219→        tamano: Tamano de la imagen
+   220→    """
+   221→    # Intentar con OpenAI DALL-E
+   222→    result = _generate_dalle(descripcion, ruta, tamano)
+   223→    if result is not None:
+   224→        return result
+   225→
+   226→    # Intentar con Stability AI
+   227→    result = _generate_stability(descripcion, ruta, tamano)
+   228→    if result is not None:
+   229→        return result
+   230→
+   231→    # Intentar con Replicate
+   232→    result = _generate_replicate(descripcion, ruta, tamano)
+   233→    if result is not None:
+   234→        return result
+   235→
+   236→    # Intentar con Hugging Face
+   237→    result = _generate_huggingface(descripcion, ruta, tamano)
+   238→    if result is not None:
+   239→        return result
+   240→
+   241→    return None
+   242→
+   243→
+   244→def _generate_dalle(descripcion: str, ruta: str, tamano: str) -> str | None:
+   245→    """Genera imagen con OpenAI DALL-E API."""
+   246→    api_key = get_api_key("openai")
+   247→    if not api_key:
+   248→        return None
+   249→
+   250→    try:
+   251→        # Validar tamano
+   252→        valid_sizes = ["1024x1024", "1792x1024", "1024x1792"]
+   253→        size = tamano if tamano in valid_sizes else "1024x1024"
+   254→
+   255→        payload = json.dumps({
+   256→            "model": "dall-e-3",
+   257→            "prompt": descripcion,
+   258→            "n": 1,
+   259→            "size": size,
+   260→            "quality": "standard",
+   261→        }).encode("utf-8")
+   262→
+   263→        req = urllib.request.Request(
+   264→            "https://api.openai.com/v1/images/generations",
+   265→            data=payload,
+   266→            headers={
+   267→                "Content-Type": "application/json",
+   268→                "Authorization": f"Bearer {api_key}",
+   269→            },
+   270→        )
+   271→
+   272→        with urllib.request.urlopen(req, timeout=60) as resp:
+   273→            data = json.loads(resp.read().decode("utf-8"))
+   274→
+   275→        image_url = data.get("data", [{}])[0].get("url", "")
+   276→        revised_prompt = data.get("data", [{}])[0].get("revised_prompt", "")
+   277→
+   278→        if not image_url:
+   279→            return None
+   280→
+   281→        # Descargar imagen
+   282→        if not ruta:
+   283→            import time
+   284→            ruta = os.path.join(LEARN_DIR, f"generated_{int(time.time())}.png")
+   285→
+   286→        _download_image(image_url, ruta)
+   287→
+   288→        result = f"Imagen generada (DALL-E 3): {ruta}"
+   289→        if revised_prompt:
+   290→            result += f"\nPrompt refinado: {revised_prompt}"
+   291→        return result
+   292→
+   293→    except urllib.error.HTTPError as e:
+   294→        logger.debug(f"DALL-E API error: {e.code}")
+   295→        return None
+   296→    except Exception as e:
+   297→        logger.debug(f"DALL-E fallo: {e}")
+   298→        return None
+   299→
+   300→
+   301→def _generate_stability(descripcion: str, ruta: str, tamano: str) -> str | None:
+   302→    """Genera imagen con Stability AI API."""
+   303→    api_key = get_api_key("stability")
+   304→    if not api_key:
+   305→        return None
+   306→
+   307→    try:
+   308→        width, height = tamano.split("x") if "x" in tamano else ("1024", "1024")
+   309→        width = min(int(width), 1024)
+   310→        height = min(int(height), 1024)
+   311→
+   312→        payload = json.dumps({
+   313→            "text_prompts": [{"text": descripcion, "weight": 1}],
+   314→            "cfg_scale": 7,
+   315→            "height": height,
+   316→            "width": width,
+   317→            "samples": 1,
+   318→            "steps": 30,
+   319→        }).encode("utf-8")
+   320→
+   321→        req = urllib.request.Request(
+   322→            "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image",
+   323→            data=payload,
+   324→            headers={
+   325→                "Content-Type": "application/json",
+   326→                "Authorization": f"Bearer {api_key}",
+   327→                "Accept": "application/json",
+   328→            },
+   329→        )
+   330→
+   331→        with urllib.request.urlopen(req, timeout=90) as resp:
+   332→            data = json.loads(resp.read().decode("utf-8"))
+   333→
+   334→        base64_image = data.get("artifacts", [{}])[0].get("base64", "")
+   335→        if not base64_image:
+   336→            return None
+   337→
+   338→        if not ruta:
+   339→            import time
+   340→            ruta = os.path.join(LEARN_DIR, f"generated_{int(time.time())}.png")
+   341→
+   342→        with open(ruta, "wb") as f:
+   343→            f.write(base64.b64decode(base64_image))
+   344→
+   345→        return f"Imagen generada (Stability AI SDXL): {ruta}"
+   346→
+   347→    except urllib.error.HTTPError as e:
+   348→        logger.debug(f"Stability API error: {e.code}")
+   349→        return None
+   350→    except Exception as e:
+   351→        logger.debug(f"Stability fallo: {e}")
+   352→        return None
+   353→
+   354→
+   355→def _generate_replicate(descripcion: str, ruta: str, tamano: str) -> str | None:
+   356→    """Genera imagen con Replicate API."""
+   357→    api_key = get_api_key("replicate")
+   358→    if not api_key:
+   359→        return None
+   360→
+   361→    try:
+   362→        payload = json.dumps({
+   363→            "version": "39ed52f2a78e934b3ba6e2a89f5b1c712de7d5c6e1e6c155e7d6e8e8e8e8e8e8",
+   364→            "input": {
+   365→                "prompt": descripcion,
+   366→                "width": int(tamano.split("x")[0]) if "x" in tamano else 1024,
+   367→                "height": int(tamano.split("x")[1]) if "x" in tamano else 1024,
+   368→            }
+   369→        }).encode("utf-8")
+   370→
+   371→        req = urllib.request.Request(
+   372→            "https://api.replicate.com/v1/predictions",
+   373→            data=payload,
+   374→            headers={
+   375→                "Content-Type": "application/json",
+   376→                "Authorization": f"Token {api_key}",
+   377→            },
+   378→        )
+   379→
+   380→        with urllib.request.urlopen(req, timeout=30) as resp:
+   381→            data = json.loads(resp.read().decode("utf-8"))
+   382→
+   383→        # Replicate es async - obtener resultado
+   384→        get_url = data.get("urls", {}).get("get", "")
+   385→        if not get_url:
+   386→            return None
+   387→
+   388→        # Polling por resultado (max 60s)
+   389→        for _ in range(12):
+   390→            import time
+   391→            time.sleep(5)
+   392→
+   393→            req = urllib.request.Request(get_url, headers={
+   394→                "Authorization": f"Token {api_key}",
+   395→            })
+   396→            with urllib.request.urlopen(req, timeout=30) as resp:
+   397→                result_data = json.loads(resp.read().decode("utf-8"))
+   398→
+   399→            if result_data.get("status") == "succeeded":
+   400→                output = result_data.get("output", [])
+   401→                if output:
+   402→                    image_url = output[0] if isinstance(output, list) else output
+   403→                    if not ruta:
+   404→                        ruta = os.path.join(LEARN_DIR, f"generated_{int(time.time())}.png")
+   405→                    _download_image(image_url, ruta)
+   406→                    return f"Imagen generada (Replicate SDXL): {ruta}"
+   407→            elif result_data.get("status") == "failed":
+   408→                return None
+   409→
+   410→        return None
+   411→
+   412→    except Exception as e:
+   413→        logger.debug(f"Replicate fallo: {e}")
+   414→        return None
+   415→
+   416→
+   417→def _generate_huggingface(descripcion: str, ruta: str, tamano: str) -> str | None:
+   418→    """Genera imagen con Hugging Face Inference API."""
+   419→    api_key = get_api_key("huggingface")
+   420→    if not api_key:
+   421→        return None
+   422→
+   423→    try:
+   424→        payload = json.dumps({
+   425→            "inputs": descripcion,
+   426→        }).encode("utf-8")
+   427→
+   428→        req = urllib.request.Request(
+   429→            "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0",
+   430→            data=payload,
+   431→            headers={
+   432→                "Content-Type": "application/json",
+   433→                "Authorization": f"Bearer {api_key}",
+   434→            },
+   435→        )
+   436→
+   437→        with urllib.request.urlopen(req, timeout=90) as resp:
+   438→            image_data = resp.read()
+   439→
+   440→        if not image_data or len(image_data) < 100:
+   441→            return None
+   442→
+   443→        if not ruta:
+   444→            import time
+   445→            ruta = os.path.join(LEARN_DIR, f"generated_{int(time.time())}.png")
+   446→
+   447→        with open(ruta, "wb") as f:
+   448→            f.write(image_data)
+   449→
+   450→        return f"Imagen generada (HuggingFace SDXL): {ruta}"
+   451→
+   452→    except urllib.error.HTTPError as e:
+   453→        logger.debug(f"HuggingFace API error: {e.code}")
+   454→        return None
+   455→    except Exception as e:
+   456→        logger.debug(f"HuggingFace fallo: {e}")
+   457→        return None
+   458→
+   459→
+   460→# ============================================================
+   461→# LLM CLOUD
+   462→# ============================================================
+   463→
+   464→def llm_cloud_chat(mensajes: list, modelo: str = "auto",
+   465→                   temperatura: float = 0.7, max_tokens: int = 2048) -> str | None:
+   466→    """Chat con LLM cloud (OpenAI, Anthropic, Gemini).
+   467→    Retorna None si no hay API keys.
+   468→
+   469→    Args:
+   470→        mensajes: Lista de mensajes [{"role": "user", "content": "..."}]
+   471→        modelo: Modelo a usar: auto, gpt-4, gpt-3.5, claude, gemini
+   472→        temperatura: Temperatura de generacion
+   473→        max_tokens: Max tokens de respuesta
+   474→    """
+   475→    # Intentar OpenAI
+   476→    if modelo in ("auto", "gpt-4", "gpt-4o", "gpt-3.5", "gpt-3.5-turbo"):
+   477→        result = _chat_openai(mensajes, modelo, temperatura, max_tokens)
+   478→        if result is not None:
+   479→            return result
+   480→
+   481→    # Intentar Anthropic
+   482→    if modelo in ("auto", "claude", "claude-3", "claude-3.5"):
+   483→        result = _chat_anthropic(mensajes, modelo, temperatura, max_tokens)
+   484→        if result is not None:
+   485→            return result
+   486→
+   487→    # Intentar Gemini
+   488→    if modelo in ("auto", "gemini", "gemini-pro", "gemini-1.5"):
+   489→        result = _chat_gemini(mensajes, modelo, temperatura, max_tokens)
+   490→        if result is not None:
+   491→            return result
+   492→
+   493→    return None
+   494→
+   495→
+   496→def _chat_openai(mensajes: list, modelo: str, temperatura: float, max_tokens: int) -> str | None:
+   497→    """Chat con OpenAI API."""
+   498→    api_key = get_api_key("openai")
+   499→    if not api_key:
+   500→        return None
+   501→
+   502→    try:
+   503→        model_map = {
+   504→            "auto": "gpt-4o-mini",
+   505→            "gpt-4": "gpt-4o",
+   506→            "gpt-4o": "gpt-4o",
+   507→            "gpt-3.5": "gpt-4o-mini",
+   508→            "gpt-3.5-turbo": "gpt-4o-mini",
+   509→        }
+   510→        model = model_map.get(modelo, "gpt-4o-mini")
+   511→
+   512→        payload = json.dumps({
+   513→            "model": model,
+   514→            "messages": mensajes,
+   515→            "temperature": temperatura,
+   516→            "max_tokens": max_tokens,
+   517→        }).encode("utf-8")
+   518→
+   519→        req = urllib.request.Request(
+   520→            "https://api.openai.com/v1/chat/completions",
+   521→            data=payload,
+   522→            headers={
+   523→                "Content-Type": "application/json",
+   524→                "Authorization": f"Bearer {api_key}",
+   525→            },
+   526→        )
+   527→
+   528→        with urllib.request.urlopen(req, timeout=60) as resp:
+   529→            data = json.loads(resp.read().decode("utf-8"))
+   530→
+   531→        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+   532→        if content:
+   533→            return content
+   534→
+   535→    except urllib.error.HTTPError as e:
+   536→        logger.debug(f"OpenAI API error: {e.code}")
+   537→    except Exception as e:
+   538→        logger.debug(f"OpenAI fallo: {e}")
+   539→
+   540→    return None
+   541→
+   542→
+   543→def _chat_anthropic(mensajes: list, modelo: str, temperatura: float, max_tokens: int) -> str | None:
+   544→    """Chat con Anthropic Claude API."""
+   545→    api_key = get_api_key("anthropic")
+   546→    if not api_key:
+   547→        return None
+   548→
+   549→    try:
+   550→        # Separar system prompt de mensajes
+   551→        system_content = ""
+   552→        chat_messages = []
+   553→        for msg in mensajes:
+   554→            if msg.get("role") == "system":
+   555→                system_content = msg.get("content", "")
+   556→            else:
+   557→                chat_messages.append(msg)
+   558→
+   559→        payload = json.dumps({
+   560→            "model": "claude-3-5-sonnet-20241022",
+   561→            "max_tokens": max_tokens,
+   562→            "temperature": temperatura,
+   563→            "system": system_content,
+   564→            "messages": chat_messages,
+   565→        }).encode("utf-8")
+   566→
+   567→        req = urllib.request.Request(
+   568→            "https://api.anthropic.com/v1/messages",
+   569→            data=payload,
+   570→            headers={
+   571→                "Content-Type": "application/json",
+   572→                "x-api-key": api_key,
+   573→                "anthropic-version": "2023-06-01",
+   574→            },
+   575→        )
+   576→
+   577→        with urllib.request.urlopen(req, timeout=60) as resp:
+   578→            data = json.loads(resp.read().decode("utf-8"))
+   579→
+   580→        content = data.get("content", [{}])[0].get("text", "")
+   581→        if content:
+   582→            return content
+   583→
+   584→    except urllib.error.HTTPError as e:
+   585→        logger.debug(f"Anthropic API error: {e.code}")
+   586→    except Exception as e:
+   587→        logger.debug(f"Anthropic fallo: {e}")
+   588→
+   589→    return None
+   590→
+   591→
+   592→def _chat_gemini(mensajes: list, modelo: str, temperatura: float, max_tokens: int) -> str | None:
+   593→    """Chat con Google Gemini API."""
+   594→    api_key = get_api_key("google_gemini")
+   595→    if not api_key:
+   596→        return None
+   597→
+   598→    try:
+   599→        # Convertir mensajes a formato Gemini
+   600→        contents = []
+   601→        for msg in mensajes:
+   602→            if msg.get("role") == "system":
+   603→                continue  # Gemini maneja system en generationConfig
+   604→            role = "user" if msg.get("role") in ("user", "tool") else "model"
+   605→            contents.append({
+   606→                "role": role,
+   607→                "parts": [{"text": msg.get("content", "")}]
+   608→            })
+   609→
+   610→        payload = json.dumps({
+   611→            "contents": contents,
+   612→            "generationConfig": {
+   613→                "temperature": temperatura,
+   614→                "maxOutputTokens": max_tokens,
+   615→            }
+   616→        }).encode("utf-8")
+   617→
+   618→        req = urllib.request.Request(
+   619→            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}",
+   620→            data=payload,
+   621→            headers={"Content-Type": "application/json"},
+   622→        )
+   623→
+   624→        with urllib.request.urlopen(req, timeout=60) as resp:
+   625→            data = json.loads(resp.read().decode("utf-8"))
+   626→
+   627→        text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+   628→        if text:
+   629→            return text
+   630→
+   631→    except urllib.error.HTTPError as e:
+   632→        logger.debug(f"Gemini API error: {e.code}")
+   633→    except Exception as e:
+   634→        logger.debug(f"Gemini fallo: {e}")
+   635→
+   636→    return None
+   637→
+   638→
+   639→# ============================================================
+   640→# VISION CLOUD
+   641→# ============================================================
+   642→
+   643→def analizar_imagen_cloud(ruta: str, pregunta: str = "Describe esta imagen") -> str | None:
+   644→    """Analiza una imagen usando APIs cloud (OpenAI Vision, Gemini).
+   645→    Retorna None si no hay API keys.
+   646→
+   647→    Args:
+   648→        ruta: Ruta de la imagen a analizar
+   649→        pregunta: Pregunta sobre la imagen
+   650→    """
+   651→    # Leer y codificar imagen
+   652→    try:
+   653→        with open(ruta, "rb") as f:
+   654→            image_data = base64.b64encode(f.read()).decode("utf-8")
+   655→    except Exception as e:
+   656→        logger.debug(f"Error leyendo imagen: {e}")
+   657→        return None
+   658→
+   659→    # Detectar formato
+   660→    ext = ruta.lower().split(".")[-1]
+   661→    mime_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+   662→                "gif": "image/gif", "webp": "image/webp"}
+   663→    mime = mime_map.get(ext, "image/png")
+   664→
+   665→    # Intentar OpenAI Vision
+   666→    result = _vision_openai(image_data, mime, pregunta)
+   667→    if result is not None:
+   668→        return result
+   669→
+   670→    # Intentar Gemini Vision
+   671→    result = _vision_gemini(image_data, mime, pregunta)
+   672→    if result is not None:
+   673→        return result
+   674→
+   675→    return None
+   676→
+   677→
+   678→def _vision_openai(image_data: str, mime: str, pregunta: str) -> str | None:
+   679→    """Analiza imagen con OpenAI Vision API."""
+   680→    api_key = get_api_key("openai")
+   681→    if not api_key:
+   682→        return None
+   683→
+   684→    try:
+   685→        payload = json.dumps({
+   686→            "model": "gpt-4o-mini",
+   687→            "messages": [{
+   688→                "role": "user",
+   689→                "content": [
+   690→                    {"type": "text", "text": pregunta},
+   691→                    {"type": "image_url", "image_url": {
+   692→                        "url": f"data:{mime};base64,{image_data}"
+   693→                    }},
+   694→                ]
+   695→            }],
+   696→            "max_tokens": 1024,
+   697→        }).encode("utf-8")
+   698→
+   699→        req = urllib.request.Request(
+   700→            "https://api.openai.com/v1/chat/completions",
+   701→            data=payload,
+   702→            headers={
+   703→                "Content-Type": "application/json",
+   704→                "Authorization": f"Bearer {api_key}",
+   705→            },
+   706→        )
+   707→
+   708→        with urllib.request.urlopen(req, timeout=30) as resp:
+   709→            data = json.loads(resp.read().decode("utf-8"))
+   710→
+   711→        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+   712→        if content:
+   713→            return f"Vision AI (GPT-4o): {content}"
+   714→
+   715→    except Exception as e:
+   716→        logger.debug(f"OpenAI Vision fallo: {e}")
+   717→
+   718→    return None
+   719→
+   720→
+   721→def _vision_gemini(image_data: str, mime: str, pregunta: str) -> str | None:
+   722→    """Analiza imagen con Google Gemini Vision API."""
+   723→    api_key = get_api_key("google_gemini")
+   724→    if not api_key:
+   725→        return None
+   726→
+   727→    try:
+   728→        payload = json.dumps({
+   729→            "contents": [{
+   730→                "parts": [
+   731→                    {"text": pregunta},
+   732→                    {"inline_data": {"mime_type": mime, "data": image_data}},
+   733→                ]
+   734→            }],
+   735→        }).encode("utf-8")
+   736→
+   737→        req = urllib.request.Request(
+   738→            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}",
+   739→            data=payload,
+   740→            headers={"Content-Type": "application/json"},
+   741→        )
+   742→
+   743→        with urllib.request.urlopen(req, timeout=30) as resp:
+   744→            data = json.loads(resp.read().decode("utf-8"))
+   745→
+   746→        text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+   747→        if text:
+   748→            return f"Vision AI (Gemini): {text}"
+   749→
+   750→    except Exception as e:
+   751→        logger.debug(f"Gemini Vision fallo: {e}")
+   752→
+   753→    return None
+   754→
+   755→
+   756→# ============================================================
+   757→# UTILIDADES
+   758→# ============================================================
+   759→
+   760→def _download_image(url: str, ruta: str) -> bool:
+   761→    """Descarga una imagen desde URL y la guarda en ruta."""
+   762→    try:
+   763→        req = urllib.request.Request(url, headers={
+   764→            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+   765→        })
+   766→        with urllib.request.urlopen(req, timeout=30) as resp:
+   767→            image_data = resp.read()
+   768→
+   769→        os.makedirs(os.path.dirname(ruta) if os.path.dirname(ruta) else ".", exist_ok=True)
+   770→        with open(ruta, "wb") as f:
+   771→            f.write(image_data)
+   772→
+   773→        return True
+   774→
+   775→    except Exception as e:
+   776→        logger.debug(f"Error descargando imagen: {e}")
+   777→        return False
+   778→

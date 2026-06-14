@@ -1,0 +1,1023 @@
+     1→"""
+     2→=============================================================
+     3→AGENTE v14.7 - Pensamiento Profundo (Deep Thinking) MEJORADO
+     4→=============================================================
+     5→Sistema de razonamiento extendido que permite al agente
+     6→"pensar en voz alta" antes de actuar.
+     7→
+     8→v14.7 Mejoras:
+     9→1. Think nativo con tools: two-phase approach (think first, then act)
+    10→2. Razonamiento multi-vuelta: iterativo con auto-critica
+    11→3. Complejidad hibrida: heuristica + LLM para casos ambiguos
+    12→4. Budget de tokens: respeta DEEP_THINKING_MAX_THINKING_TOKENS
+    13→5. Deepening progresivo: 4 niveles de profundidad
+    14→6. Reflexion con contexto: acceso a resultados intermedios de tools
+    15→7. Persistencia: guarda pensamientos en memoria para futuro
+    16→8. Confianza basada en contenido: evalua calidad del plan
+    17→
+    18→Estrategias:
+    19→1. NATIVA: Modelos con <think> nativo (qwen3, deepseek-r1)
+    20→   - Two-phase: think primero, luego act con tools
+    21→   - Ollama API param think=True en fase de razonamiento
+    22→2. COT (Chain-of-Thought): Para modelos sin think nativo
+    23→   - Fase previa de descomposicion y planificacion
+    24→   - Razonamiento multi-vuelta con auto-critica
+    25→3. REFLEXION: Post-evaluacion critica de la respuesta
+    26→   - Revisa su propia respuesta con contexto de ejecucion
+    27→   - Puede corregir errores o mejorar la calidad
+    28→4. FULL: Cot + native + reflection (recomendado)
+    29→
+    30→Se integra como fase PREVIA al bucle ReAct y como
+    31→filtro POST de la respuesta final.
+    32→=============================================================
+    33→"""
+    34→
+    35→import json
+    36→import logging
+    37→import time
+    38→from datetime import datetime
+    39→
+    40→from config import (
+    41→    logger, DEEP_THINKING_MODE, DEEP_THINKING_MIN_COMPLEXITY,
+    42→    DEEP_THINKING_MAX_THINKING_TOKENS, DEEP_THINKING_REFLECT_ON_ERRORS,
+    43→    DEEP_THINKING_SHOW_THOUGHTS, LEARN_DIR
+    44→)
+    45→from llm import ollama
+    46→
+    47→# ============================================================
+    48→# NIVELES DE PROFUNDIDAD DEL PENSAMIENTO
+    49→# ============================================================
+    50→THINK_DEPTH_NONE = 0       # Sin pensamiento (consultas simples)
+    51→THINK_DEPTH_QUICK = 1      # Analisis rapido (complejidad baja-media)
+    52→THINK_DEPTH_FULL = 2       # CoT completo + planificacion (complejidad alta)
+    53→THINK_DEPTH_DEEP = 3       # Razonamiento multi-vuelta + auto-critica (muy alta)
+    54→
+    55→
+    56→class DeepThinkingResult:
+    57→    """Resultado de una sesion de pensamiento profundo."""
+    58→
+    59→    def __init__(self):
+    60→        self.reasoning = ""        # Texto del razonamiento
+    61→        self.plan = []             # Pasos planificados
+    62→        self.complexity = 0.0      # Complejidad detectada (0-1)
+    63→        self.query_type = ""       # Tipo de consulta
+    64→        self.confidence = 0.5      # Confianza en el plan
+    65→        self.should_deep_think = False  # Si se activo deep thinking
+    66→        self.thinking_tokens = 0   # Tokens de pensamiento generados
+    67→        self.duration_ms = 0       # Duracion en ms
+    68→        self.depth = THINK_DEPTH_NONE  # Nivel de profundidad alcanzado
+    69→        self.native_thinking = ""  # Thinking nativo del modelo (si aplica)
+    70→        self.critique_rounds = 0   # Numero de rondas de auto-critica
+    71→        self.reasoning_evolution = []  # Razonamiento en cada ronda (para debugging)
+    72→
+    73→    def to_dict(self):
+    74→        return {
+    75→            "reasoning": self.reasoning[:500],
+    76→            "plan": self.plan,
+    77→            "complexity": self.complexity,
+    78→            "query_type": self.query_type,
+    79→            "confidence": self.confidence,
+    80→            "should_deep_think": self.should_deep_think,
+    81→            "thinking_tokens": self.thinking_tokens,
+    82→            "duration_ms": self.duration_ms,
+    83→            "depth": self.depth,
+    84→            "critique_rounds": self.critique_rounds,
+    85→        }
+    86→
+    87→
+    88→class DeepThinking:
+    89→    """
+    90→    Motor de pensamiento profundo v14.7.
+    91→
+    92→    Se inserta ANTES del bucle ReAct para:
+    93→    1. Evaluar la complejidad de la consulta (heuristica + LLM)
+    94→    2. Generar razonamiento extendido si es necesario
+    95→    3. Descomponer tareas complejas en pasos
+    96→    4. Planificar la secuencia de herramientas
+    97→    5. Auto-criticar y refinar el razonamiento
+    98→
+    99→    Y DESPUES del bucle para:
+   100→    6. Criticar y mejorar la respuesta final (con contexto de tools)
+   101→    7. Persistir aprendizajes del pensamiento en memoria
+   102→    """
+   103→
+   104→    # Indicadores de complejidad que justifican pensamiento profundo
+   105→    COMPLEXITY_INDICATORS = {
+   106→        # Indicadores de alta complejidad (+0.3 cada uno)
+   107→        "high": [
+   108→            "analiza", "analizar", "compara", "comparar", "diferencia",
+   109→            "explica", "explicar", "resume", "resumir", "evalua",
+   110→            "evaluar", "disena", "disenar", "implementar", "implementa",
+   111→            "arquitectura", "optimiza", "optimizar", "refactoriza",
+   112→            "debug", "depurar", "diagnostica", "diagnosticar",
+   113→            "planifica", "planificar", "crea", "crear", "desarrolla",
+   114→            "desarrollar", "construye", "construir", "migra",
+   115→            "integra", "integrar", "configura", "configurar",
+   116→        ],
+   117→        # Indicadores de complejidad media (+0.15 cada uno)
+   118→        "medium": [
+   119→            "como", "como", "por que", "por que", "cuando", "cuando",
+   120→            "donde", "donde", "cual", "cual", "cuales", "cuales",
+   121→            "mejor", "peor", "problema", "error", "fallo", "bug",
+   122→            "instalar", "configurar", "actualizar", "mover",
+   123→            "buscar", "encontrar", "reemplazar",
+   124→        ],
+   125→        # Indicadores de baja complejidad (no necesitan deep thinking)
+   126→        "simple": [
+   127→            "hola", "hey", "gracias", "si", "no", "ok",
+   128→            "abre", "cierra", "mata", "lista",
+   129→        ],
+   130→    }
+   131→
+   132→    # Tipos de consulta y su tratamiento
+   133→    QUERY_TYPES = {
+   134→        "analytical": "Requiere analisis profundo y razonamiento",
+   135→        "creative": "Requiere generacion original y diseno",
+   136→        "procedural": "Requiere secuencia de pasos tecnicos",
+   137→        "factual": "Requiere busqueda y presentacion de informacion",
+   138→        "conversational": "Conversacion casual, sin deep thinking",
+   139→    }
+   140→
+   141→    # Rangos de complejidad para cada nivel de profundidad
+   142→    DEPTH_THRESHOLDS = {
+   143→        THINK_DEPTH_QUICK: 0.3,   # >= 0.3: analisis rapido
+   144→        THINK_DEPTH_FULL: 0.5,    # >= 0.5: CoT completo + plan
+   145→        THINK_DEPTH_DEEP: 0.75,   # >= 0.75: razonamiento multi-vuelta
+   146→    }
+   147→
+   148→    # Max rondas de auto-critica en nivel DEEP
+   149→    MAX_CRITIQUE_ROUNDS = 2
+   150→
+   151→    # Rango de complejidad donde se usa LLM para desempatar
+   152→    LLM_AMBIGUITY_RANGE = (0.2, 0.5)
+   153→
+   154→    def __init__(self, mode=None):
+   155→        """
+   156→        Args:
+   157→            mode: "native", "cot", "reflection", "full", "off"
+   158→                  None = usar DEEP_THINKING_MODE de config
+   159→        """
+   160→        self.mode = mode or DEEP_THINKING_MODE
+   161→        self._stats = {
+   162→            "total_queries": 0,
+   163→            "deep_think_activated": 0,
+   164→            "reflections_triggered": 0,
+   165→            "responses_improved": 0,
+   166→            "avg_complexity": 0.0,
+   167→            "by_depth": {0: 0, 1: 0, 2: 0, 3: 0},
+   168→            "llm_complexity_calls": 0,
+   169→            "native_think_used": 0,
+   170→            "persisted_thoughts": 0,
+   171→        }
+   172→
+   173→    # ----------------------------------------------------------
+   174→    # EVALUACION DE COMPLEJIDAD
+   175→    # ----------------------------------------------------------
+   176→
+   177→    def should_think_deep(self, user_message):
+   178→        """
+   179→        Evalua si una consulta merece pensamiento profundo.
+   180→
+   181→        Usa evaluacion hibrida: heuristica rapida + LLM para casos ambiguos.
+   182→
+   183→        Retorna: (should_think: bool, complexity: float, query_type: str)
+   184→        """
+   185→        if self.mode == "off":
+   186→            return False, 0.0, "conversational"
+   187→
+   188→        msg_lower = user_message.lower()
+   189→
+   190→        # ---- FASE 1: Evaluacion heuristica (rapida, sin LLM) ----
+   191→        complexity = self._heuristic_complexity(msg_lower, user_message)
+   192→
+   193→        # ---- FASE 2: Evaluacion LLM para casos ambiguos ----
+   194→        # Si la heuristica da un resultado en zona ambigua, consultar al LLM
+   195→        low, high = self.LLM_AMBIGUITY_RANGE
+   196→        if low <= complexity <= high and len(user_message) > 30:
+   197→            llm_complexity = self._llm_complexity(user_message)
+   198→            if llm_complexity is not None:
+   199→                # Promedio ponderado: 60% LLM, 40% heuristica (LLM es mas preciso)
+   200→                complexity = 0.4 * complexity + 0.6 * llm_complexity
+   201→                self._stats["llm_complexity_calls"] += 1
+   202→
+   203→        # ---- Determinar tipo de consulta ----
+   204→        query_type = self._classify_query(msg_lower)
+   205→
+   206→        # ---- Decidir si activar deep thinking ----
+   207→        should = complexity >= DEEP_THINKING_MIN_COMPLEXITY
+   208→
+   209→        # ---- Actualizar estadisticas ----
+   210→        self._stats["total_queries"] += 1
+   211→        if should:
+   212→            self._stats["deep_think_activated"] += 1
+   213→
+   214→        total = self._stats["total_queries"]
+   215→        self._stats["avg_complexity"] = (
+   216→            self._stats["avg_complexity"] * (total - 1) + complexity
+   217→        ) / total
+   218→
+   219→        return should, complexity, query_type
+   220→
+   221→    def _heuristic_complexity(self, msg_lower, user_message):
+   222→        """Evaluacion heuristica rapida de complejidad (sin LLM)."""
+   223→        complexity = 0.0
+   224→        high_matches = sum(1 for w in self.COMPLEXITY_INDICATORS["high"] if w in msg_lower)
+   225→        medium_matches = sum(1 for w in self.COMPLEXITY_INDICATORS["medium"] if w in msg_lower)
+   226→        simple_matches = sum(1 for w in self.COMPLEXITY_INDICATORS["simple"] if w in msg_lower)
+   227→
+   228→        complexity += min(high_matches * 0.25, 0.6)
+   229→        complexity += min(medium_matches * 0.1, 0.3)
+   230→        complexity -= min(simple_matches * 0.3, 0.5)
+   231→        complexity = max(0.0, min(1.0, complexity))
+   232→
+   233→        # Bonus por longitud (consultas largas suelen ser mas complejas)
+   234→        if len(user_message) > 200:
+   235→            complexity += 0.15
+   236→        elif len(user_message) > 100:
+   237→            complexity += 0.08
+   238→
+   239→        # Bonus por multiples preguntas
+   240→        question_marks = msg_lower.count("?") + msg_lower.count("\u00bf")
+   241→        if question_marks >= 3:
+   242→            complexity += 0.15
+   243→        elif question_marks >= 2:
+   244→            complexity += 0.08
+   245→
+   246→        # Bonus por presencia de codigo o rutas de archivo
+   247→        code_indicators = sum(1 for p in [".py", ".js", ".html", ".css", ".json", "def ", "class ", "import ", "function "] if p in msg_lower)
+   248→        if code_indicators >= 2:
+   249→            complexity += 0.15
+   250→
+   251→        return max(0.0, min(1.0, complexity))
+   252→
+   253→    def _llm_complexity(self, user_message):
+   254→        """
+   255→        Evaluacion de complejidad via LLM para casos ambiguos.
+   256→        Retorna un float 0-1 o None si falla.
+   257→        """
+   258→        try:
+   259→            prompt = f"""Evalua la complejidad de esta consulta del usuario en una escala de 0 a 1.
+   260→0 = consulta trivial (saludo, pregunta simple, comando directo)
+   261→0.3 = consulta moderada (una pregunta, instruccion simple)
+   262→0.5 = consulta compleja (analisis, comparacion, multiples pasos)
+   263→0.7 = consulta muy compleja (diseno, debugging, integracion)
+   264→1.0 = consulta extremadamente compleja (arquitectura, migracion, multi-sistema)
+   265→
+   266→CONSULTA: {user_message}
+   267→
+   268→Responde SOLO con un numero entre 0 y 1, sin explicacion."""
+   269→
+   270→            response = ollama.generate_chat([
+   271→                {"role": "system", "content": "Evalua complejidad. Responde SOLO con un numero 0-1."},
+   272→                {"role": "user", "content": prompt}
+   273→            ])
+   274→
+   275→            if response:
+   276→                # Extraer numero de la respuesta
+   277→                import re
+   278→                numbers = re.findall(r'[0-9]*\.?[0-9]+', response.strip())
+   279→                if numbers:
+   280→                    val = float(numbers[0])
+   281→                    return max(0.0, min(1.0, val))
+   282→        except Exception as e:
+   283→            logger.debug(f"Evaluacion LLM de complejidad fallo: {e}")
+   284→        return None
+   285→
+   286→    def _classify_query(self, msg_lower):
+   287→        """Clasifica el tipo de consulta basandose en indicadores."""
+   288→        high_matches = sum(1 for w in self.COMPLEXITY_INDICATORS["high"] if w in msg_lower)
+   289→        if high_matches >= 2:
+   290→            return "analytical"
+   291→        if any(w in msg_lower for w in ["crea", "disena", "genera", "construye"]):
+   292→            return "creative"
+   293→        if any(w in msg_lower for w in ["instalar", "configurar", "ejecutar", "mover"]):
+   294→            return "procedural"
+   295→        if any(w in msg_lower for w in ["que es", "que es", "busca", "encuentra"]):
+   296→            return "factual"
+   297→        return "conversational"
+   298→
+   299→    def _determine_depth(self, complexity):
+   300→        """Determina el nivel de profundidad segun la complejidad."""
+   301→        if complexity < self.DEPTH_THRESHOLDS[THINK_DEPTH_QUICK]:
+   302→            return THINK_DEPTH_NONE
+   303→        elif complexity < self.DEPTH_THRESHOLDS[THINK_DEPTH_FULL]:
+   304→            return THINK_DEPTH_QUICK
+   305→        elif complexity < self.DEPTH_THRESHOLDS[THINK_DEPTH_DEEP]:
+   306→            return THINK_DEPTH_FULL
+   307→        else:
+   308→            return THINK_DEPTH_DEEP
+   309→
+   310→    # ----------------------------------------------------------
+   311→    # FASE PRINCIPAL: THINK (PRE-ReAct)
+   312→    # ----------------------------------------------------------
+   313→
+   314→    def think(self, user_message, context=""):
+   315→        """
+   316→        Genera pensamiento profundo antes de actuar.
+   317→
+   318→        v14.7: Soporta niveles progresivos de profundidad y
+   319→        razonamiento multi-vuelta con auto-critica.
+   320→
+   321→        Args:
+   322→            user_message: Mensaje del usuario
+   323→            context: Contexto adicional (de memoria, etc.)
+   324→
+   325→        Returns:
+   326→            DeepThinkingResult con el razonamiento y plan
+   327→        """
+   328→        start = time.time()
+   329→
+   330→        result = DeepThinkingResult()
+   331→
+   332→        should, complexity, query_type = self.should_think_deep(user_message)
+   333→        result.complexity = complexity
+   334→        result.query_type = query_type
+   335→        result.should_deep_think = should
+   336→
+   337→        if not should or self.mode == "off":
+   338→            result.depth = THINK_DEPTH_NONE
+   339→            self._stats["by_depth"][THINK_DEPTH_NONE] += 1
+   340→            return result
+   341→
+   342→        # Determinar nivel de profundidad
+   343→        depth = self._determine_depth(complexity)
+   344→        result.depth = depth
+   345→        self._stats["by_depth"][depth] += 1
+   346→
+   347→        self._log(
+   348→            f"Deep thinking activado (complejidad={complexity:.2f}, "
+   349→            f"tipo={query_type}, profundidad={depth})"
+   350→        )
+   351→
+   352→        # ---- FASE 1: Razonamiento extendido ----
+   353→        reasoning = self._generate_reasoning(user_message, context, query_type, depth)
+   354→        if reasoning:
+   355→            result.reasoning = reasoning
+   356→            result.thinking_tokens = len(reasoning.split())
+   357→
+   358→        # ---- FASE 1.5: Razonamiento multi-vuelta (solo DEPTH_DEEP) ----
+   359→        if depth >= THINK_DEPTH_DEEP and self.mode in ("cot", "full"):
+   360→            reasoning, rounds = self._iterative_reasoning(
+   361→                user_message, context, reasoning, query_type
+   362→            )
+   363→            result.reasoning = reasoning
+   364→            result.thinking_tokens = len(reasoning.split())
+   365→            result.critique_rounds = rounds
+   366→
+   367→        # ---- FASE 2: Think nativo del modelo (si aplica) ----
+   368→        if self.mode in ("native", "full"):
+   369→            native_thinking = self._get_native_thinking(user_message, context)
+   370→            if native_thinking:
+   371→                result.native_thinking = native_thinking
+   372→                result.thinking_tokens += len(native_thinking.split())
+   373→                self._stats["native_think_used"] += 1
+   374→                # Combinar razonamiento nativo con CoT
+   375→                if result.reasoning:
+   376→                    result.reasoning = (
+   377→                        f"{result.reasoning}\n\n"
+   378→                        f"=== RAZONAMIENTO NATIVO DEL MODELO ===\n"
+   379→                        f"{native_thinking[:DEEP_THINKING_MAX_THINKING_TOKENS]}"
+   380→                    )
+   381→                else:
+   382→                    result.reasoning = native_thinking[:DEEP_THINKING_MAX_THINKING_TOKENS]
+   383→
+   384→        # ---- FASE 3: Planificacion ----
+   385→        # Generar plan para niveles FULL y DEEP
+   386→        if depth >= THINK_DEPTH_FULL:
+   387→            plan = self._generate_plan(user_message, result.reasoning, query_type)
+   388→            if plan:
+   389→                result.plan = plan
+   390→                result.confidence = self._estimate_plan_confidence(plan, user_message)
+   391→        elif depth == THINK_DEPTH_QUICK:
+   392→            # Plan simplificado para consultas moderadas
+   393→            plan = self._generate_quick_plan(user_message, result.reasoning)
+   394→            if plan:
+   395→                result.plan = plan
+   396→                result.confidence = 0.6  # Confianza fija para planes rapidos
+   397→
+   398→        # ---- Respetar budget de tokens ----
+   399→        if result.thinking_tokens > DEEP_THINKING_MAX_THINKING_TOKENS:
+   400→            # Truncar razonamiento al budget
+   401→            words = result.reasoning.split()
+   402→            if len(words) > DEEP_THINKING_MAX_THINKING_TOKENS:
+   403→                result.reasoning = " ".join(words[:DEEP_THINKING_MAX_THINKING_TOKENS])
+   404→                result.thinking_tokens = DEEP_THINKING_MAX_THINKING_TOKENS
+   405→                self._log(f"Razonamiento truncado a {DEEP_THINKING_MAX_THINKING_TOKENS} tokens (budget)")
+   406→
+   407→        result.duration_ms = int((time.time() - start) * 1000)
+   408→        self._log(
+   409→            f"Deep thinking completado: {result.thinking_tokens} tokens, "
+   410→            f"{len(result.plan)} pasos, profundidad={depth}, {result.duration_ms}ms"
+   411→        )
+   412→
+   413→        # ---- Persistir pensamiento en memoria ----
+   414→        self._persist_thought(user_message, result)
+   415→
+   416→        return result
+   417→
+   418→    # ----------------------------------------------------------
+   419→    # RAZONAMIENTO
+   420→    # ----------------------------------------------------------
+   421→
+   422→    def _generate_reasoning(self, user_message, context, query_type, depth):
+   423→        """
+   424→        Genera razonamiento extendido (Chain-of-Thought) antes de actuar.
+   425→        Profundidad variable segun depth.
+   426→        """
+   427→        # Ajustar prompt segun nivel de profundidad
+   428→        if depth == THINK_DEPTH_QUICK:
+   429→            analysis_steps = """1. Que quiere realmente el usuario? (intencion)
+   430→2. Que informacion necesito?"""
+   431→        elif depth == THINK_DEPTH_FULL:
+   432→            analysis_steps = """1. Que quiere realmente el usuario? (intencion profunda)
+   433→2. Que informacion necesito? (datos, archivos, estado del sistema)
+   434→3. Cuales son los posibles obstaculos? (errores comunes, dependencias)
+   435→4. Cual es la secuencia optima de acciones? (pasos ordenados)
+   436→5. Hay alternativas si el plan A falla? (plan B)"""
+   437→        else:  # THINK_DEPTH_DEEP
+   438→            analysis_steps = """1. Que quiere realmente el usuario? (intencion profunda, implicita)
+   439→2. Que informacion necesito? (datos, archivos, estado del sistema, contexto)
+   440→3. Cuales son los posibles obstaculos? (errores comunes, dependencias, edge cases)
+   441→4. Cual es la secuencia optima de acciones? (pasos ordenados con dependencias)
+   442→5. Hay alternativas si el plan A falla? (plan B y plan C)
+   443→6. Que supuestos estoy haciendo que podrian ser incorrectos? (supuestos ocultos)
+   444→7. Como puedo verificar que mi analisis es correcto? (criterios de validacion)"""
+   445→
+   446→        context_part = f"\nCONTEXTO DISPONIBLE: {context[:500]}" if context else ""
+   447→
+   448→        reasoning_prompt = f"""Analiza esta consulta paso a paso antes de actuar.
+   449→
+   450→CONSULTA: {user_message}
+   451→TIPO: {query_type}{context_part}
+   452→
+   453→PIENSA EN VOZ ALTA:
+   454→{analysis_steps}
+   455→
+   456→RAZONAMIENTO:"""
+   457→
+   458→        max_tokens_hint = ""
+   459→        if DEEP_THINKING_MAX_THINKING_TOKENS > 0:
+   460→            max_tokens_hint = f" Limite tu respuesta a ~{DEEP_THINKING_MAX_THINKING_TOKENS} palabras."
+   461→
+   462→        try:
+   463→            reasoning = ollama.generate_chat([
+   464→                {"role": "system", "content": (
+   465→                    "Eres un sistema de razonamiento interno. "
+   466→                    "Genera analisis profundo antes de actuar. "
+   467→                    "Responde en espanol. Se estructurado y conciso."
+   468→                    f"{max_tokens_hint}"
+   469→                )},
+   470→                {"role": "user", "content": reasoning_prompt}
+   471→            ])
+   472→            return reasoning or ""
+   473→        except Exception as e:
+   474→            logger.debug(f"Generacion de razonamiento fallo: {e}")
+   475→            return ""
+   476→
+   477→    def _iterative_reasoning(self, user_message, context, initial_reasoning, query_type):
+   478→        """
+   479→        Razonamiento multi-vuelta: el modelo critica y refina su propio analisis.
+   480→
+   481→        Returns: (refined_reasoning: str, rounds_completed: int)
+   482→        """
+   483→        current_reasoning = initial_reasoning
+   484→        evolution = [initial_reasoning[:200]]  # Guardar evolucion para debugging
+   485→
+   486→        for round_num in range(self.MAX_CRITIQUE_ROUNDS):
+   487→            critique_prompt = f"""Eres un critico interno. Analiza este razonamiento y mejoralo.
+   488→
+   489→CONSULTA ORIGINAL: {user_message}
+   490→RAZONAMIENTO ACTUAL:
+   491→{current_reasoning[:800]}
+   492→
+   493→CRITICA TU PROPIO ANALISIS:
+   494→1. Hay algo que no considere? (puntos ciegos)
+   495→2. Hay supuestos incorrectos? (errores de razonamiento)
+   496→3. Puedo descomponer mas algun paso? (granularidad)
+   497→4. Hay dependencias entre pasos que no vi? (orden critico)
+   498→
+   499→Si el razonamiento es ya completo y correcto, responde "APROBADO".
+   500→Si necesita mejoras, proporciona el razonamiento mejorado completo.
+   501→
+   502→RAZONAMIENTO MEJORADO:"""
+   503→
+   504→            try:
+   505→                critique_result = ollama.generate_chat([
+   506→                    {"role": "system", "content": (
+   507→                        "Critica y mejora razonamientos. "
+   508→                        "Responde en espanol. Se riguroso."
+   509→                    )},
+   510→                    {"role": "user", "content": critique_prompt}
+   511→                ])
+   512→
+   513→                if not critique_result or not critique_result.strip():
+   514→                    break
+   515→
+   516→                # Si aprobo el razonamiento actual, no mejorar mas
+   517→                if critique_result.strip().startswith("APROBADO"):
+   518→                    self._log(f"Auto-critica ronda {round_num + 1}: razonamiento aprobado")
+   519→                    break
+   520→
+   521→                # Si la critica es significativamente mas larga, probablemente mejoro
+   522→                if len(critique_result) > len(current_reasoning) * 0.6:
+   523→                    current_reasoning = critique_result
+   524→                    evolution.append(critique_result[:200])
+   525→                    self._log(f"Auto-critica ronda {round_num + 1}: razonamiento refinado")
+   526→                else:
+   527→                    # La critica no agrego valor suficiente, parar
+   528→                    break
+   529→
+   530→            except Exception as e:
+   531→                logger.debug(f"Auto-critica ronda {round_num + 1} fallo: {e}")
+   532→                break
+   533→
+   534→        return current_reasoning, len(evolution) - 1
+   535→
+   536→    # ----------------------------------------------------------
+   537→    # THINK NATIVO DEL MODELO
+   538→    # ----------------------------------------------------------
+   539→
+   540→    def _get_native_thinking(self, user_message, context):
+   541→        """
+   542→        Obtiene pensamiento nativo del modelo (think tags).
+   543→
+   544→        WORKAROUND v14.7: Como Ollama no soporta think=True con tools,
+   545→        hacemos una llamada separada SIN tools para obtener el thinking,
+   546→        y luego inyectamos ese thinking como contexto en la llamada con tools.
+   547→        """
+   548→        try:
+   549→            # Verificar si el modelo actual soporta think nativo
+   550→            current_model = ollama.model
+   551→            if not detect_native_thinking_support(current_model):
+   552→                return ""
+   553→
+   554→            # Llamada de solo razonamiento (sin tools, con think=True)
+   555→            # El thinking se genera internamente y se captura via _last_thinking
+   556→            context_part = f"\nContexto disponible: {context[:300]}" if context else ""
+   557→            think_prompt = f"""Analiza en profundidad antes de responder:
+   558→{user_message}{context_part}"""
+   559→
+   560→            # Usar generate_chat con think implicito via _try_method
+   561→            # El think nativo se activa automaticamente en _try_method
+   562→            # cuando detecta un modelo compatible y NO hay tools
+   563→            response = ollama.generate_chat([
+   564→                {"role": "system", "content": (
+   565→                    "Eres un asistente que piensa profundamente antes de responder. "
+   566→                    "Responde en espanol."
+   567→                )},
+   568→                {"role": "user", "content": think_prompt}
+   569→            ])
+   570→
+   571→            # El thinking nativo se guarda en ollama._last_thinking
+   572→            native_think = getattr(ollama, '_last_thinking', '')
+   573→            if native_think:
+   574→                self._log(f"Think nativo capturado: {len(native_think)} chars")
+   575→                return native_think[:DEEP_THINKING_MAX_THINKING_TOKENS]
+   576→
+   577→        except Exception as e:
+   578→            logger.debug(f"Think nativo fallo: {e}")
+   579→
+   580→        return ""
+   581→
+   582→    # ----------------------------------------------------------
+   583→    # PLANIFICACION
+   584→    # ----------------------------------------------------------
+   585→
+   586→    def _generate_plan(self, user_message, reasoning, query_type):
+   587→        """Genera un plan de accion estructurado."""
+   588→        plan_prompt = f"""Basandote en este analisis, genera un plan de accion concreto.
+   589→
+   590→CONSULTA: {user_message}
+   591→RAZONAMIENTO: {reasoning[:600] if reasoning else "Sin razonamiento previo"}
+   592→
+   593→Genera un plan en formato JSON con esta estructura exacta:
+   594→{{
+   595→    "steps": [
+   596→        {{"action": "descripcion de la accion", "tool": "herramienta a usar o 'responder'", "purpose": "por que este paso", "confidence": 0.8}},
+   597→        ...
+   598→    ],
+   599→    "estimated_iterations": 2,
+   600→    "fallback": "que hacer si el plan falla",
+   601→    "risks": ["posibles problemas"]
+   602→}}
+   603→
+   604→PLAN:"""
+   605→
+   606→        try:
+   607→            plan_text = ollama.generate_chat([
+   608→                {"role": "system", "content": (
+   609→                    "Generas planes de accion concretos. "
+   610→                    "Responde SOLO con JSON valido. "
+   611→                    "Maximo 5 pasos. Se practico."
+   612→                )},
+   613→                {"role": "user", "content": plan_prompt}
+   614→            ])
+   615→
+   616→            if plan_text:
+   617→                return self._parse_plan(plan_text)
+   618→
+   619→        except Exception as e:
+   620→            logger.debug(f"Generacion de plan fallo: {e}")
+   621→
+   622→        return []
+   623→
+   624→    def _generate_quick_plan(self, user_message, reasoning):
+   625→        """Genera un plan rapido simplificado para consultas moderadas."""
+   626→        quick_prompt = f"""Genera un plan muy breve (2-3 pasos maximo) para esta consulta.
+   627→
+   628→CONSULTA: {user_message}
+   629→{f"ANALISIS: {reasoning[:200]}" if reasoning else ""}
+   630→
+   631→Responde SOLO con JSON: {{"steps": [{{"action": "...", "tool": "..."}}]}}
+   632→
+   633→PLAN:"""
+   634→
+   635→        try:
+   636→            plan_text = ollama.generate_chat([
+   637→                {"role": "system", "content": "Generas planes breves. SOLO JSON valido. Max 3 pasos."},
+   638→                {"role": "user", "content": quick_prompt}
+   639→            ])
+   640→            if plan_text:
+   641→                return self._parse_plan(plan_text)
+   642→        except Exception as e:
+   643→            logger.debug(f"Plan rapido fallo: {e}")
+   644→        return []
+   645→
+   646→    def _parse_plan(self, plan_text):
+   647→        """Parsea texto de plan a lista de pasos, con fallback robusto."""
+   648→        if not plan_text:
+   649→            return []
+   650→
+   651→        # Buscar JSON en la respuesta (puede estar en code block)
+   652→        json_str = plan_text
+   653→        if "```json" in json_str:
+   654→            json_str = json_str.split("```json")[1].split("```")[0]
+   655→        elif "```" in json_str:
+   656→            json_str = json_str.split("```")[1].split("```")[0]
+   657→
+   658→        try:
+   659→            plan_data = json.loads(json_str.strip())
+   660→            steps = plan_data.get("steps", [])
+   661→            # Normalizar campos de cada paso
+   662→            for step in steps:
+   663→                if "confidence" not in step:
+   664→                    step["confidence"] = None
+   665→                if "purpose" not in step:
+   666→                    step["purpose"] = step.get("proposito", "auto")
+   667→            return steps[:5]
+   668→        except json.JSONDecodeError:
+   669→            # Fallback: parsear como lista numerada
+   670→            steps = []
+   671→            for line in plan_text.strip().split("\n"):
+   672→                line = line.strip()
+   673→                if line and (line[0].isdigit() or line.startswith("-")):
+   674→                    action = line.lstrip("0123456789.-) ").strip()
+   675→                    if action:
+   676→                        steps.append({
+   677→                            "action": action,
+   678→                            "tool": "infer",
+   679→                            "purpose": "auto",
+   680→                            "confidence": None,
+   681→                        })
+   682→            return steps[:5]
+   683→
+   684→    # ----------------------------------------------------------
+   685→    # ESTIMACION DE CONFIANZA BASADA EN CONTENIDO (Mejora 8)
+   686→    # ----------------------------------------------------------
+   687→
+   688→    def _estimate_plan_confidence(self, plan, user_message=""):
+   689→        """
+   690→        Estima la confianza en el plan generado basandose en contenido,
+   691→        no solo en numero de pasos.
+   692→
+   693→        Criterios:
+   694→        - Herramientas especificas mencionadas (+)
+   695→        - Propositos concretos (+)
+   696→        - Plan tiene fallback (+)
+   697→        - Pasos con confianza explicita (+)
+   698→        - Herramienta 'infer' o 'auto' (-)
+   699→        - Sin proposito (-)
+   700→        - Demasiados pasos (>5) (-)
+   701→        """
+   702→        if not plan:
+   703→            return 0.3
+   704→
+   705→        score = 0.5  # Base
+   706→        n_steps = len(plan)
+   707→
+   708→        # Bonus por herramientas especificas mencionadas
+   709→        specific_tools = sum(
+   710→            1 for s in plan
+   711→            if s.get("tool", "infer") not in ("infer", "auto", "responder", "")
+   712→        )
+   713→        if specific_tools >= 2:
+   714→            score += 0.15
+   715→        elif specific_tools >= 1:
+   716→            score += 0.08
+   717→
+   718→        # Bonus por propositos concretos (no 'auto')
+   719→        concrete_purposes = sum(
+   720→            1 for s in plan
+   721→            if s.get("purpose", "auto") not in ("auto", "") and len(s.get("purpose", "")) > 10
+   722→        )
+   723→        if concrete_purposes >= 2:
+   724→            score += 0.1
+   725→
+   726→        # Bonus por confianza explicita en pasos
+   727→        with_confidence = sum(1 for s in plan if s.get("confidence") is not None)
+   728→        if with_confidence >= n_steps * 0.5:
+   729→            avg_step_conf = sum(
+   730→                s["confidence"] for s in plan if s.get("confidence") is not None
+   731→            ) / max(with_confidence, 1)
+   732→            score += 0.1 * avg_step_conf
+   733→
+   734→        # Penalizacion por herramientas inferidas
+   735→        inferred_tools = sum(1 for s in plan if s.get("tool", "") == "infer")
+   736→        if inferred_tools > n_steps * 0.5:
+   737→            score -= 0.1
+   738→
+   739→        # Penalizacion por demasiados pasos
+   740→        if n_steps > 5:
+   741→            score -= 0.15
+   742→        elif n_steps == 1:
+   743→            score -= 0.05
+   744→
+   745→        return max(0.1, min(1.0, score))
+   746→
+   747→    # ----------------------------------------------------------
+   748→    # POST-REFLEXION (Mejora 6: con contexto de tools)
+   749→    # ----------------------------------------------------------
+   750→
+   751→    def reflect(self, user_message, response, had_errors=False, tool_results=None):
+   752→        """
+   753→        Post-reflexion: evalua y potencialmente mejora la respuesta final.
+   754→
+   755→        v14.7: Ahora recibe tool_results para evaluar si las herramientas
+   756→        se usaron correctamente y la informacion es adecuada.
+   757→
+   758→        Args:
+   759→            user_message: Consulta original
+   760→            response: Respuesta generada
+   761→            had_errors: Si hubo errores durante la ejecucion
+   762→            tool_results: Lista de (tool_name, result_summary) de la ejecucion
+   763→
+   764→        Returns:
+   765→            (improved_response: str, was_improved: bool)
+   766→        """
+   767→        if self.mode in ("off", "native"):
+   768→            # En modo native, el modelo ya piensa internamente
+   769→            return response, False
+   770→
+   771→        # No reflejar respuestas cortas o casuales
+   772→        if len(response) < 50:
+   773→            return response, False
+   774→
+   775→        # Solo reflejar si la complejidad lo justifica o hubo errores
+   776→        should, complexity, _ = self.should_think_deep(user_message)
+   777→        if not should and not had_errors and not DEEP_THINKING_REFLECT_ON_ERRORS:
+   778→            return response, False
+   779→
+   780→        self._stats["reflections_triggered"] += 1
+   781→        self._log("Post-reflexion activada")
+   782→
+   783→        # Construir seccion de resultados de tools (Mejora 6)
+   784→        tools_section = ""
+   785→        if tool_results:
+   786→            tools_lines = []
+   787→            for name, summary in tool_results[:5]:  # Max 5 resultados
+   788→                tools_lines.append(f"  - {name}: {summary[:150]}")
+   789→            tools_section = f"""
+   790→RESULTADOS DE HERRAMIENTAS UTILIZADAS:
+   791→{chr(10).join(tools_lines)}
+   792→
+   793→Evaluacion adicional:
+   794→4. Las herramientas usadas fueron las correctas?
+   795→5. La informacion obtenida es suficiente y relevante?"""
+   796→
+   797→        reflection_prompt = f"""Eres un critico interno. Evalua esta respuesta y mejorala si es necesario.
+   798→
+   799→CONSULTA ORIGINAL: {user_message}
+   800→
+   801→RESPUESTA GENERADA:
+   802→{response}
+   803→
+   804→HUBO ERRORES DURANTE LA EJECUCION: {"Si" if had_errors else "No"}{tools_section}
+   805→
+   806→EVALUA:
+   807→1. La respuesta es completa y precisa?
+   808→2. Hay informacion incorrecta o ambigua?
+   809→3. Se puede mejorar la claridad o estructura?
+   810→
+   811→Si la respuesta es buena, retorna "APROBADA" seguido de la respuesta original.
+   812→Si necesita mejoras, retorna la version mejorada directamente.
+   813→
+   814→RESPUESTA MEJORADA:"""
+   815→
+   816→        try:
+   817→            improved = ollama.generate_chat([
+   818→                {"role": "system", "content": (
+   819→                    "Eres un critico interno que mejora respuestas. "
+   820→                    "Responde en espanol. Se conciso."
+   821→                )},
+   822→                {"role": "user", "content": reflection_prompt}
+   823→            ])
+   824→
+   825→            if improved and improved.strip():
+   826→                # Si el modelo aprobo la respuesta original
+   827→                if improved.strip().startswith("APROBADA"):
+   828→                    approved = improved.replace("APROBADA", "", 1).strip()
+   829→                    return approved if approved else response, False
+   830→
+   831→                # Si la mejora es significativamente mejor
+   832→                if len(improved) > len(response) * 0.7:
+   833→                    self._stats["responses_improved"] += 1
+   834→                    self._log("Respuesta mejorada via reflexion")
+   835→                    return improved, True
+   836→
+   837→        except Exception as e:
+   838→            logger.debug(f"Post-reflexion fallo (no critico): {e}")
+   839→
+   840→        return response, False
+   841→
+   842→    # ----------------------------------------------------------
+   843→    # PERSISTENCIA DE PENSAMIENTOS (Mejora 7)
+   844→    # ----------------------------------------------------------
+   845→
+   846→    def _persist_thought(self, user_message, result):
+   847→        """
+   848→        Guarda el resultado del pensamiento profundo en archivo JSON
+   849→        para que futuras consultas similares puedan beneficiarse.
+   850→
+   851→        Los pensamientos se guardan en ~/.ia-local/learning/deep_thoughts.json
+   852→        """
+   853→        if not result.should_deep_think or not result.reasoning:
+   854→            return
+   855→
+   856→        try:
+   857→            import os
+   858→            thoughts_file = os.path.join(LEARN_DIR, "deep_thoughts.json")
+   859→
+   860→            # Cargar pensamientos existentes
+   861→            thoughts = []
+   862→            if os.path.exists(thoughts_file):
+   863→                try:
+   864→                    with open(thoughts_file, "r", encoding="utf-8") as f:
+   865→                        thoughts = json.load(f)
+   866→                except (json.JSONDecodeError, IOError):
+   867→                    thoughts = []
+   868→
+   869→            # Agregar nuevo pensamiento
+   870→            thought_entry = {
+   871→                "timestamp": datetime.now().isoformat(),
+   872→                "query_preview": user_message[:100],
+   873→                "query_type": result.query_type,
+   874→                "complexity": result.complexity,
+   875→                "depth": result.depth,
+   876→                "reasoning_preview": result.reasoning[:200],
+   877→                "plan_steps": len(result.plan),
+   878→                "confidence": result.confidence,
+   879→                "duration_ms": result.duration_ms,
+   880→            }
+   881→
+   882→            thoughts.append(thought_entry)
+   883→
+   884→            # Mantener solo los ultimos 100 pensamientos (evitar archivo infinito)
+   885→            if len(thoughts) > 100:
+   886→                thoughts = thoughts[-100:]
+   887→
+   888→            with open(thoughts_file, "w", encoding="utf-8") as f:
+   889→                json.dump(thoughts, f, ensure_ascii=False, indent=2)
+   890→
+   891→            self._stats["persisted_thoughts"] += 1
+   892→
+   893→        except Exception as e:
+   894→            logger.debug(f"Persistencia de pensamiento fallo: {e}")
+   895→
+   896→    def get_similar_thoughts(self, user_message, limit=3):
+   897→        """
+   898→        Busca pensamientos previos similares a la consulta actual.
+   899→        Retorna lista de pensamientos relevantes.
+   900→
+   901→        Usa busqueda por palabras clave (sin embeddings para velocidad).
+   902→        """
+   903→        try:
+   904→            import os
+   905→            thoughts_file = os.path.join(LEARN_DIR, "deep_thoughts.json")
+   906→
+   907→            if not os.path.exists(thoughts_file):
+   908→                return []
+   909→
+   910→            with open(thoughts_file, "r", encoding="utf-8") as f:
+   911→                thoughts = json.load(f)
+   912→
+   913→            # Busqueda simple por palabras clave
+   914→            msg_words = set(user_message.lower().split())
+   915→            scored = []
+   916→            for thought in thoughts[-50:]:  # Solo buscar en los ultimos 50
+   917→                query_words = set(thought.get("query_preview", "").lower().split())
+   918→                overlap = len(msg_words & query_words)
+   919→                if overlap >= 2:  # Al menos 2 palabras en comun
+   920→                    scored.append((overlap, thought))
+   921→
+   922→            scored.sort(key=lambda x: x[0], reverse=True)
+   923→            return [t for _, t in scored[:limit]]
+   924→
+   925→        except Exception as e:
+   926→            logger.debug(f"Busqueda de pensamientos similares fallo: {e}")
+   927→            return []
+   928→
+   929→    # ----------------------------------------------------------
+   930→    # PROMPT DE INYECCION
+   931→    # ----------------------------------------------------------
+   932→
+   933→    def get_thinking_prompt(self, deep_result):
+   934→        """
+   935→        Genera el prompt de pensamiento profundo para inyectar en el ReAct.
+   936→
+   937→        Se inyecta como contexto adicional antes de la primera iteracion.
+   938→        v14.7: Incluye nivel de profundidad y pensamientos previos similares.
+   939→        """
+   940→        if not deep_result or not deep_result.should_deep_think:
+   941→            return ""
+   942→
+   943→        depth_labels = {0: "ninguno", 1: "rapido", 2: "completo", 3: "profundo"}
+   944→        depth_label = depth_labels.get(deep_result.depth, "desconocido")
+   945→
+   946→        parts = [f"=== PENSAMIENTO PROFUNDO (analisis previo, nivel: {depth_label}) ==="]
+   947→
+   948→        if deep_result.reasoning:
+   949→            # Truncar razonamiento segun budget
+   950→            max_chars = DEEP_THINKING_MAX_THINKING_TOKENS * 5  # ~5 chars por palabra
+   951→            parts.append(f"RAZONAMIENTO:\n{deep_result.reasoning[:max_chars]}")
+   952→
+   953→        if deep_result.native_thinking and self.mode in ("native", "full"):
+   954→            parts.append(f"PENSAMIENTO INTERNO DEL MODELO:\n{deep_result.native_thinking[:300]}")
+   955→
+   956→        if deep_result.plan:
+   957→            parts.append("PLAN DE ACCION:")
+   958→            for i, step in enumerate(deep_result.plan[:5], 1):
+   959→                action = step.get("action", step.get("accion", ""))
+   960→                tool = step.get("tool", step.get("herramienta", ""))
+   961→                purpose = step.get("purpose", step.get("proposito", ""))
+   962→                parts.append(f"  {i}. [{tool}] {action}")
+   963→                if purpose and purpose != "auto":
+   964→                    parts.append(f"     -> {purpose}")
+   965→
+   966→        if deep_result.confidence < 0.5:
+   967→            parts.append("Baja confianza en el plan. Considera pedir aclaracion al usuario.")
+   968→
+   969→        if deep_result.critique_rounds > 0:
+   970→            parts.append(f"(Razonamiento refinado via {deep_result.critique_rounds} rondas de auto-critica)")
+   971→
+   972→        parts.append("=== FIN PENSAMIENTO PROFUNDO ===")
+   973→        parts.append("Usa este analisis como guia, pero adapta segun lo que descubras al ejecutar.")
+   974→
+   975→        return "\n".join(parts)
+   976→
+   977→    # ----------------------------------------------------------
+   978→    # UTILIDADES
+   979→    # ----------------------------------------------------------
+   980→
+   981→    def _log(self, message):
+   982→        timestamp = datetime.now().strftime("%H:%M:%S")
+   983→        logger.info(f"[{timestamp}] [DEEP_THINK] {message}")
+   984→
+   985→    def stats(self):
+   986→        """Retorna estadisticas del modulo de pensamiento profundo."""
+   987→        return self._stats.copy()
+   988→
+   989→
+   990→# ============================================================
+   991→# FUNCIONES UTILITARIAS
+   992→# ============================================================
+   993→
+   994→def detect_native_thinking_support(model_name):
+   995→    """
+   996→    Detecta si un modelo soporta pensamiento nativo (think tags).
+   997→
+   998→    Modelos con soporte nativo:
+   999→    - qwen3 (cualquier variante)
+  1000→    - deepseek-r1
+  1001→    - qwq
+  1002→    - Phi-4-reasoning
+  1003→    - marco-o1
+  1004→
+  1005→    Returns:
+  1006→        bool: Si el modelo soporta think nativo
+  1007→    """
+  1008→    if not model_name:
+  1009→        return False
+  1010→
+  1011→    model_lower = model_name.lower()
+  1012→
+  1013→    # Modelos conocidos con soporte nativo de think
+  1014→    native_think_models = [
+  1015→        "qwen3",          # Qwen3 con think nativo
+  1016→        "deepseek-r1",    # DeepSeek R1
+  1017→        "qwq",            # QwQ reasoning model
+  1018→        "phi-4-reason",   # Phi-4 reasoning
+  1019→        "marco-o1",       # Marco O1
+  1020→    ]
+  1021→
+  1022→    return any(m in model_lower for m in native_think_models)
+  1023→
