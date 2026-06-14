@@ -52,3 +52,57 @@ prompt
 server.log
 # Skills directory
 /skills/tool-results/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Tool results (runtime)
+/tool-results/
+
+# Data files (runtime/generated)
+signaltrade_*.json
+nexu_*.json
+packages_tree.json
+apps_tree.json
+tools_tree.json
+readme_raw.json
+story_raw.json
+repo_*.json
+agents_ts.json
+nodever.json
+pkg_*.json
+workspace_yaml.json
+maintainers.json
+bun.lock
+
+# Upload directory (runtime)
+/upload/
+
+# Duplicate repo clones (not submodules)
+/AgentLocal/
+/AgentLocal-repo/
+
+# Download directory (runtime/generated)
+/download/
+
+# DB files (runtime)
+/db/
+
+# LEARN_DIR (runtime)
+/LEARN_DIR/
+
+# Mini-services (runtime)
+/mini-services/
+
+# Agent context (runtime)
+/agent-ctx/
+
+# Credentials (sensitive)
+agente_v14/credentials/
+
+# Z scripts runtime
+.zscripts/dev.pid
