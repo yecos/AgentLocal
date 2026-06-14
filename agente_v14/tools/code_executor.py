@@ -717,3 +717,197 @@ else:
         f.write(wrapper_code)
     
     return wrapper_path
+
+
+# ============================================================
+# CODE REVIEW
+# ============================================================
+
+def review_code(ruta: str, lenguaje: str = "python", profundidad: str = "normal") -> str:
+    """Revisa codigo y sugiere mejoras. Ejecuta linters si estan disponibles y usa LLM para analisis semantico.
+
+    Args:
+        ruta: Ruta al archivo de codigo a revisar
+        lenguaje: Lenguaje de programacion (python, javascript, typescript)
+        profundidad: Nivel de detalle: rapido, normal, profundo
+    """
+    if not os.path.exists(ruta):
+        return f"ERROR: Archivo no encontrado: {ruta}"
+
+    # Read file content
+    try:
+        with open(ruta, "r", encoding="utf-8", errors="replace") as f:
+            code_content = f.read()
+    except Exception as e:
+        return f"ERROR leyendo archivo: {e}"
+
+    if not code_content.strip():
+        return "El archivo esta vacio. No hay nada que revisar."
+
+    lines_count = code_content.count("\n") + 1
+
+    results = {
+        "file": ruta,
+        "language": lenguaje,
+        "lines": lines_count,
+        "depth": profundidad,
+        "linter_results": None,
+        "llm_results": None,
+        "issues": [],
+    }
+
+    # 1. Run linter
+    linter_output = _run_linter(ruta, lenguaje)
+    if linter_output:
+        results["linter_results"] = linter_output
+        linter_issues = _parse_linter_output(linter_output, lenguaje)
+        results["issues"].extend(linter_issues)
+
+    # 2. LLM analysis for semantic issues
+    llm_review = _llm_code_review(code_content, lenguaje, profundidad)
+    if llm_review:
+        results["llm_results"] = llm_review
+
+    # 3. Format output
+    return _format_review_output(results)
+
+
+def _run_linter(ruta: str, lenguaje: str) -> str:
+    """Ejecuta el linter apropiado para el lenguaje."""
+    try:
+        if lenguaje in ("python", "py"):
+            # Try flake8 first (faster), then pylint
+            for linter_cmd in [
+                ["python3", "-m", "flake8", "--max-line-length=120", "--disable=noqa", ruta],
+                ["python3", "-m", "pylint", "--output-format=text", "--score=n", ruta],
+            ]:
+                try:
+                    result = subprocess.run(
+                        linter_cmd,
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    if result.stdout.strip():
+                        return result.stdout.strip()
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    continue
+            return ""
+
+        elif lenguaje in ("javascript", "js", "typescript", "ts"):
+            try:
+                result = subprocess.run(
+                    ["npx", "eslint", "--format", "compact", ruta],
+                    capture_output=True, text=True, timeout=30,
+                )
+                return result.stdout.strip() or result.stderr.strip()
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                return ""
+
+        return ""
+    except Exception as e:
+        logger.debug(f"Error ejecutando linter: {e}")
+        return ""
+
+
+def _parse_linter_output(output: str, lenguaje: str) -> list:
+    """Parsea la salida del linter en una lista de issues estructurados."""
+    issues = []
+    for line in output.split("\n")[:30]:  # Limitar a 30 issues
+        line = line.strip()
+        if not line:
+            continue
+
+        # Detect severity
+        severity = "info"
+        line_lower = line.lower()
+        if any(kw in line_lower for kw in ["error", "fatal", "critical"]):
+            severity = "high"
+        elif any(kw in line_lower for kw in ["warning", "warn"]):
+            severity = "medium"
+        elif any(kw in line_lower for kw in ["convention", "refactor", "info", "style"]):
+            severity = "low"
+
+        issues.append({
+            "source": "linter",
+            "severity": severity,
+            "message": line[:200],
+        })
+
+    return issues
+
+
+def _llm_code_review(code: str, lenguaje: str, profundidad: str) -> str:
+    """Usa el LLM para analizar codigo semanticamente."""
+    try:
+        from llm import ollama
+
+        depth_prompts = {
+            "rapido": "Haz una revision rapida. Identifica solo bugs criticos y problemas de seguridad obvios.",
+            "normal": "Revisa el codigo buscando bugs, problemas de seguridad, problemas de estilo y oportunidades de optimizacion.",
+            "profundo": "Haz una revision exhaustiva. Analiza bugs, seguridad, rendimiento, mantenibilidad, patrones de diseno, manejo de errores, y mejores practicas.",
+        }
+
+        review_prompt = depth_prompts.get(profundidad, depth_prompts["normal"])
+
+        # Truncate very long files
+        if len(code) > 6000:
+            code = code[:3000] + "\n... (truncado) ...\n" + code[-3000:]
+
+        prompt = (
+            f"Eres un revisor de codigo experto. {review_prompt}\n\n"
+            f"Lenguaje: {lenguaje}\n\n"
+            f"Codigo a revisar:\n```\n{code}\n```\n\n"
+            "Formato de respuesta:\n"
+            "Para cada issue encontrado, usa este formato:\n"
+            "[SEVERIDAD] tipo: descripcion\n"
+            "Severidades: CRITICAL, HIGH, MEDIUM, LOW, INFO\n"
+            "Tipos: bug, security, style, performance, maintainability, best-practice\n\n"
+            "Al final, agrega un resumen con el numero total de issues por severidad "
+            "y una puntuacion general del 1 al 10."
+        )
+
+        messages = [{"role": "user", "content": prompt}]
+        response = ollama.generate_chat(messages)
+
+        return str(response).strip() if response else ""
+
+    except Exception as e:
+        logger.debug(f"Error en LLM code review: {e}")
+        return ""
+
+
+def _format_review_output(results: dict) -> str:
+    """Formatea los resultados de la revision como texto legible."""
+    output_parts = [
+        f"REVISION DE CODIGO: {results['file']}",
+        f"Lenguaje: {results['language']} | Lineas: {results['lines']} | Profundidad: {results['depth']}",
+        "=" * 60,
+    ]
+
+    # Linter results
+    if results["linter_results"]:
+        output_parts.append("")
+        output_parts.append("LINTER:")
+        for line in results["linter_results"].split("\n")[:20]:
+            output_parts.append(f"  {line}")
+    else:
+        output_parts.append("")
+        output_parts.append("LINTER: No disponible o sin hallazgos")
+
+    # LLM results
+    if results["llm_results"]:
+        output_parts.append("")
+        output_parts.append("ANALISIS SEMANTICO (LLM):")
+        for line in results["llm_results"].split("\n"):
+            output_parts.append(f"  {line}")
+
+    # Summary of issues from linter
+    if results["issues"]:
+        output_parts.append("")
+        output_parts.append("RESUMEN DE ISSUES DEL LINTER:")
+        by_severity = {"high": 0, "medium": 0, "low": 0, "info": 0}
+        for issue in results["issues"]:
+            sev = issue.get("severity", "info")
+            by_severity[sev] = by_severity.get(sev, 0) + 1
+        output_parts.append(f"  HIGH: {by_severity.get('high', 0)} | MEDIUM: {by_severity.get('medium', 0)} | LOW: {by_severity.get('low', 0)} | INFO: {by_severity.get('info', 0)}")
+
+    return "\n".join(output_parts)

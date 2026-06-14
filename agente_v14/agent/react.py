@@ -882,6 +882,7 @@ class ReactAgent:
     def _stream_llm_with_tools(self, messages):
         """
         Genera respuesta del LLM con streaming REAL.
+        M8.3: Early type detection for reduced perceived latency.
         Yields: {"type": "token"|"tool_calls"|"done", "data": ...}
         """
         import time as _time
@@ -889,18 +890,37 @@ class ReactAgent:
         full_content = ""
         full_tool_calls = []
 
+        # M8.3: Early type detection prefixes
+        TOOL_JSON_PREFIXES = ['{"accion":', '{"pensamiento":', '{"_multi', '{"tool']
+        is_likely_tool_json = None
+
         try:
             # Intentar streaming HTTP directo (mas rapido, sin overhead de lib)
             for chunk in ollama.generate_stream(messages, tools=self._get_tool_schemas(getattr(self, '_last_user_message', ''))):
                 if isinstance(chunk, str):
-                    # Token de texto - emitir inmediatamente
-                    # PERO: si parece JSON de tool call, no emitirlo al usuario
+                    # Token de texto
                     full_content += chunk
-                    # Detectar si el contenido es JSON de herramienta
-                    if self._looks_like_tool_json(full_content):
-                        continue  # Acumular sin emitir
-                    # Si antes se acumulaba JSON pero ya no, limpiar
-                    yield {"type": "token", "data": chunk}
+
+                    # M8.3: Detect early if this is a tool JSON (after ~10 chars)
+                    if is_likely_tool_json is None and len(full_content) > 10:
+                        is_likely_tool_json = any(
+                            full_content.lstrip().startswith(prefix)
+                            for prefix in TOOL_JSON_PREFIXES
+                        )
+                        if is_likely_tool_json:
+                            logger.debug("[M8.3] Early detection: tool JSON, silencing tokens")
+
+                    # If NOT tool JSON, emit tokens to user immediately (reduces perceived latency)
+                    if is_likely_tool_json is False:
+                        yield {"type": "token", "data": chunk}
+                    elif is_likely_tool_json is None:
+                        # Not yet determined - use existing _looks_like_tool_json for safety
+                        if self._looks_like_tool_json(full_content):
+                            is_likely_tool_json = True
+                            continue  # Acumular sin emitir
+                        # If short enough and doesn't look like JSON, emit
+                        yield {"type": "token", "data": chunk}
+                    # If IS tool JSON, accumulate silently (is_likely_tool_json is True)
                 elif isinstance(chunk, dict):
                     # Resultado final con tool_calls
                     msg = chunk.get("message", chunk)

@@ -767,6 +767,104 @@ class AutoEvolver:
 
 
 # ============================================================
+# M9: ANALISIS DE USO Y EVOLUCION BASADA EN DATOS REALES
+# ============================================================
+
+def analyze_usage_gaps() -> dict:
+    """M9: Analyze which tools fail most or are never used.
+    
+    Examina las metricas de uso actual para identificar:
+    - Herramientas con alta tasa de error (>30%) que necesitan mejora
+    - Herramientas que nunca se usaron (posibles carencias)
+    
+    Returns:
+        Dict con analisis de gaps de uso:
+        - high_error_tools: lista de tools con error rate > 30%
+        - never_used_tools: lista de tools registrados pero nunca usados
+        - total_tools: numero total de herramientas disponibles
+        - used_tools: numero de herramientas usadas en la sesion
+    """
+    from utils.metrics import get_metrics
+    
+    metrics = get_metrics()
+    stats = metrics.get_summary()
+    
+    tool_calls = stats.get("tool_calls", {})
+    tool_latency = stats.get("tool_latency_ms", {})
+    errors = stats.get("errors", {})
+    
+    # Tools with high error rate → need improvement
+    high_error_tools = []
+    for tool_name, count in tool_calls.items():
+        error_key = f"tool:{tool_name}"
+        error_count = errors.get(error_key, 0)
+        if count > 0 and error_count / count > 0.3:  # >30% error rate
+            high_error_tools.append({
+                "tool": tool_name,
+                "error_rate": round(error_count / count, 2),
+                "total_calls": count,
+            })
+    
+    # Tools never used → potential gaps
+    try:
+        from tools.registry import TOOL_FUNCTIONS
+        all_tools = set(TOOL_FUNCTIONS.keys())
+    except ImportError:
+        try:
+            from tools import TOOL_FUNCTIONS
+            all_tools = set(TOOL_FUNCTIONS.keys())
+        except ImportError:
+            all_tools = set()
+    
+    used_tools = set(tool_calls.keys())
+    never_used = list(all_tools - used_tools)
+    
+    return {
+        "high_error_tools": high_error_tools,
+        "never_used_tools": never_used,
+        "total_tools": len(all_tools),
+        "used_tools": len(used_tools),
+    }
+
+
+def get_evolution_suggestions() -> list[dict]:
+    """M9: Generate evolution suggestions based on usage and feedback.
+    
+    Combina datos de uso (analyze_usage_gaps) con el historial de
+    feedback para generar sugerencias de evolucion accionables:
+    - Mejorar herramientas con alta tasa de error
+    - Considerar remover herramientas nunca usadas
+    
+    Returns:
+        Lista de dicts con sugerencias de evolucion, cada una con:
+        - type: "improve_tool" o "consider_removing"
+        - tool: nombre de la herramienta
+        - reason: razon de la sugerencia
+        - priority: "high", "medium" o "low"
+    """
+    gaps = analyze_usage_gaps()
+    suggestions = []
+    
+    for tool_info in gaps["high_error_tools"]:
+        suggestions.append({
+            "type": "improve_tool",
+            "tool": tool_info["tool"],
+            "reason": f"Error rate {tool_info['error_rate']*100:.0f}%",
+            "priority": "high" if tool_info["error_rate"] > 0.5 else "medium",
+        })
+    
+    for tool_name in gaps["never_used_tools"][:5]:
+        suggestions.append({
+            "type": "consider_removing",
+            "tool": tool_name,
+            "reason": "Never used in current session",
+            "priority": "low",
+        })
+    
+    return suggestions
+
+
+# ============================================================
 # SINGLETON
 # ============================================================
 

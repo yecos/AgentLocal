@@ -59,8 +59,60 @@ class LRUCache:
         self._cache.clear()
 
 
-# Instancia global del cache de embeddings
-embed_cache = LRUCache(maxsize=200)
+class PersistentLRUCache(LRUCache):
+    """M8.1: LRU Cache that persists to disk between sessions.
+    
+    Extiende LRUCache para guardar el cache de embeddings en un
+    archivo JSON, permitiendo que sobreviva entre sesiones del agente.
+    Auto-guarda cada 20 operaciones para minimizar perdida de datos.
+    """
+
+    def __init__(self, maxsize=200, cache_file=None):
+        super().__init__(maxsize)
+        self._cache_file = cache_file
+        self._dirty = False
+        self._put_count = 0
+        self._load()
+
+    def put(self, key, value):
+        super().put(key, value)
+        self._dirty = True
+        self._put_count += 1
+        # Auto-save every 20 operations
+        if self._put_count % 20 == 0:
+            self.save()
+
+    def _load(self):
+        """Load cache from disk on startup."""
+        if not self._cache_file or not os.path.exists(self._cache_file):
+            return
+        try:
+            with open(self._cache_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for k, v in data.items():
+                self._cache[k] = v
+                self._order = getattr(self, '_order', [])
+            logger.info(f"Embed cache cargado: {len(data)} entradas desde {self._cache_file}")
+        except Exception as e:
+            logger.debug(f"Error cargando embed cache: {e}")
+
+    def save(self):
+        """Save cache to disk."""
+        if not self._dirty or not self._cache_file:
+            return
+        try:
+            os.makedirs(os.path.dirname(self._cache_file), exist_ok=True)
+            with open(self._cache_file, "w", encoding="utf-8") as f:
+                json.dump(dict(self._cache), f, ensure_ascii=False)
+            self._dirty = False
+            logger.debug(f"Embed cache guardado: {len(self._cache)} entradas")
+        except Exception as e:
+            logger.warning(f"Error guardando embed cache: {e}")
+
+
+# Instancia global del cache de embeddings (M8.1: PersistentLRUCache)
+embed_cache_file = os.path.join(LEARN_DIR, "embed_cache.json")
+embed_cache = PersistentLRUCache(200, cache_file=embed_cache_file)
 
 
 # ============================================================
@@ -919,6 +971,16 @@ class OllamaClient:
         except Exception as e:
             logger.debug(f"Embedding falló con modelo {model_name}: {e}")
             return []
+
+    # ----------------------------------------------------------
+    # M8.1: SHUTDOWN - Save caches before exit
+    # ----------------------------------------------------------
+
+    def shutdown(self):
+        """Save caches before exit. Call this on application shutdown."""
+        if hasattr(embed_cache, 'save'):
+            embed_cache.save()
+            logger.info("Embed cache guardado al apagar")
 
     @staticmethod
     def cosine_similarity(vec1, vec2):

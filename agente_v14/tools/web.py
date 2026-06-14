@@ -222,16 +222,174 @@ _web_cache = WebSearchCache()
 
 
 # ============================================================
+# SOURCE QUALITY SCORING (S6.1)
+# ============================================================
+
+# Domains with boosted quality scores
+_HIGH_QUALITY_DOMAINS = {
+    # Government
+    ".gov": 1.5, ".gob": 1.5, ".gov.uk": 1.5, ".gc.ca": 1.5,
+    # Education
+    ".edu": 1.4, ".ac.uk": 1.4, ".ac.jp": 1.4,
+    # Known high-quality tech sites
+    "docs.python.org": 1.3, "developer.mozilla.org": 1.3,
+    "stackoverflow.com": 1.2, "stackexchange.com": 1.2,
+    "github.com": 1.2, "npmjs.com": 1.2,
+    "arxiv.org": 1.3, "ieee.org": 1.3, "acm.org": 1.3,
+    "wikipedia.org": 1.2, "wikimedia.org": 1.2,
+    "microsoft.com": 1.1, "azure.microsoft.com": 1.2,
+    "aws.amazon.com": 1.2, "cloud.google.com": 1.2,
+    "doc.rust-lang.org": 1.3, "go.dev": 1.3, "kubernetes.io": 1.3,
+    # Lower quality domains
+    "pinterest.com": 0.5, "reddit.com": 0.8, "quora.com": 0.7,
+    "facebook.com": 0.6, "twitter.com": 0.6, "x.com": 0.6,
+    "tiktok.com": 0.4, "instagram.com": 0.4,
+    "medium.com": 0.7, "dev.to": 0.8, "hackernoon.com": 0.7,
+}
+
+# Generic TLD quality scores
+_TLD_QUALITY = {
+    ".org": 1.1, ".com": 1.0, ".net": 0.9, ".io": 1.0,
+    ".info": 0.7, ".biz": 0.5, ".xyz": 0.5, ".top": 0.4,
+}
+
+
+def _score_domain(url: str) -> float:
+    """Score a URL's source quality on a 0.0-1.5 scale."""
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname or ""
+        hostname_lower = hostname.lower()
+
+        # Check specific domains first
+        for domain, score in _HIGH_QUALITY_DOMAINS.items():
+            if domain.startswith("."):
+                if hostname_lower.endswith(domain) or f".{hostname_lower}".endswith(domain):
+                    return score
+            elif hostname_lower == domain or hostname_lower.endswith(f".{domain}"):
+                return score
+
+        # Check TLD
+        for tld, score in _TLD_QUALITY.items():
+            if hostname_lower.endswith(tld):
+                return score
+
+        return 1.0  # Default
+    except Exception:
+        return 1.0
+
+
+def _deduplicate_results(results: list) -> list:
+    """Remove duplicate domains, keeping the most relevant result per domain."""
+    seen_domains = {}
+    deduped = []
+
+    for result in results:
+        url = result.get("href", result.get("url", ""))
+        try:
+            hostname = urlparse(url).hostname or ""
+            # Remove www. prefix for dedup
+            domain_key = hostname.replace("www.", "").lower()
+        except Exception:
+            domain_key = url
+
+        if domain_key in seen_domains:
+            # Keep the one with better quality score
+            existing_idx = seen_domains[domain_key]
+            existing_score = _score_domain(deduped[existing_idx].get("href", ""))
+            new_score = _score_domain(url)
+            if new_score > existing_score:
+                deduped[existing_idx] = result
+        else:
+            seen_domains[domain_key] = len(deduped)
+            deduped.append(result)
+
+    return deduped
+
+
+# ============================================================
+# AUTO-LEARN FROM SEARCHES (S6.1)
+# ============================================================
+
+def _auto_learn_from_search(consulta: str, result_text: str) -> None:
+    """After a successful search, store key facts in memory for future recall."""
+    try:
+        from config import LEARN_DIR
+        learn_file = os.path.join(LEARN_DIR, "search_facts.json")
+
+        facts = []
+        if os.path.exists(learn_file):
+            try:
+                with open(learn_file, "r", encoding="utf-8") as f:
+                    facts = json.load(f)
+            except Exception:
+                facts = []
+
+        # Extract a brief fact from the search result (first 200 chars)
+        fact_text = result_text[:300].strip()
+        if not fact_text:
+            return
+
+        entry = {
+            "query": consulta[:100],
+            "fact": fact_text,
+            "timestamp": time.time(),
+        }
+
+        # Keep max 100 facts
+        facts.append(entry)
+        if len(facts) > 100:
+            facts = facts[-100:]
+
+        with open(learn_file, "w", encoding="utf-8") as f:
+            json.dump(facts, f, ensure_ascii=False, indent=2)
+
+    except Exception as e:
+        logger.debug(f"Error auto-learning from search: {e}")
+
+
+def recall_search_facts(consulta: str) -> str:
+    """Recall previously learned facts related to a query."""
+    try:
+        from config import LEARN_DIR
+        learn_file = os.path.join(LEARN_DIR, "search_facts.json")
+
+        if not os.path.exists(learn_file):
+            return ""
+
+        with open(learn_file, "r", encoding="utf-8") as f:
+            facts = json.load(f)
+
+        # Simple keyword matching
+        query_words = set(consulta.lower().split())
+        relevant = []
+        for fact in facts[-20:]:  # Check last 20 facts
+            fact_words = set(fact.get("query", "").lower().split())
+            if query_words & fact_words:  # Intersection
+                relevant.append(fact.get("fact", ""))
+
+        if relevant:
+            return "Hechos recordados:\n" + "\n".join(f"- {r[:150]}" for r in relevant[:3])
+        return ""
+
+    except Exception:
+        return ""
+
+
+# ============================================================
 # BUSQUEDA WEB PRINCIPAL
 # ============================================================
 def buscar_web(consulta: str, use_cache: bool = True) -> str:
     """Busca en internet usando duckduckgo-search API con retry y cache.
+    Incluye deduplicacion de dominios, scoring de calidad, y auto-aprendizaje.
 
     Flujo:
     1. Verificar cache
-    2. Buscar via duckduckgo-search (con retry + backoff)
-    3. Fallback: DuckDuckGo Instant Answer API
-    4. Formatear resultados
+    2. Intentar recordar hechos previos
+    3. Buscar via duckduckgo-search (con retry + backoff + dedup + quality scoring)
+    4. Fallback: DuckDuckGo Instant Answer API
+    5. Auto-aprender de la busqueda
+    6. Formatear resultados
 
     Args:
         consulta: Texto de busqueda
@@ -247,18 +405,23 @@ def buscar_web(consulta: str, use_cache: bool = True) -> str:
 
     results_parts = []
 
-    # 2. Busqueda principal: duckduckgo-search
+    # 2. Intentar recordar hechos previos
+    recalled = recall_search_facts(consulta)
+    if recalled:
+        results_parts.append(recalled)
+
+    # 3. Busqueda principal: duckduckgo-search (con dedup y quality scoring)
     ddg_results = _search_ddg(consulta)
     if ddg_results:
         results_parts.append(ddg_results)
 
-    # 3. Fallback: Instant Answer API (resumen rapido)
+    # 4. Fallback: Instant Answer API (resumen rapido)
     instant_results = _search_ddg_instant(consulta)
     if instant_results:
         results_parts.append(instant_results)
 
-    # 4. Si no hay resultados, intentar Wikipedia
-    if not results_parts:
+    # 5. Si no hay resultados, intentar Wikipedia
+    if not results_parts or (len(results_parts) == 1 and results_parts[0] == recalled):
         wiki_results = _search_wikipedia(consulta)
         if wiki_results:
             results_parts.append(wiki_results)
@@ -269,6 +432,8 @@ def buscar_web(consulta: str, use_cache: bool = True) -> str:
         # Almacenar en cache (TTL: 5 min general, 1 min noticias)
         if use_cache:
             _web_cache.put(consulta, full_result)
+        # Auto-learn from search
+        _auto_learn_from_search(consulta, full_result)
         return full_result
 
     return "No se encontraron resultados. Intenta con otra consulta."
@@ -292,13 +457,24 @@ def _search_ddg(consulta: str, max_retries: int = 3) -> str:
             if not search_results:
                 continue
 
+            # Deduplicate by domain and sort by quality score
+            search_results = _deduplicate_results(search_results)
+            search_results.sort(key=lambda r: _score_domain(r.get("href", "")), reverse=True)
+
             results = ["\U0001f517 Resultados web:"]
             for i, r in enumerate(search_results[:5]):
                 title = r.get("title", "").strip()
                 href = r.get("href", "")
                 body = r.get("body", "").strip()
+                quality = _score_domain(href)
 
-                results.append(f"{i+1}. {title}")
+                quality_indicator = ""
+                if quality >= 1.3:
+                    quality_indicator = " \u2b50"  # star for high quality
+                elif quality <= 0.7:
+                    quality_indicator = " \u26a0"  # warning for low quality
+
+                results.append(f"{i+1}. {title}{quality_indicator}")
                 if body:
                     results.append(f"   {body[:200]}")
                 if href:

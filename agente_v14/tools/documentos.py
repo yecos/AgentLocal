@@ -949,3 +949,132 @@ def _resolve_path(ruta):
         return alt3
 
     return None
+
+
+# ============================================================
+# RESUMIR DOCUMENTO
+# ============================================================
+
+def resumir_documento(ruta: str, tipo_resumen: str = "ejecutivo", idioma: str = "es") -> str:
+    """Resume un documento (PDF, DOCX, TXT, MD). Soporta resumenes ejecutivos, detallados y puntos clave.
+
+    Args:
+        ruta: Ruta al documento a resumir
+        tipo_resumen: Tipo de resumen: ejecutivo (corto), detallado (largo), puntos_clave (bullet points)
+        idioma: Idioma del resumen: es (espanol) o en (ingles)
+    """
+    if not os.path.exists(ruta):
+        return f"ERROR: Archivo no encontrado: {ruta}"
+
+    # Determinar tipo de archivo y leer contenido
+    ext = os.path.splitext(ruta)[1].lower()
+    content = _read_document_for_summary(ruta, ext)
+
+    if not content or not content.strip():
+        return "ERROR: No se pudo extraer texto del documento o esta vacio."
+
+    # Truncar si es muy largo para el LLM
+    max_chars = 8000
+    if len(content) > max_chars:
+        # Chunk: keep beginning and end
+        chunk_size = max_chars // 2
+        content = content[:chunk_size] + "\n\n[... contenido truncado ...]\n\n" + content[-chunk_size:]
+
+    # Generar resumen con LLM
+    summary = _generate_summary(content, tipo_resumen, idioma, os.path.basename(ruta))
+
+    if not summary:
+        return "ERROR: No se pudo generar el resumen. El LLM no esta disponible."
+
+    # Add metadata
+    word_count = len(content.split())
+    header = f"Resumen de: {os.path.basename(ruta)}\n"
+    header += f"Tipo: {tipo_resumen} | Palabras originales: ~{word_count} | Idioma: {idioma}\n"
+    header += "-" * 50 + "\n\n"
+
+    return header + summary
+
+
+def _read_document_for_summary(ruta: str, ext: str) -> str:
+    """Lee el contenido de un documento para resumirlo."""
+    try:
+        if ext == ".pdf":
+            return leer_pdf(ruta)
+        elif ext == ".docx":
+            return leer_docx(ruta)
+        elif ext == ".xlsx":
+            return leer_xlsx(ruta)
+        elif ext == ".pptx":
+            return leer_pptx(ruta)
+        elif ext == ".csv":
+            return leer_csv(ruta)
+        elif ext == ".epub":
+            return leer_epub(ruta)
+        elif ext in (".txt", ".md", ".markdown", ".rst", ".log"):
+            validation = validate_path(ruta)
+            if validation != ruta:
+                return validation
+            with open(ruta, "r", encoding="utf-8", errors="replace") as f:
+                return f.read()
+        elif ext == ".json":
+            validation = validate_path(ruta)
+            if validation != ruta:
+                return validation
+            with open(ruta, "r", encoding="utf-8", errors="replace") as f:
+                import json
+                data = json.load(f)
+                return json.dumps(data, indent=2, ensure_ascii=False)[:8000]
+        else:
+            # Try reading as text
+            validation = validate_path(ruta)
+            if validation != ruta:
+                return validation
+            with open(ruta, "r", encoding="utf-8", errors="replace") as f:
+                return f.read()
+    except Exception as e:
+        return f"ERROR leyendo documento: {e}"
+
+
+def _generate_summary(content: str, tipo_resumen: str, idioma: str, filename: str) -> str:
+    """Usa el LLM para generar un resumen del contenido."""
+    try:
+        from llm import ollama
+
+        lang_map = {"es": "espanol", "en": "ingles"}
+        lang_name = lang_map.get(idioma, "espanol")
+
+        type_prompts = {
+            "ejecutivo": (
+                "Genera un resumen ejecutivo conciso (maximo 150 palabras). "
+                "Captura las ideas principales, conclusiones y datos clave. "
+                "No incluya detalles menores."
+            ),
+            "detallado": (
+                "Genera un resumen detallado (maximo 500 palabras). "
+                "Incluye ideas principales, argumentos, datos de soporte, "
+                "conclusiones y detalles relevantes. Estructura el resumen en secciones."
+            ),
+            "puntos_clave": (
+                "Extrae los puntos clave del documento en formato de bullet points. "
+                "Maximo 10 puntos. Cada punto debe ser conciso pero informativo. "
+                "Usa el formato: - Punto clave"
+            ),
+        }
+
+        summary_prompt = type_prompts.get(tipo_resumen, type_prompts["ejecutivo"])
+
+        prompt = (
+            f"{summary_prompt}\n\n"
+            f"Idioma del resumen: {lang_name}\n"
+            f"Documento: {filename}\n\n"
+            f"Contenido:\n{content}"
+        )
+
+        messages = [{"role": "user", "content": prompt}]
+        response = ollama.generate_chat(messages)
+
+        return str(response).strip() if response else ""
+
+    except Exception as e:
+        logger.debug(f"Error generando resumen con LLM: {e}")
+        return ""

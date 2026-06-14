@@ -28,15 +28,19 @@ from .archivos import leer_archivo, escribir_archivo, listar_archivos, buscar_en
 from .apps import abrir_aplicacion, abrir_url, buscar_youtube
 from .proyecto import analizar_proyecto, clonar_repositorio, instalar_dependencias
 from .codigo import generar_codigo
-from .web import buscar_web
+from .web import buscar_web, recall_search_facts
 
 # Importar herramientas v14.7 (Super Agente)
 from .documentos import (
     leer_pdf, leer_docx, leer_xlsx, leer_pptx,
     leer_csv, leer_archivo_comprimido, consultar_sqlite,
-    leer_epub, leer_documento
+    leer_epub, leer_documento, resumir_documento
 )
 from .crear_documentos import crear_pdf, crear_docx, crear_xlsx, crear_grafico, crear_pptx
+
+# Importar herramientas v16 (Database, Code Review)
+from .database_tool import query_natural_language
+from .code_executor import review_code
 from .percepcion import (
     transcribir_audio, leer_imagen_ocr,
     scrapear_web, automatizar_web
@@ -186,6 +190,10 @@ def _register_submodule_tools():
         "generar_imagen_cloud": generar_imagen_cloud,
         "analizar_imagen_cloud": analizar_imagen_cloud,
         "llm_cloud_chat": llm_cloud_chat,
+        # v17 Skills nuevos (S5)
+        "query_natural_language": query_natural_language,
+        "review_code": review_code,
+        "resumir_documento": resumir_documento,
     }
 
     for name, func in submod_tools.items():

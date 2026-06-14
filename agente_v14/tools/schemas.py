@@ -1269,4 +1269,55 @@ TOOL_SCHEMAS = [
             }
         }
     },
+    # ============================================================
+    # SKILLS NUEVOS (S5) - v17
+    # ============================================================
+    {
+        "type": "function",
+        "function": {
+            "name": "query_natural_language",
+            "description": "Consulta una base de datos en lenguaje natural. Convierte la pregunta a SQL, la ejecuta (solo SELECT) y formatea resultados como tabla legible.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pregunta": {"type": "string", "description": "Pregunta en lenguaje natural sobre los datos"},
+                    "tabla": {"type": "string", "description": "Nombre de la tabla (opcional, ayuda a generar mejor SQL)"},
+                    "db_path": {"type": "string", "description": "Ruta al archivo de base de datos SQLite"}
+                },
+                "required": ["pregunta", "db_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "review_code",
+            "description": "Revisa codigo y sugiere mejoras. Ejecuta linters (flake8/pylint/eslint) si estan disponibles y usa LLM para analisis semantico de bugs, seguridad, estilo y rendimiento.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ruta": {"type": "string", "description": "Ruta al archivo de codigo a revisar"},
+                    "lenguaje": {"type": "string", "description": "Lenguaje de programacion: python, javascript, typescript (default: python)"},
+                    "profundidad": {"type": "string", "description": "Nivel de detalle: rapido, normal, profundo (default: normal)"}
+                },
+                "required": ["ruta"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "resumir_documento",
+            "description": "Resume un documento (PDF, DOCX, TXT, MD). Genera resumen ejecutivo, detallado, o puntos clave usando LLM.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ruta": {"type": "string", "description": "Ruta al documento a resumir"},
+                    "tipo_resumen": {"type": "string", "description": "Tipo de resumen: ejecutivo (corto), detallado (largo), puntos_clave (bullet points)"},
+                    "idioma": {"type": "string", "description": "Idioma del resumen: es (espanol) o en (ingles)"}
+                },
+                "required": ["ruta"]
+            }
+        }
+    },
 ]

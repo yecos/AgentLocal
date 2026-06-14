@@ -372,6 +372,22 @@ async def health():
     }
 
 
+@app.get("/api/health/skills")
+async def health_skills():
+    """Skill health check - verifies that each tool works correctly."""
+    if not AGENT_AVAILABLE:
+        return {"status": "unavailable", "reason": "Agent not available"}
+
+    try:
+        from tools.skill_health import get_skill_health_checker
+        checker = get_skill_health_checker()
+        checker.run_health_check()
+        return checker.get_detailed()
+    except Exception as e:
+        _bridge_logger.error(f"Error in skill health check: {e}")
+        return {"status": "error", "error": str(e)[:200]}
+
+
 @app.get("/api/status")
 async def status(auth=Depends(verify_token)):
     """Estado del sistema."""

@@ -589,16 +589,20 @@ def _add_chart_to_xlsx(ws, chart_json: str, num_rows: int):
 # ============================================================
 
 def crear_grafico(ruta: str, tipo: str = "bar", datos: str = "",
-                  titulo: str = "", xlabel: str = "", ylabel: str = "") -> str:
+                  titulo: str = "", xlabel: str = "", ylabel: str = "",
+                  auto_tipo: bool = False) -> str:
     """Crea un grafico o visualizacion y lo guarda como imagen PNG.
+    Soporta datos en formato JSON ({"labels": [...], "values": [...]}),
+    CSV con cabecera ("mes,ventas\\nenero,100"), o CSV simple (etiqueta,valor).
 
     Args:
         ruta: Ruta donde guardar la imagen PNG
         tipo: Tipo de grafico: bar, line, pie, scatter, histogram, area
-        datos: Datos en formato CSV (columnas: etiqueta,valor) o JSON
+        datos: Datos en formato JSON, CSV con cabecera, o CSV simple (etiqueta,valor)
         titulo: Titulo del grafico
         xlabel: Etiqueta del eje X
         ylabel: Etiqueta del eje Y
+        auto_tipo: Si True, detecta automaticamente el tipo de grafico optimo
     """
     validation = validate_path(ruta)
     if validation != ruta:
@@ -620,7 +624,11 @@ def crear_grafico(ruta: str, tipo: str = "bar", datos: str = "",
         labels, values = _parse_datos_grafico(datos)
 
         if not labels or not values:
-            return "ERROR: No se pudieron parsear los datos. Usa formato: etiqueta,valor por linea."
+            return "ERROR: No se pudieron parsear los datos. Usa formato: etiqueta,valor por linea, JSON {\"labels\":[...],\"values\":[...]}, o CSV con cabecera."
+
+        # Auto-detect optimal chart type if requested
+        if auto_tipo:
+            tipo = _auto_detect_chart_type(labels, values)
 
         # Crear grafico segun tipo
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -701,7 +709,13 @@ def crear_grafico(ruta: str, tipo: str = "bar", datos: str = "",
 
 
 def _parse_datos_grafico(datos):
-    """Parsea datos para graficos. Retorna (labels, values)."""
+    """Parsea datos para graficos. Retorna (labels, values).
+    Soporta:
+    - JSON: {"labels": [...], "values": [...]} or {"key1": val1, ...}
+    - JSON: [{"label": "x", "value": y}, ...]
+    - CSV con cabecera: "mes,ventas\\nenero,100\\nfebrero,150"
+    - CSV simple: etiqueta,valor por linea
+    """
     import json
 
     if not datos:
@@ -714,8 +728,16 @@ def _parse_datos_grafico(datos):
         try:
             parsed = json.loads(datos)
             if isinstance(parsed, dict):
+                # Check for {"labels": [...], "values": [...]} format
+                if "labels" in parsed and "values" in parsed:
+                    labels = [str(l) for l in parsed["labels"]]
+                    values = [float(v) for v in parsed["values"]]
+                    return labels, values
+                # Simple dict: keys=labels, values=values
                 return list(parsed.keys()), list(parsed.values())
             elif isinstance(parsed, list):
+                if len(parsed) == 0:
+                    return [], []
                 if isinstance(parsed[0], dict):
                     labels = [str(d.get('label', d.get('etiqueta', d.get('name', '')))) for d in parsed]
                     values = [float(d.get('value', d.get('valor', d.get('count', 0)))) for d in parsed]
@@ -727,7 +749,31 @@ def _parse_datos_grafico(datos):
         except (json.JSONDecodeError, IndexError, ValueError):
             pass
 
-    # Fallback: CSV (etiqueta,valor por linea)
+    # CSV with header detection
+    lines = [l.strip() for l in datos.split("\n") if l.strip() and not l.strip().startswith("#")]
+    if len(lines) >= 2:
+        # Check if first line is a header (non-numeric last field)
+        first_parts = lines[0].rsplit(",", 1)
+        if len(first_parts) == 2:
+            try:
+                float(first_parts[1].strip())
+            except ValueError:
+                # First line looks like a header
+                header = lines[0]
+                data_lines = lines[1:]
+                labels = []
+                values = []
+                for line in data_lines:
+                    parts = line.rsplit(",", 1)
+                    if len(parts) == 2:
+                        labels.append(parts[0].strip())
+                        try:
+                            values.append(float(parts[1].strip()))
+                        except ValueError:
+                            values.append(0)
+                return labels, values
+
+    # Fallback: CSV simple (etiqueta,valor por linea)
     labels = []
     values = []
     for line in datos.split("\n"):
@@ -747,6 +793,38 @@ def _parse_datos_grafico(datos):
             values.append(0)
 
     return labels, values
+
+
+def _auto_detect_chart_type(labels: list, values: list) -> str:
+    """Auto-detect the optimal chart type based on data shape."""
+    n = len(labels)
+
+    # Very few items -> pie chart
+    if n <= 5:
+        return "pie"
+
+    # Many items -> line or bar
+    if n > 20:
+        return "line"
+
+    # Check if labels look like time periods (months, years, dates)
+    time_indicators = [
+        "enero", "febrero", "marzo", "abril", "mayo", "junio",
+        "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+        "q1", "q2", "q3", "q4",
+    ]
+    labels_lower = [str(l).lower() for l in labels]
+    is_time = any(any(ti in l for ti in time_indicators) for l in labels_lower)
+
+    # Check if labels are years or numbers
+    is_numeric = all(str(l).isdigit() for l in labels if str(l).strip())
+
+    if is_time or is_numeric:
+        return "line"  # Time series -> line chart
+
+    # Categorical data with moderate count -> bar chart
+    return "bar"
 
 
 # ============================================================

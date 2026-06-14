@@ -1412,3 +1412,101 @@ Stage Summary:
 - C3 COMPLETE: ToolSelector reduces LLM context from 84 to ~6-15 tool schemas
 - S3 COMPLETE: Full pipeline integration in ReactAgent (init, reset, auto-store, resolve, context)
 - All 566 existing tests pass — zero regressions
+
+---
+Task ID: r5a
+Agent: Sub Agent
+Task: Implement M6 (Orquestación multi-agente), M8.1 (Caché persistente embeddings), M8.3 (Streaming detección temprana), M9 (Auto-evolución basada en uso)
+
+Work Log:
+- Read worklog.md and all target files (orchestrator.py, subagentes.py, llm.py, auto_evolve.py, react.py)
+- M6: Added SUBTASK_PATTERNS dict with regex patterns for researcher/coder/analyst/writer sub-agents to orchestrator.py
+- M6: Added detect_subagent_needs() module-level function using regex matching
+- M6: Added run_with_synthesis() method to Orchestrator class with full pipeline: detect → decompose → execute → synthesize
+- M6: Added _create_subtask_descriptions() helper (LLM-based decomposition with fallback)
+- M6: Added _run_single_subagent() helper (uses SubAgent with tools, falls back to LLM direct)
+- M6: Added _synthesize_results() helper (LLM synthesis of multi-agent results with concatenation fallback)
+- M8.1: Added PersistentLRUCache class extending LRUCache with disk persistence (JSON file)
+- M8.1: PersistentLRUCache auto-saves every 20 put operations
+- M8.1: Replaced global embed_cache = LRUCache(200) with PersistentLRUCache(200, cache_file=embed_cache.json)
+- M8.1: Added OllamaClient.shutdown() method to save embed cache on exit
+- M8.3: Added TOOL_JSON_PREFIXES early detection in _stream_llm_with_tools() of react.py
+- M8.3: Added is_likely_tool_json tri-state (None/True/False) for early streaming decisions
+- M8.3: Text tokens now stream immediately when is_likely_tool_json is False (reduces perceived latency)
+- M9: Added analyze_usage_gaps() function to auto_evolve.py (high-error tools + never-used tools analysis)
+- M9: Added get_evolution_suggestions() function (improve_tool + consider_removing suggestions)
+- All 566 tests pass — zero regressions
+
+Stage Summary:
+- M6 COMPLETE: Automatic sub-agent routing with pattern detection, task decomposition, parallel/sequential execution, and LLM synthesis
+- M8.1 COMPLETE: PersistentLRUCache saves embeddings to disk, auto-saves every 20 ops, loads on startup, shutdown() saves on exit
+- M8.3 COMPLETE: Early type detection in streaming — TOOL_JSON_PREFIXES detect tool JSON within ~10 chars, text tokens stream immediately when not tool JSON
+- M9 COMPLETE: analyze_usage_gaps() identifies high-error (>30%) and never-used tools; get_evolution_suggestions() generates prioritized improvement/removal suggestions
+- All 566 existing tests pass — zero regressions
+
+---
+Task ID: r5b
+Agent: Sub Agent
+Task: Implement S5 (Skills nuevos: DB Query, Code Review, Doc Summarizer), S6 (Skills mejorados), S7 (Skill Health Checks)
+
+Work Log:
+- S5.1 COMPLETE: Added query_natural_language() to tools/database_tool.py
+  - Uses LLM to convert natural language question to SQL
+  - Safety: only SELECT/PRAGMA allowed, blocked keywords checked
+  - Auto-fetches schema info to help LLM generate better SQL
+  - Formats results as readable ASCII table
+  - Registered in tools/__init__.py with schema in tools/schemas.py
+
+- S5.2 COMPLETE: Added review_code() to tools/code_executor.py
+  - Runs linters: flake8/pylint for Python, eslint for JS/TS
+  - Falls back to LLM semantic analysis if no linter available
+  - LLM reviews bugs, security, style, performance with severity levels (CRITICAL/HIGH/MEDIUM/LOW/INFO)
+  - Supports depth: rapido, normal, profundo
+  - Formats structured review output with linter + LLM sections
+  - Registered in tools/__init__.py with schema in tools/schemas.py
+
+- S5.3 COMPLETE: Added resumir_documento() to tools/documentos.py
+  - Reads PDF, DOCX, XLSX, PPTX, CSV, EPUB, TXT, MD, JSON
+  - Uses LLM for summary generation with 3 types: ejecutivo, detallado, puntos_clave
+  - Supports es/en language output
+  - Auto-chunks long documents (>8000 chars) keeping beginning and end
+  - Registered in tools/__init__.py with schema in tools/schemas.py
+
+- S6.1 COMPLETE: Enhanced web.py buscar_web()
+  - Domain deduplication: same domain results merged, keeping highest quality
+  - Source quality scoring: .gov(1.5) .edu(1.4) docs.python.org(1.3) stackoverflow(1.2) etc.
+  - Low-quality domains demoted: pinterest(0.5) tiktok(0.4) forums(0.7)
+  - Quality indicators in output: ⭐ for high quality, ⚠ for low quality
+  - Auto-learn: stores key facts from searches in search_facts.json for future recall
+  - recall_search_facts() retrieves previously learned facts by keyword matching
+  - Results sorted by quality score (highest first)
+
+- S6.2 COMPLETE: Enhanced crear_grafico() in tools/crear_documentos.py
+  - New JSON format: {"labels": [...], "values": [...]}
+  - CSV with header auto-detection: "mes,ventas\nenero,100\nfebrero,150"
+  - auto_tipo parameter: auto-detects optimal chart type
+  - _auto_detect_chart_type(): ≤5 items→pie, >20→line, time-series→line, categorical→bar
+  - Existing formats still supported (simple CSV, JSON dict, JSON list of objects)
+
+- S7 COMPLETE: Created tools/skill_health.py with SkillHealthChecker
+  - SKILL_TESTS dict with minimal test cases per tool
+  - SkillHealthChecker.run_health_check() tests each skill with minimal params
+  - Checks expect_contains and expect_not_contains patterns
+  - Status: ok/degraded/error/no_test/not_registered
+  - get_summary() and get_detailed() for reporting
+  - Singleton pattern via get_skill_health_checker()
+  - Added /api/health/skills endpoint to bridge_api.py
+  - Test cases defined for: buscar_web, ejecutar_comando, leer_archivo, listar_archivos, ejecutar_python, review_code, resumir_documento, query_natural_language
+
+- Registration: All 3 new tools registered in tools/__init__.py submod_tools dict
+- Schemas: All 3 new tool schemas added to tools/schemas.py TOOL_SCHEMAS list
+- Total tools: 87 registered, 87 schemas
+- All 566 existing tests pass — zero regressions
+
+Stage Summary:
+- S5 COMPLETE: 3 new skills (query_natural_language, review_code, resumir_documento)
+- S6 COMPLETE: Enhanced buscar_web (dedup, quality, auto-learn) + crear_grafico (JSON, CSV header, auto-detect)
+- S7 COMPLETE: SkillHealthChecker with /api/health/skills endpoint
+- Files modified: database_tool.py, code_executor.py, documentos.py, web.py, crear_documentos.py, __init__.py, schemas.py, bridge_api.py
+- Files created: tools/skill_health.py
+- All 566 tests pass

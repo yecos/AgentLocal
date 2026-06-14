@@ -16,6 +16,7 @@ v17: Multi-agent orchestration para tareas complejas.
 """
 
 import json
+import re
 import uuid
 import traceback
 from datetime import datetime
@@ -40,6 +41,52 @@ try:
     from llm import ollama
 except ImportError:
     ollama = None
+
+
+# ============================================================
+# M6: PATRONES DE DETECCION AUTOMATICA DE SUB-AGENTES
+# ============================================================
+
+SUBTASK_PATTERNS = {
+    "researcher": [
+        r"busca.*y.*resume", r"investiga.*sobre", r"encuentra.*información",
+        r"recopila", r"revisa.*literatura"
+    ],
+    "coder": [
+        r"escribe.*código", r"implementa.*función", r"crea.*clase",
+        r"arregla.*bug", r"refactoriza", r"optimiza.*código"
+    ],
+    "analyst": [
+        r"analiza.*datos", r"calcula.*estadísticas", r"compara.*números",
+        r"genera.*gráfico.*de", r"tabla.*de"
+    ],
+    "writer": [
+        r"escribe.*artículo", r"redacta.*informe", r"crea.*documento",
+        r"elabora.*presentación", r"redacta.*email"
+    ],
+}
+
+
+def detect_subagent_needs(user_message: str) -> list[str]:
+    """Detect which sub-agents are needed for this task.
+    
+    Analiza el mensaje del usuario con expresiones regulares para
+    determinar qué tipo de sub-agente(s) se requieren para la tarea.
+    
+    Args:
+        user_message: Mensaje del usuario
+        
+    Returns:
+        Lista de tipos de sub-agente detectados (ej: ["researcher", "writer"])
+    """
+    msg_lower = user_message.lower()
+    needed = []
+    for agent_type, patterns in SUBTASK_PATTERNS.items():
+        for pattern in patterns:
+            if re.search(pattern, msg_lower):
+                needed.append(agent_type)
+                break
+    return needed
 
 
 # ============================================================
@@ -1062,6 +1109,268 @@ class Orchestrator:
             "duration_seconds": round(duracion, 2),
             "progress_pct": round(completed / total * 100, 1) if total > 0 else 0,
         }
+
+    # ============================================================
+    # M6: EJECUCION CON SINTESIS AUTOMATICA
+    # ============================================================
+
+    def run_with_synthesis(self, task: str, strategy: str = "adaptive") -> str:
+        """
+        M6: Ejecuta una tarea compleja con deteccion automatica de sub-agentes
+        y sintesis de resultados.
+
+        1. Detecta que sub-agentes se necesitan basandose en el mensaje
+        2. Crea un execution plan con subtareas para cada sub-agente
+        3. Ejecuta los sub-agentes (secuencial o paralelo segun estrategia)
+        4. Sintetiza los resultados con LLM en una respuesta coherente
+
+        Args:
+            task: Descripcion de la tarea del usuario
+            strategy: Estrategia de ejecucion ("sequential", "parallel", "adaptive")
+
+        Returns:
+            String con la respuesta sintetizada, o mensaje de error
+        """
+        inicio = datetime.now()
+
+        # 1. Detectar sub-agentes necesarios
+        needed_agents = detect_subagent_needs(task)
+
+        if not needed_agents:
+            # No se detectaron sub-agentes, ejecutar como tarea simple
+            logger.info(f"[Orchestrator] run_with_synthesis: sin sub-agentes detectados, ejecutando tarea simple")
+            if ollama is None:
+                return "Error: LLM no disponible"
+            messages = [
+                {"role": "system", "content": "Eres un agente especializado. Ejecuta la tarea de forma concisa y completa."},
+                {"role": "user", "content": task},
+            ]
+            result = ollama.generate(messages)
+            return str(result) if result else "No se pudo generar una respuesta."
+
+        logger.info(f"[Orchestrator] run_with_synthesis: sub-agentes detectados: {needed_agents}")
+
+        # 2. Crear subtareas para cada sub-agente detectado
+        subtask_descriptions = self._create_subtask_descriptions(task, needed_agents)
+
+        # 3. Ejecutar sub-agentes
+        sub_results = {}
+
+        if strategy == "adaptive":
+            # Si hay multiples sub-agentes sin dependencias, paralelizar
+            if len(needed_agents) >= 2:
+                strategy = "parallel"
+            else:
+                strategy = "sequential"
+
+        try:
+            if strategy == "parallel" and len(subtask_descriptions) >= 2:
+                # Ejecutar en paralelo
+                descriptions = [
+                    {"id": agent_type, "description": desc}
+                    for agent_type, desc in subtask_descriptions.items()
+                ]
+                parallel_result = self.execute_parallel(descriptions)
+                if parallel_result:
+                    sub_results = parallel_result
+                else:
+                    # Fallback a secuencial si paralelo fallo
+                    logger.warning("[Orchestrator] run_with_synthesis: paralelo fallo, fallback a secuencial")
+                    for agent_type, desc in subtask_descriptions.items():
+                        sub_results[agent_type] = self._run_single_subagent(agent_type, desc)
+            else:
+                # Ejecutar secuencialmente
+                for agent_type, desc in subtask_descriptions.items():
+                    sub_results[agent_type] = self._run_single_subagent(agent_type, desc)
+        except Exception as e:
+            logger.error(f"[Orchestrator] run_with_synthesis: error ejecutando sub-agentes: {e}")
+            logger.debug(traceback.format_exc())
+
+        # 4. Sintetizar resultados con LLM
+        if not sub_results:
+            return "No se pudieron obtener resultados de los sub-agentes."
+
+        synthesis = self._synthesize_results(task, sub_results)
+
+        duracion = (datetime.now() - inicio).total_seconds()
+        logger.info(f"[Orchestrator] run_with_synthesis completado en {duracion:.1f}s con {len(sub_results)} sub-agentes")
+
+        return synthesis
+
+    def _create_subtask_descriptions(self, task: str, agent_types: list[str]) -> dict[str, str]:
+        """Crea descripciones de subtareas para cada tipo de sub-agente detectado.
+
+        Args:
+            task: Tarea original del usuario
+            agent_types: Lista de tipos de sub-agente detectados
+
+        Returns:
+            Dict {agent_type: subtask_description}
+        """
+        # Prompt para descomponer la tarea en subtareas
+        if ollama is None:
+            # Sin LLM, crear subtareas simples basadas en el tipo
+            role_descriptions = {
+                "researcher": "Investiga y recopila informacion sobre",
+                "coder": "Escribe codigo para",
+                "analyst": "Analiza datos relacionados con",
+                "writer": "Redacta un documento sobre",
+            }
+            return {
+                at: f"{role_descriptions.get(at, 'Ejecuta')}: {task}"
+                for at in agent_types
+            }
+
+        # Usar LLM para descomponer la tarea
+        agents_str = ", ".join(agent_types)
+        decompose_prompt = [
+            {"role": "system", "content": (
+                "Eres un planificador de tareas. Descompone la tarea del usuario "
+                "en subtareas para los siguientes agentes especializados: "
+                f"{agents_str}.\n\n"
+                "Responde SOLO en JSON con este formato exacto:\n"
+                '{"subtasks": {"agent_type": "descripcion de la subtarea para ese agente", ...}}\n'
+                "Cada subtarea debe ser especifica y actionable."
+            )},
+            {"role": "user", "content": f"Tarea: {task}"}
+        ]
+
+        try:
+            response = ollama.generate(decompose_prompt)
+            if response:
+                parsed = self._parse_json_response(str(response))
+                subtasks = parsed.get("subtasks", parsed.get("final_answer", {}))
+                if isinstance(subtasks, dict) and subtasks:
+                    # Filtrar solo los tipos de agente solicitados
+                    return {k: v for k, v in subtasks.items() if k in agent_types}
+        except Exception as e:
+            logger.warning(f"[Orchestrator] Error descomponiendo tarea con LLM: {e}")
+
+        # Fallback: subtareas simples
+        role_descriptions = {
+            "researcher": "Investiga y recopila informacion sobre",
+            "coder": "Escribe codigo para",
+            "analyst": "Analiza datos relacionados con",
+            "writer": "Redacta un documento sobre",
+        }
+        return {
+            at: f"{role_descriptions.get(at, 'Ejecuta')}: {task}"
+            for at in agent_types
+        }
+
+    def _run_single_subagent(self, agent_type: str, description: str) -> str:
+        """Ejecuta un solo sub-agente y retorna su resultado como string.
+
+        Args:
+            agent_type: Tipo de sub-agente (researcher, coder, analyst, writer)
+            description: Descripcion de la subtarea
+
+        Returns:
+            String con el resultado del sub-agente
+        """
+        if ollama is None:
+            return "Error: LLM no disponible"
+
+        # Construir prompt especializado segun tipo de agente
+        role_prompts = {
+            "researcher": (
+                "Eres un agente investigador especializado. Tu trabajo es buscar, "
+                "recopilar y sintetizar informacion. Proporciona informacion detallada "
+                "y bien estructurada."
+            ),
+            "coder": (
+                "Eres un agente programador especializado. Tu trabajo es escribir, "
+                "corregir y optimizar codigo. Proporciona codigo limpio y bien documentado."
+            ),
+            "analyst": (
+                "Eres un agente analista de datos especializado. Tu trabajo es analizar "
+                "datos, calcular estadisticas y generar insights. Proporciona analisis "
+                "claros y conclusiones accionables."
+            ),
+            "writer": (
+                "Eres un agente escritor especializado. Tu trabajo es redactar documentos, "
+                "articulos e informes. Proporciona texto bien estructurado y profesional."
+            ),
+        }
+
+        system_prompt = role_prompts.get(agent_type, "Eres un agente especializado.")
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": description},
+        ]
+
+        try:
+            # Intentar ejecutar con herramientas si es posible
+            sub_agent = SubAgent(
+                id=f"synth_{agent_type}_{uuid.uuid4().hex[:6]}",
+                task=description,
+            )
+            context = {"completed_results": {}, "failed_deps": []}
+            tools_list = self._build_tools_description()
+            sub_agent = self._execute_subagent(sub_agent, context)
+
+            if sub_agent.status == "completed" and sub_agent.result:
+                return sub_agent.result
+        except Exception as e:
+            logger.warning(f"[Orchestrator] Sub-agente {agent_type} con herramientas fallo: {e}, usando LLM directo")
+
+        # Fallback: LLM directo sin herramientas
+        try:
+            result = ollama.generate(messages)
+            return str(result) if result else "Sin resultado"
+        except Exception as e:
+            return f"Error en sub-agente {agent_type}: {e}"
+
+    def _synthesize_results(self, original_task: str, sub_results: dict[str, str]) -> str:
+        """Sintetiza los resultados de multiples sub-agentes en una respuesta coherente.
+
+        Args:
+            original_task: Tarea original del usuario
+            sub_results: Dict {agent_type: result_string}
+
+        Returns:
+            String con la respuesta sintetizada
+        """
+        if ollama is None:
+            # Sin LLM, concatenar resultados
+            parts = [f"[{agent_type}]: {result}" for agent_type, result in sub_results.items()]
+            return "\n\n---\n\n".join(parts)
+
+        # Construir prompt de sintesis
+        results_section = ""
+        for agent_type, result in sub_results.items():
+            # Truncar resultados muy largos
+            truncated = result[:1000] + "..." if len(result) > 1000 else result
+            results_section += f"### Resultado de {agent_type}:\n{truncated}\n\n"
+
+        synthesis_messages = [
+            {"role": "system", "content": (
+                "Eres un sintetizador de resultados. Tu trabajo es combinar los resultados "
+                "de multiples agentes especializados en una respuesta coherente y unificada "
+                "para el usuario.\n\n"
+                "Reglas:\n"
+                "- Integra la informacion de todos los agentes de forma natural\n"
+                "- Elimina duplicados y contradicciones\n"
+                "- Mantén el tono profesional y directo\n"
+                "- Responde en espanol\n"
+                "- No menciones a los agentes individuales, solo presenta el resultado integrado"
+            )},
+            {"role": "user", "content": (
+                f"Tarea original: {original_task}\n\n"
+                f"Resultados de los agentes:\n\n{results_section}\n\n"
+                "Sintetiza estos resultados en una respuesta unificada."
+            )}
+        ]
+
+        try:
+            synthesis = ollama.generate(synthesis_messages)
+            return str(synthesis) if synthesis else "No se pudo sintetizar la respuesta."
+        except Exception as e:
+            logger.error(f"[Orchestrator] Error en sintesis: {e}")
+            # Fallback: concatenar
+            parts = [f"[{agent_type}]: {result}" for agent_type, result in sub_results.items()]
+            return "\n\n---\n\n".join(parts)
 
     # ============================================================
     # ESTADO Y CONTROL

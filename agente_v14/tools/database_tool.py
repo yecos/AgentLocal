@@ -480,3 +480,195 @@ def _execute_mysql_query(conn_info: dict, query: str, limit: int = 100) -> dict:
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+# ============================================================
+# CONSULTA EN LENGUAJE NATURAL
+# ============================================================
+
+# Keywords that are NEVER allowed in NL->SQL conversion
+_SQL_BLOCKED_KEYWORDS = [
+    "DROP", "DELETE", "TRUNCATE", "ALTER", "UPDATE", "INSERT",
+    "REPLACE", "CREATE", "ATTACH", "DETACH", "VACUUM", "REINDEX",
+]
+
+
+def query_natural_language(pregunta: str, tabla: str = "", db_path: str = "") -> str:
+    """Consulta una base de datos en lenguaje natural. Convierte la pregunta a SQL, la ejecuta (solo SELECT) y formatea resultados.
+
+    Args:
+        pregunta: Pregunta en lenguaje natural sobre los datos
+        tabla: Nombre de la tabla (opcional, ayuda al LLM a generar mejor SQL)
+        db_path: Ruta al archivo de base de datos SQLite
+    """
+    if not pregunta:
+        return "ERROR: Debes proporcionar una pregunta."
+
+    if not db_path:
+        return "ERROR: Debes indicar la ruta de la base de datos (db_path)."
+
+    # Validar ruta
+    validated = validate_path(db_path)
+    if "ACCESO DENEGADO" in str(validated):
+        return f"ERROR: {validated}"
+    if not os.path.exists(validated):
+        return f"ERROR: Base de datos no encontrada: {db_path}"
+
+    # Obtener schema de la tabla (o de todas las tablas) para ayudar al LLM
+    schema_info = _get_schema_for_llm(validated, tabla)
+
+    # Generar SQL con el LLM
+    sql = _generate_sql_from_question(pregunta, schema_info, tabla)
+
+    if not sql:
+        return "ERROR: No se pudo generar una consulta SQL a partir de la pregunta."
+
+    # Safety: verify only SELECT / PRAGMA
+    sql_upper = sql.strip().upper()
+    for kw in _SQL_BLOCKED_KEYWORDS:
+        if kw in sql_upper.split():
+            return f"ERROR: Por seguridad, solo se permiten consultas SELECT. Se detecto: {kw}"
+
+    if not (sql_upper.startswith("SELECT") or sql_upper.startswith("PRAGMA")):
+        return "ERROR: Por seguridad, solo se permiten consultas SELECT o PRAGMA."
+
+    # Ejecutar
+    result = db_query(sql, db_path=validated)
+
+    if not result.get("success"):
+        return f"ERROR ejecutando consulta: {result.get('error', 'Error desconocido')}\nSQL generado: {sql}"
+
+    # Formatear resultados como tabla legible
+    rows = result.get("rows", [])
+    columns = result.get("columns", [])
+
+    if not rows:
+        return f"La consulta no retorno resultados.\nSQL generado: {sql}"
+
+    # Format as readable table
+    output_parts = [
+        f"Resultados ({len(rows)} filas):",
+        f"SQL generado: {sql}",
+        "",
+    ]
+
+    # Table formatting
+    if columns and rows:
+        # Determine column widths
+        col_widths = [max(len(str(c)), 3) for c in columns]
+        for row in rows[:50]:
+            if isinstance(row, dict):
+                for i, col in enumerate(columns):
+                    val = str(row.get(col, ""))
+                    col_widths[i] = max(col_widths[i], min(len(val), 40))
+            elif isinstance(row, (list, tuple)):
+                for i, val in enumerate(row):
+                    if i < len(col_widths):
+                        col_widths[i] = max(col_widths[i], min(len(str(val)), 40))
+
+        # Header
+        header = " | ".join(str(c).ljust(col_widths[i]) for i, c in enumerate(columns))
+        separator = "-+-".join("-" * w for w in col_widths)
+        output_parts.append(header)
+        output_parts.append(separator)
+
+        # Rows
+        for row in rows[:50]:
+            if isinstance(row, dict):
+                vals = [str(row.get(col, ""))[:40].ljust(col_widths[i]) for i, col in enumerate(columns)]
+            elif isinstance(row, (list, tuple)):
+                vals = [str(v)[:40].ljust(col_widths[i]) if i < len(col_widths) else str(v)[:40]
+                        for i, v in enumerate(row)]
+            else:
+                vals = [str(row)[:40]]
+            output_parts.append(" | ".join(vals))
+
+        if len(rows) > 50:
+            output_parts.append(f"... y {len(rows) - 50} filas mas")
+
+    return "\n".join(output_parts)
+
+
+def _get_schema_for_llm(db_path: str, table_name: str = "") -> str:
+    """Obtiene informacion del schema de la BD para ayudar al LLM."""
+    parts = []
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+
+        if table_name:
+            tables = [table_name]
+        else:
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            tables = [row[0] for row in cursor.fetchall()]
+
+        for tbl in tables[:10]:  # Limitar a 10 tablas
+            cursor.execute(f"PRAGMA table_info({tbl})")
+            cols = cursor.fetchall()
+            col_info = ", ".join(f"{c[1]} ({c[2]})" for c in cols)
+            parts.append(f"Tabla '{tbl}': {col_info}")
+
+            # Sample row
+            try:
+                cursor.execute(f"SELECT * FROM {tbl} LIMIT 1")
+                sample = cursor.fetchone()
+                if sample:
+                    parts.append(f"  Ejemplo: {sample}")
+            except Exception:
+                pass
+
+        conn.close()
+    except Exception as e:
+        parts.append(f"Error obteniendo schema: {e}")
+
+    return "\n".join(parts)
+
+
+def _generate_sql_from_question(pregunta: str, schema_info: str, tabla: str = "") -> str:
+    """Usa el LLM para convertir una pregunta en lenguaje natural a SQL."""
+    try:
+        from llm import ollama
+
+        table_hint = f"Tabla principal: {tabla}" if tabla else ""
+        prompt = (
+            "Eres un experto en SQL. Convierte la siguiente pregunta en lenguaje natural "
+            "a una consulta SQL para SQLite. SOLO genera la consulta SQL, sin explicaciones.\n\n"
+            f"Schema de la base de datos:\n{schema_info}\n\n"
+            f"{table_hint}\n\n"
+            f"Pregunta: {pregunta}\n\n"
+            "REGLAS:\n"
+            "- Solo genera SELECT, nunca INSERT/UPDATE/DELETE/DROP\n"
+            "- Usa LIMIT 100 si no hay limite explicito\n"
+            "- Responde SOLO con la consulta SQL, sin markdown ni explicaciones"
+        )
+
+        messages = [{"role": "user", "content": prompt}]
+        response = ollama.generate_chat(messages)
+
+        if not response:
+            return ""
+
+        # Clean up response - extract SQL
+        sql = str(response).strip()
+
+        # Remove markdown code blocks if present
+        if sql.startswith("```"):
+            lines = sql.split("\n")
+            sql_lines = []
+            in_code = False
+            for line in lines:
+                if line.strip().startswith("```"):
+                    in_code = not in_code
+                    continue
+                if in_code or not line.strip().startswith("```"):
+                    sql_lines.append(line)
+            sql = "\n".join(sql_lines).strip()
+
+        # Remove trailing semicolon
+        sql = sql.rstrip(";").strip()
+
+        return sql
+
+    except Exception as e:
+        logger.error(f"Error generando SQL desde pregunta: {e}")
+        return ""
