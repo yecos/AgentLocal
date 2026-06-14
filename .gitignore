@@ -52,4 +52,3 @@ prompt
 server.log
 # Skills directory
 /skills/tool-results/
-__pycache__/
