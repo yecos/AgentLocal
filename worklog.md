@@ -820,3 +820,85 @@ Stage Summary:
 - agent/react.py: _validate_tool_call(), _call_llm_with_retry(), token counting + auto-summarization
 - agent/metacognition.py: confidence calibration (persistent), strategy suggestion (persistent)
 - Total: +766 lines across 3 files, 0 tests broken
+
+---
+Task ID: 7-r4a
+Agent: Sub Agent (general-purpose)
+Task: Write comprehensive tests for all new features added in recent rounds
+
+Work Log:
+- Read all source files: config.py, tools/web.py, tools/archivos.py, tools/codigo.py, tools/sistema.py, bridge_api.py, agent/react.py, agent/metacognition.py, utils/security.py, tools/registry.py, tools/__init__.py
+- Read existing test files for patterns: test_security.py, test_metrics.py, conftest.py
+- Created 6 new test files with 324 total new tests
+- Fixed bug in bridge_api.py: `logger` undefined on lines 360 and 387 (changed to `_bridge_logger`)
+- All 523 tests pass (including existing tests + 324 new ones)
+
+Test Files Created:
+1. tests/test_config.py (48 tests)
+   - validate_config() structure, directory checks, numeric range validation
+   - Environment variable overrides (AGENT_MODEL, AGENT_TEMPERATURE)
+   - get_config_summary() keys and values
+   - Config defaults and sanity checks
+
+2. tests/test_web_security.py (71 tests)
+   - _validate_web_url() allows valid http/https, blocks empty/null/dangerous schemes
+   - Blocks private IPs: 10.x, 172.16.x, 192.168.x, 127.x, 169.254.x, IPv6
+   - _is_private_ip() for IPv4, IPv6, DNS resolution
+   - BLOCKED_SCHEMES and PRIVATE_NETWORKS constants
+   - Response size limiting (5MB max), WebSearchCache behavior
+
+3. tests/test_tools_security.py (63 tests)
+   - archivos.py: _check_real_path() symlink escape detection, file size validation
+   - archivos.py: leer_archivo symlink blocking, MAX_FILE_READ_SIZE constant
+   - codigo.py: _validate_python_syntax() valid/invalid, line reporting
+   - codigo.py: _validate_js_ts_syntax() brace matching, comments, strings
+   - codigo.py: _validate_code_syntax() dispatch by extension
+   - codigo.py: backup rotation (create, shift, limit, content preservation)
+   - sistema.py: _truncate_output() size limiting, unicode handling
+   - sistema.py: command timeout enforcement (minimum, long, explicit)
+   - sistema.py: PROCESOS_CRITICOS protection
+
+4. tests/test_bridge_api.py (42 tests)
+   - Request ID middleware (X-Request-ID header, UUID format, uniqueness)
+   - Request validation middleware (415 for wrong content-type, size limits)
+   - CORS configuration (origins, preflight, access-control headers)
+   - /api/health endpoint (status, version, uptime, agent, ollama status)
+   - /api/config endpoint (deep_thinking_mode, timeouts, no sensitive data)
+   - /api/sessions endpoint (sessions list, count)
+   - _error_body() structured responses (detail, request_id, timestamp)
+   - Internal detail visibility in dev vs production mode
+   - Auth configuration (health no auth required)
+
+5. tests/test_react_agent.py (41 tests)
+   - _LLM_BLOCKED_PARAMS class attribute verification
+   - Retry configuration constants (LLM_MAX_RETRIES, LLM_RETRY_DELAYS)
+   - _validate_tool_call() valid/invalid tool names
+   - _validate_tool_call() missing required params, None/string/list params
+   - _validate_tool_call() type coercion (integer, boolean, number)
+   - _validate_tool_call() blocked params stripping
+   - Token counting: _estimate_token_count(), _update_conversation_token_count()
+   - Auto-summarization triggered when over threshold
+   - _summarize_conversation() preserves system message, reduces message count
+   - _call_llm_with_retry() success, empty response, transient/non-transient errors
+
+6. tests/test_metacognition.py (59 tests)
+   - Confidence calibration: record samples, offset calculation, bounded output
+   - Calibration persistence to disk, loading from disk
+   - Rolling window max 200 samples, recent data retention
+   - Strategy classification: code, search, file_operation, system, conversation
+   - Strategy suggestion: returns dict with correct strategy per task type
+   - Strategy outcome recording: count, success rate, avg iterations (EMA)
+   - Historical best strategy preference
+   - Metacognition reset: clears iteration/tool history, preserves calibration
+   - get_status() returns all expected fields
+   - evaluate_result() assessment levels (excelente, bueno, problematico)
+
+Bug Fix:
+- bridge_api.py lines 360, 387: Changed `logger.debug()` to `_bridge_logger.debug()`
+  (logger was undefined in bridge_api scope; only _bridge_logger was defined)
+
+Stage Summary:
+- 6 new test files created: test_config.py, test_web_security.py, test_tools_security.py, test_bridge_api.py, test_react_agent.py, test_metacognition.py
+- 324 total new tests (48 + 71 + 63 + 42 + 41 + 59)
+- All 523 tests pass (324 new + 199 existing)
+- 1 production bug fixed (undefined logger in bridge_api.py)

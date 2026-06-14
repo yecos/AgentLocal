@@ -357,7 +357,7 @@ async def health():
             with urllib.request.urlopen(req, timeout=2) as resp:
                 ollama_status = "ok"
         except Exception as e:
-            logger.debug(f"Error verificando Ollama en health endpoint: {e}")
+            _bridge_logger.debug(f"Error verificando Ollama en health endpoint: {e}")
             ollama_status = "unreachable"
     return {
         "status": "ok",
@@ -384,7 +384,7 @@ async def status(auth=Depends(verify_token)):
         models = data.get("models", [])
         ollama_ok = True
     except Exception as e:
-        logger.debug(f"Error conectando a Ollama en status endpoint: {e}")
+        _bridge_logger.debug(f"Error conectando a Ollama en status endpoint: {e}")
 
     uptime = int(time.time() - _start_time)
 
