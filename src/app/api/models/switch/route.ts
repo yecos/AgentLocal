@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-
-const BRIDGE_BASE = "http://localhost:8000";
+import { BRIDGE_BASE, bridgeHeaders } from "@/lib/bridge";
 
 export async function POST(request: NextRequest) {
   try {
@@ -16,12 +15,9 @@ export async function POST(request: NextRequest) {
 
     // Try bridge first
     try {
-      const token = process.env.BRIDGE_TOKEN;
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (token) headers["Authorization"] = `Bearer ${token}`;
       const bridgeRes = await fetch(`${BRIDGE_BASE}/api/models/switch`, {
         method: "POST",
-        headers,
+        headers: bridgeHeaders(true),
         body: JSON.stringify({ model }),
         signal: AbortSignal.timeout(5000),
       });

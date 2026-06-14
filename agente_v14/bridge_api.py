@@ -864,6 +864,23 @@ async def chat_simple(request: ChatRequest, auth=Depends(verify_token)):
         raise HTTPException(status_code=503, detail=f"Ollama no disponible: {e}")
 
 
+def _sanitize_filename(filename: str) -> str:
+    """Sanitize filename to prevent path traversal attacks (B3 fix)."""
+    import re
+    # Remove any directory path
+    filename = os.path.basename(filename)
+    # Replace special characters with underscore
+    filename = re.sub(r'[^\w.\-]', '_', filename)
+    # Collapse multiple underscores
+    filename = re.sub(r'_{2,}', '_', filename)
+    # Limit length
+    filename = filename[:255]
+    # Ensure we have a valid name
+    if not filename or filename.startswith('.'):
+        filename = f"upload_{int(time.time())}"
+    return filename
+
+
 @app.post("/api/upload")
 async def upload_files(files: List[UploadFile] = File(...), auth=Depends(verify_token)):
     """Sube archivos para procesar con el agente."""
@@ -879,11 +896,25 @@ async def upload_files(files: List[UploadFile] = File(...), auth=Depends(verify_
                 })
                 continue
 
-            file_path = os.path.join(_upload_dir, file.filename)
+            # Sanitize filename to prevent path traversal (B3 fix)
+            safe_name = _sanitize_filename(file.filename or "unnamed")
+            file_path = os.path.join(_upload_dir, safe_name)
+
+            # Verify the resolved path is within the upload directory
+            real_upload_dir = os.path.realpath(_upload_dir)
+            real_file_path = os.path.realpath(file_path)
+            if not real_file_path.startswith(real_upload_dir + os.sep) and real_file_path != real_upload_dir:
+                uploaded.append({
+                    "name": file.filename,
+                    "error": "Invalid file path",
+                })
+                continue
+
             with open(file_path, "wb") as f:
                 f.write(content)
             uploaded.append({
-                "name": file.filename,
+                "name": safe_name,
+                "original_name": file.filename,
                 "path": file_path,
                 "size": len(content),
                 "type": file.content_type,

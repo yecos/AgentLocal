@@ -1,17 +1,7 @@
 import { NextRequest } from "next/server";
+import { BRIDGE_BASE, bridgeHeaders } from "@/lib/bridge";
 
-const BRIDGE_BASE = "http://localhost:8000";
 const OLLAMA_BASE = "http://localhost:11434";
-
-/** Build headers for bridge requests, including Authorization if BRIDGE_TOKEN is set (B6 fix) */
-function bridgeHeaders(): Record<string, string> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const token = process.env.BRIDGE_TOKEN;
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
-  return headers;
-}
 
 export async function POST(request: NextRequest) {
   try {
@@ -44,7 +34,6 @@ export async function POST(request: NextRequest) {
 }
 
 async function streamFromBridge(messages: Array<{role: string; content: string}>, model: string) {
-  // Get the last user message for the agent
   const lastUserMsg = messages.filter(m => m.role === "user").pop();
   if (!lastUserMsg) {
     return new Response(
@@ -56,7 +45,7 @@ async function streamFromBridge(messages: Array<{role: string; content: string}>
   try {
     const bridgeResponse = await fetch(`${BRIDGE_BASE}/api/chat`, {
       method: "POST",
-      headers: bridgeHeaders(),
+      headers: bridgeHeaders(true),
       body: JSON.stringify({
         message: lastUserMsg.content,
         model: model,
@@ -65,7 +54,6 @@ async function streamFromBridge(messages: Array<{role: string; content: string}>
     });
 
     if (!bridgeResponse.ok) {
-      // Bridge returned error — return error instead of silent fallback
       const errorData = await bridgeResponse.json().catch(() => ({ detail: "Bridge error" }));
       return new Response(
         JSON.stringify({
@@ -94,7 +82,6 @@ async function streamFromBridge(messages: Array<{role: string; content: string}>
             if (done) break;
 
             const chunk = decoder.decode(value, { stream: true });
-            // Forward SSE events from bridge
             controller.enqueue(encoder.encode(chunk));
           }
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
@@ -117,7 +104,6 @@ async function streamFromBridge(messages: Array<{role: string; content: string}>
       },
     });
   } catch {
-    // Bridge not reachable — return error instead of silent fallback
     return new Response(
       JSON.stringify({
         error: "Agent Bridge not running",
@@ -172,7 +158,6 @@ async function streamFromOllama(messages: Array<{role: string; content: string}>
           for (const line of lines) {
             try {
               const parsed = JSON.parse(line);
-              // Convert Ollama format to our unified format
               const event = {
                 type: "text",
                 data: parsed.message?.content || "",

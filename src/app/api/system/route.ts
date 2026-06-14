@@ -1,16 +1,5 @@
 import { NextResponse } from "next/server";
-
-const BRIDGE_BASE = "http://localhost:8000";
-
-/** Build headers for bridge requests, including Authorization if BRIDGE_TOKEN is set */
-function bridgeHeaders(): Record<string, string> {
-  const headers: Record<string, string> = {};
-  const token = process.env.BRIDGE_TOKEN;
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
-  return headers;
-}
+import { BRIDGE_BASE, bridgeHeaders } from "@/lib/bridge";
 
 export async function GET() {
   try {
@@ -42,7 +31,7 @@ export async function GET() {
         gpu: null,
         error: message.includes("ECONNREFUSED") || message.includes("fetch failed") ? "Bridge not running" : message,
       },
-      { status: 200 } // Return defaults so UI doesn't break
+      { status: 200 }
     );
   }
 }

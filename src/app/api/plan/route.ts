@@ -1,17 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-
-const BRIDGE_BASE = "http://localhost:8000";
-
-/** Build headers for bridge requests, including Authorization if BRIDGE_TOKEN is set (B6 fix) */
-function bridgeHeaders(jsonContentType = false): Record<string, string> {
-  const headers: Record<string, string> = {};
-  if (jsonContentType) headers["Content-Type"] = "application/json";
-  const token = process.env.BRIDGE_TOKEN;
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
-  return headers;
-}
+import { BRIDGE_BASE, bridgeHeaders } from "@/lib/bridge";
 
 export async function GET() {
   try {

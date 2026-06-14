@@ -1,15 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-
-const BRIDGE_BASE = "http://localhost:8000";
-
-function bridgeHeaders(): Record<string, string> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const token = process.env.BRIDGE_TOKEN;
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
-  return headers;
-}
+import { BRIDGE_BASE, bridgeHeaders } from "@/lib/bridge";
 
 export async function POST(request: NextRequest) {
   try {
@@ -25,7 +15,7 @@ export async function POST(request: NextRequest) {
 
     const response = await fetch(`${BRIDGE_BASE}/api/execute`, {
       method: "POST",
-      headers: bridgeHeaders(),
+      headers: bridgeHeaders(true),
       body: JSON.stringify({ tool_name, arguments: toolArgs || {} }),
       signal: AbortSignal.timeout(30000),
     });
