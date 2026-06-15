@@ -274,16 +274,37 @@ function truncateTitle(title: string, maxLen: number = 22): string {
 
 // ─── Copy Button for Code Blocks ──────────────────────────────────────────
 
+// R7 fix: Fallback copy for non-HTTPS contexts where navigator.clipboard fails
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    // Fallback: use execCommand on a temporary textarea
+    try {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textarea);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(text);
+    const ok = await copyToClipboard(text);
+    if (ok) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Clipboard API not available
     }
   };
 
@@ -342,8 +363,10 @@ function ToolCallCard({ toolCall }: { toolCall: ToolCall }) {
         )}
         {resultText && (
           <button
-            onClick={() => {
-              navigator.clipboard.writeText(resultText).then(() => toast.success("Result copied"));
+            onClick={async () => {
+              const ok = await copyToClipboard(resultText);
+              if (ok) toast.success("Result copied");
+              else toast.error("Copy not available");
             }}
             className="ml-auto text-[#555] hover:text-[#e0e0e0] transition-colors"
             aria-label="Copy tool result"
@@ -521,13 +544,13 @@ function ChatMessage({
   const [msgCopied, setMsgCopied] = useState(false);
 
   const copyFullMessage = async () => {
-    try {
-      await navigator.clipboard.writeText(msg.content);
+    const ok = await copyToClipboard(msg.content);
+    if (ok) {
       setMsgCopied(true);
       setTimeout(() => setMsgCopied(false), 2000);
       toast.success("Message copied");
-    } catch {
-      // Clipboard not available
+    } else {
+      toast.error("Copy not available");
     }
   };
 
@@ -2875,26 +2898,34 @@ export default function AgentLocalInterface() {
       let isThinking = false;
       let toolCalls: ToolCall[] = [];
       let tokenCount = 0;
+      // R1 fix: SSE buffer for cross-chunk event splitting
+      let sseBuffer = "";
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk
-          .split("\n")
-          .filter((line) => line.startsWith("data: "));
+        // R1 fix: Accumulate into buffer, then split on double-newline boundaries
+        sseBuffer += chunk;
+        const parts = sseBuffer.split("\n\n");
+        // Last part may be incomplete — keep in buffer
+        sseBuffer = parts.pop() || "";
 
-        for (const line of lines) {
+        for (const part of parts) {
+          const line = part.trim();
+          if (!line.startsWith("data: ")) continue;
           const data = line.slice(6);
           if (data === "[DONE]") continue;
 
           try {
             const parsed = JSON.parse(data);
             if (parsed.error) {
-              // D2: Error filtering now done server-side
-              let errVal = String(parsed.error);
-              fullContent += `\nError: ${errVal}`;
+              // R4+R9 fix: Replace content with error message instead of appending
+              const errVal = String(parsed.error);
+              fullContent = fullContent
+                ? `${fullContent}\n\n**Error:** ${errVal}`
+                : `**Error:** ${errVal}`;
               break;
             }
 
@@ -2952,6 +2983,27 @@ export default function AgentLocalInterface() {
                     status: "success",
                   });
                 }
+              } else if (parsed.type === "tool_error") {
+                // R3 fix: Handle tool errors from agent — mark tool as failed
+                const toolName = parsed.data?.tool || parsed.data?.name || "unknown";
+                const errMsg = parsed.data?.error || parsed.data?.message || "Tool error";
+                const existingIdx = [...toolCalls]
+                  .reverse()
+                  .findIndex((t) => t.name === toolName && t.status === "loading");
+                if (existingIdx >= 0) {
+                  const realIdx = toolCalls.length - 1 - existingIdx;
+                  toolCalls[realIdx] = {
+                    ...toolCalls[realIdx],
+                    result: errMsg,
+                    status: "error",
+                  };
+                } else {
+                  toolCalls.push({
+                    name: toolName,
+                    result: errMsg,
+                    status: "error",
+                  });
+                }
               } else if (parsed.type === "meta") {
                 const metaData = parsed.data;
                 if (metaData) {
@@ -2961,12 +3013,18 @@ export default function AgentLocalInterface() {
                 // Agent finished
               } else if (parsed.type === "error") {
                 // D2+D10: Error filtering now done server-side
+                // R9 fix: Format error cleanly with markdown bold
                 let errMsg = String(parsed.data || '');
-                fullContent += `\nError: ${errMsg}`;
+                fullContent = fullContent
+                  ? `${fullContent}\n\n**Error:** ${errMsg}`
+                  : `**Error:** ${errMsg}`;
               } else if (parsed.type === "warning") {
                 // D1: Handle warning events (e.g., bridge fallback notification)
+                // R5 fix: Use markdown formatting instead of emoji
                 const warningMsg = String(parsed.data || '');
-                fullContent += `⚠ ${warningMsg}`;
+                fullContent = fullContent
+                  ? `${fullContent}\n\n> ⚠️ ${warningMsg}`
+                  : `> ⚠️ ${warningMsg}`;
               }
             } else {
               // Direct Ollama format (no type field)
@@ -3017,9 +3075,11 @@ export default function AgentLocalInterface() {
       const responseTime = Date.now() - startTime;
       responseTimesRef.current.push(responseTime);
 
-      // Mark any remaining loading tools as complete
+      // R10 fix: Mark remaining loading tools as timed-out (not false success)
       const finalToolCalls = toolCalls.map((t) =>
-        t.status === "loading" ? { ...t, status: "success" as const } : t
+        t.status === "loading"
+          ? { ...t, status: "error" as const, result: t.result || "Timed out — stream ended before tool result arrived" }
+          : t
       );
 
       setMessages((prev) =>
@@ -3051,8 +3111,10 @@ export default function AgentLocalInterface() {
 
       // Auto-save assistant message to conversation
       if (convId && fullContent) {
+        // R6 fix: Clean thinking tags before saving to avoid wasting DB space
+        const cleanedThinkingForSave = thinkingContent ? cleanThinking(thinkingContent) : undefined;
         saveMessageToConversation(convId, "assistant", fullContent, {
-          thinking: thinkingContent || undefined,
+          thinking: cleanedThinkingForSave || undefined,
           toolCalls: finalToolCalls.length > 0 ? finalToolCalls : undefined,
           tokenCount,
           responseTime,

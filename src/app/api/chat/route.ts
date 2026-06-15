@@ -143,6 +143,7 @@ async function streamFromBridge(messages: Array<{role: string; content: string}>
             // Filter internal JSON from bridge SSE events before forwarding to client
             const lines = chunk.split("\n");
             const filteredLines: string[] = [];
+            let sawDone = false; // R2 fix: track [DONE] to avoid duplicates
             for (const line of lines) {
               if (!line.startsWith("data: ")) {
                 filteredLines.push(line);
@@ -150,8 +151,8 @@ async function streamFromBridge(messages: Array<{role: string; content: string}>
               }
               const data = line.slice(6);
               if (data === "[DONE]") {
-                filteredLines.push(line);
-                continue;
+                sawDone = true;
+                continue; // R2 fix: skip bridge's [DONE], we'll add our own at the end
               }
               try {
                 const parsed = JSON.parse(data);
