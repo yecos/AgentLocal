@@ -4,10 +4,12 @@ import { BRIDGE_BASE, OLLAMA_BASE, bridgeHeaders } from "@/lib/bridge";
 /**
  * Internal agent JSON keys that should be filtered from the stream.
  * These are Spanish-language ReAct framework keys used by the Python agent.
+ * R12 fix: Only match when these appear as JSON keys (preceded by { or ,)
  */
 const INTERNAL_JSON_KEYS = ['"pensamiento"', '"accion"', '"respuesta_final"', '"params"'];
-const INTERNAL_JSON_REGEX = /"?(?:pensamiento|accion|respuesta_final|params)"?\s*:\s*"?[^",}]*"?\s*,?\s*/g;
-const INTERNAL_JSON_KEY_REGEX = /"(?:pensamiento|accion|respuesta_final|params)"/g;
+// R12 fix: More precise regex — only match JSON key patterns inside objects
+const INTERNAL_JSON_REGEX = /(?<=[{,])\s*"(?:pensamiento|accion|respuesta_final|params)"\s*:\s*"[^"]*"\s*,?\s*/g;
+const INTERNAL_JSON_KEY_REGEX = /"(?:pensamiento|accion|respuesta_final|params)"\s*:/g;
 
 /**
  * Filter internal agent JSON from text content.

@@ -3124,10 +3124,12 @@ export default function AgentLocalInterface() {
       }
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
-        // User cancelled - just mark streaming as done
+        // R11 fix: User cancelled — if no content yet, show cancellation notice
         setMessages((prev) =>
           prev.map((m) =>
-            m.id === assistantId ? { ...m, isStreaming: false } : m
+            m.id === assistantId
+              ? { ...m, isStreaming: false, content: m.content || "*Generation stopped*" }
+              : m
           )
         );
       } else {
