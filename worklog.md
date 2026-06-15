@@ -1545,3 +1545,32 @@ Stage Summary:
 - Total tool schemas: ~97
 - All 567 tests pass — zero regressions
 - 3 GitHub pushes completed
+
+---
+Task ID: 3
+Agent: Main Agent
+Task: Revisión completa de toma de decisiones del agente (D1-D15)
+
+Work Log:
+- Leído page.tsx completo (4142 líneas), chat/route.ts, bridge.ts, upload/route.ts, memory/route.ts, config/route.ts, conversations/route.ts, status/route.ts, globals.css, prisma/schema.prisma
+- Identificados 15 problemas de toma de decisiones (D1-D15)
+- Implementadas 15 correcciones en 2 commits
+
+Fixes implemented:
+- D1: Auto-fallback Bridge→Ollama cuando bridge devuelve 503 (streamFromOllamaWithWarning)
+- D2: Filtrado server-side de JSON interno del agente (pensamiento/accion/respuesta_final) en chat/route.ts
+- D3: Detección ampliada de herramientas peligrosas (12 patrones EN+ES, 8 operaciones git)
+- D4: Eliminada detección falsa de tool calls via regex /\[([a-z_]+)\]/g en texto plano
+- D5: Voice input usa idioma persistido en localStorage (no guess desde nombre modelo)
+- D6: Clear chat usa Promise.allSettled para consistencia memory+reset
+- D7: Warning toast cuando falla creación de conversación
+- D9: Timeout 5 minutos en promesa de confirmación de herramienta (auto-deny)
+- D12: Truncamiento real de contexto usando bridgeConfig.max_conversation_memory
+- D13: Validación server-side de uploads (extensiones bloqueadas + tamaño máximo)
+- D14: Selector i18n marcado como "coming soon", idioma persistido en localStorage
+- D15: Botón copiar en mensajes completos del asistente (hover reveal)
+
+Stage Summary:
+- 2 commits: 42edf7d (D1+D2 backend), 8500370 (D3-D15 full stack)
+- Archivos modificados: src/app/api/chat/route.ts, src/app/api/upload/route.ts, src/app/page.tsx
+- Push pendiente (requiere autenticación GitHub)
