@@ -2319,7 +2319,7 @@ export default function AgentLocalInterface() {
         });
       }
     } catch {
-      toast.error("Failed to connect to agent");
+      // R18 fix: Don't spam toast on every poll — status bar already shows offline
       setStatus({
         connected: false,
         agentAvailable: false,
@@ -2837,14 +2837,25 @@ export default function AgentLocalInterface() {
     const maxMemory = bridgeConfig?.max_conversation_memory
       ? Number(bridgeConfig.max_conversation_memory)
       : MAX_CONVERSATION_MEMORY;
+    // R20 fix: Add a system prompt for better response quality
+    const systemPrompt: { role: string; content: string } = {
+      role: "system",
+      content: useAgent
+        ? "You are an AI assistant with access to tools. Use them when needed to help the user. Respond in the same language the user writes in."
+        : "You are a helpful AI assistant. Respond concisely and accurately. Use the same language the user writes in.",
+    };
+
     const allMessages = [...messages, userMessage];
     const truncatedMessages = allMessages.length > maxMemory
       ? allMessages.slice(-maxMemory)
       : allMessages;
-    const ollamaMessages = truncatedMessages.map((m) => ({
-      role: m.role,
-      content: m.content,
-    }));
+    const ollamaMessages = [
+      systemPrompt,
+      ...truncatedMessages.map((m) => ({
+        role: m.role,
+        content: m.content,
+      })),
+    ];
 
     // Create AbortController for this request
     const abortController = new AbortController();
@@ -3132,6 +3143,15 @@ export default function AgentLocalInterface() {
               : m
           )
         );
+        // R17 fix: Save partial/cancelled message to conversation
+        if (convId) {
+          const partialContent = messages.find(m => m.id === assistantId)?.content || "";
+          if (partialContent) {
+            saveMessageToConversation(convId, "assistant", partialContent, {
+              responseTime: Date.now() - startTime,
+            });
+          }
+        }
       } else {
         const errMsg =
           error instanceof Error ? error.message : "Unknown error";
@@ -3140,13 +3160,19 @@ export default function AgentLocalInterface() {
             m.id === assistantId
               ? {
                   ...m,
-                  content: `Connection error: ${errMsg}`,
+                  content: `**Connection error:** ${errMsg}`,
                   isStreaming: false,
                   responseTime: Date.now() - startTime,
                 }
               : m
           )
         );
+        // R17 fix: Save error message to conversation
+        if (convId) {
+          saveMessageToConversation(convId, "assistant", `Connection error: ${errMsg}`, {
+            responseTime: Date.now() - startTime,
+          });
+        }
       }
     } finally {
       setIsLoading(false);

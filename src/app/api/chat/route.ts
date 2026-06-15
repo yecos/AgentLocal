@@ -57,9 +57,9 @@ export async function POST(request: NextRequest) {
       // D1 fix: If bridge returns a 503 (not running), auto-fallback to Ollama
       if (bridgeResult.status === 503) {
         try {
-          const errorData = await bridgeResult.clone().json().catch(() => ({}));
+          const errorData = await bridgeResult.json().catch(() => ({}));
           if (errorData.bridgeRequired) {
-            // Attempt Ollama fallback with a warning event prepended
+            // R16 fix: Ollama fallback with warning — no race condition since we consumed bridge body
             return await streamFromOllamaWithWarning(
               messages,
               model,
@@ -67,8 +67,18 @@ export async function POST(request: NextRequest) {
             );
           }
         } catch {
-          // Cannot parse error, return original bridge error
+          // Cannot parse error, return generic fallback
+          return await streamFromOllamaWithWarning(
+            messages,
+            model,
+            "Bridge error — falling back to simple chat mode"
+          );
         }
+        // 503 but not bridgeRequired — return the error as-is
+        return new Response(
+          JSON.stringify({ error: "Bridge unavailable", details: "The agent bridge returned an error" }),
+          { status: 503, headers: { "Content-Type": "application/json" } }
+        );
       }
       return bridgeResult;
     }
