@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { Toaster, toast } from "sonner";
@@ -610,6 +611,7 @@ function ChatMessage({
           <div className="text-[14px] leading-[1.7] tracking-[0.01em] text-[#e0e0e0]">
             {msg.content ? (
               <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
                 components={{
                   code({
                     className,
