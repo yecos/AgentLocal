@@ -517,6 +517,20 @@ function ChatMessage({
   expandedThinking: Record<string, boolean>;
   toggleThinking: (id: string) => void;
 }) {
+  // D15: Copy button state for full assistant message
+  const [msgCopied, setMsgCopied] = useState(false);
+
+  const copyFullMessage = async () => {
+    try {
+      await navigator.clipboard.writeText(msg.content);
+      setMsgCopied(true);
+      setTimeout(() => setMsgCopied(false), 2000);
+      toast.success("Message copied");
+    } catch {
+      // Clipboard not available
+    }
+  };
+
   if (msg.role === "user") {
     return (
       <div className="flex justify-end animate-fade-in">
@@ -531,7 +545,7 @@ function ChatMessage({
   const cleanedThinking = msg.thinking ? cleanThinking(msg.thinking) : "";
 
   return (
-    <div className="animate-fade-in">
+    <div className="animate-fade-in group relative">
       <div className="max-w-[85%]">
         <div className="border-l-2 border-[rgba(0,212,255,0.3)] pl-3">
           {/* Thinking section */}
@@ -702,6 +716,18 @@ function ChatMessage({
             )}
           </div>
 
+          {/* Copy full message button - D15 fix */}
+          {!isStreaming && msg.content && (
+            <button
+              onClick={copyFullMessage}
+              className="absolute top-1 right-1 p-1 text-[#555] hover:text-[#e0e0e0] transition-colors opacity-0 group-hover:opacity-100"
+              aria-label={msgCopied ? "Copied" : "Copy message"}
+              title={msgCopied ? "Copied!" : "Copy message"}
+            >
+              {msgCopied ? <Check size={12} /> : <Copy size={12} />}
+            </button>
+          )}
+
           {/* Response metadata */}
           {msg.responseTime && !isStreaming && (
             <div className="mt-2 text-[10px] text-[#555555] flex items-center gap-2">
@@ -862,16 +888,20 @@ function SettingsDialog({
   selectedModel,
   bridgeConfig,
   onSaveConfig,
+  userLanguage,
+  setUserLanguage,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   selectedModel: string;
   bridgeConfig: BridgeConfig | null;
   onSaveConfig: (key: string, value: string | number | boolean, category?: string) => void;
+  userLanguage: string;
+  setUserLanguage: (lang: string) => void;
 }) {
   const { theme, setTheme } = useTheme();
   const [localConfig, setLocalConfig] = useState<BridgeConfig>({});
-  const [language, setLanguage] = useState("ES");
+  const [language, setLanguage] = useState(userLanguage.toUpperCase() === "ES" ? "ES" : "EN");
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -1130,7 +1160,13 @@ function SettingsDialog({
               </div>
               <Select
                 value={language}
-                onValueChange={setLanguage}
+                onValueChange={(v) => {
+                  setLanguage(v);
+                  // D5 fix: Persist language choice to localStorage
+                  const langCode = v.toLowerCase();
+                  localStorage.setItem("agentlocal-language", langCode);
+                  setUserLanguage(langCode);
+                }}
               >
                 <SelectTrigger className="h-7 text-[10px] w-24 bg-[var(--zai-bg)] border-[var(--zai-border)]">
                   <SelectValue />
@@ -1140,6 +1176,8 @@ function SettingsDialog({
                   <SelectItem value="EN" className="text-[10px]">English</SelectItem>
                 </SelectContent>
               </Select>
+              {/* D14 fix: Mark i18n as coming soon */}
+              <span className="text-[8px] text-[var(--zai-text-dim)] italic">UI translation coming soon</span>
             </div>
           </TabsContent>
         </Tabs>
@@ -2636,6 +2674,15 @@ export default function AgentLocalInterface() {
 
   // ─── Voice Input ────────────────────────────────────────────────────────
 
+  // D5 fix: Persist language preference for voice input and i18n
+  const [userLanguage, setUserLanguage] = useState("es");
+
+  // Load saved language on mount
+  useEffect(() => {
+    const saved = localStorage.getItem("agentlocal-language");
+    if (saved) setUserLanguage(saved);
+  }, []);
+
   const toggleVoiceInput = useCallback(() => {
     const SpeechRecognition =
       (window as any).SpeechRecognition ||
@@ -2655,9 +2702,8 @@ export default function AgentLocalInterface() {
     const recognition = new SpeechRecognition();
     recognition.continuous = false;
     recognition.interimResults = false;
-    // Auto-detect language from model name (Spanish models start with "qwen3")
-    const modelName = selectedModel.toLowerCase();
-    recognition.lang = modelName.includes("qwen3") || modelName.includes("spanish") ? "es-ES" : "en-US";
+    // D5 fix: Use persisted language preference instead of guessing from model name
+    recognition.lang = userLanguage === "es" ? "es-ES" : "en-US";
 
     recognition.onresult = (event: any) => {
       const transcript = event.results[0][0].transcript;
@@ -2751,6 +2797,9 @@ export default function AgentLocalInterface() {
       convId = await createNewConversation(title || "New Conversation");
       if (convId) {
         setActiveConversationId(convId);
+      } else {
+        // D7 fix: Warn if conversation creation failed - message won't be persisted
+        toast.warning("Could not save conversation — message sent but not stored");
       }
     }
 
@@ -2761,7 +2810,15 @@ export default function AgentLocalInterface() {
 
     const startTime = Date.now();
 
-    const ollamaMessages = [...messages, userMessage].map((m) => ({
+    // D12 fix: Truncate conversation history to respect MAX_CONVERSATION_MEMORY
+    const maxMemory = bridgeConfig?.max_conversation_memory
+      ? Number(bridgeConfig.max_conversation_memory)
+      : MAX_CONVERSATION_MEMORY;
+    const allMessages = [...messages, userMessage];
+    const truncatedMessages = allMessages.length > maxMemory
+      ? allMessages.slice(-maxMemory)
+      : allMessages;
+    const ollamaMessages = truncatedMessages.map((m) => ({
       role: m.role,
       content: m.content,
     }));
@@ -2835,11 +2892,8 @@ export default function AgentLocalInterface() {
           try {
             const parsed = JSON.parse(data);
             if (parsed.error) {
-              // v5: Filter out raw JSON key names from error messages
+              // D2: Error filtering now done server-side
               let errVal = String(parsed.error);
-              if (['"pensamiento"', '"accion"', '"respuesta_final"', '"params"'].some(k => errVal.includes(k))) {
-                errVal = 'Error procesando respuesta del modelo';
-              }
               fullContent += `\nError: ${errVal}`;
               break;
             }
@@ -2847,26 +2901,10 @@ export default function AgentLocalInterface() {
             // Bridge agent events (type field present)
             if (parsed.type) {
               if (parsed.type === "text") {
+                // D2: Internal JSON filtering now done server-side.
+                // Client receives pre-filtered text from backend.
                 let content = parsed.data || "";
-                // v5: More robust filtering of internal agent JSON
-                const trimmed = content.trim();
-                if (trimmed.startsWith('{')) {
-                  try {
-                    const jsonObj = JSON.parse(trimmed);
-                    content = jsonObj.respuesta_final || jsonObj.pensamiento || '';
-                    if (!content) continue;
-                  } catch {
-                    if (trimmed.includes('"pensamiento"') || trimmed.includes('"accion"') || trimmed.includes('"respuesta_final"')) {
-                      continue;
-                    }
-                  }
-                }
-                content = content.replace(/"?pensamiento"?\s*:\s*"?[^",}]*"?\s*,?\s*/g, '');
-                content = content.replace(/"?accion"?\s*:\s*"?[^",}]*"?\s*,?\s*/g, '');
-                content = content.replace(/"?respuesta_final"?\s*:\s*"?[^",}]*"?\s*,?\s*/g, '');
-                content = content.replace(/"(?:pensamiento|accion|respuesta_final|params)"/g, '');
-                content = content.trim();
-                if (!content) continue;
+                if (!content.trim()) continue;
                 if (content.includes("<think")) {
                   isThinking = true;
                 }
@@ -2922,32 +2960,22 @@ export default function AgentLocalInterface() {
               } else if (parsed.type === "done") {
                 // Agent finished
               } else if (parsed.type === "error") {
+                // D2+D10: Error filtering now done server-side
                 let errMsg = String(parsed.data || '');
-                if (['"pensamiento"', '"accion"', '"respuesta_final"', '"params"'].some(k => errMsg.includes(k))) {
-                  errMsg = 'Error procesando respuesta del modelo';
-                }
                 fullContent += `\nError: ${errMsg}`;
+              } else if (parsed.type === "warning") {
+                // D1: Handle warning events (e.g., bridge fallback notification)
+                const warningMsg = String(parsed.data || '');
+                fullContent += `⚠ ${warningMsg}`;
               }
             } else {
               // Direct Ollama format (no type field)
+              // D2: Internal JSON filtering now happens server-side,
+              // but keep minimal client-side fallback for edge cases
               let content = parsed.message?.content || "";
               tokenCount++;
 
-              const directTrimmed = content.trim();
-              if (directTrimmed.startsWith('{')) {
-                try {
-                  const jsonObj = JSON.parse(directTrimmed);
-                  content = jsonObj.respuesta_final || jsonObj.pensamiento || '';
-                  if (!content) continue;
-                } catch {
-                  if (directTrimmed.includes('"pensamiento"') || directTrimmed.includes('"accion"') || directTrimmed.includes('"respuesta_final"')) {
-                    continue;
-                  }
-                }
-              }
-              content = content.replace(/"(?:pensamiento|accion|respuesta_final|params)"/g, '');
-              content = content.trim();
-              if (!content) continue;
+              if (!content.trim()) continue;
 
               if (content.includes("<think")) {
                 isThinking = true;
@@ -2962,19 +2990,9 @@ export default function AgentLocalInterface() {
                 fullContent += content;
               }
 
-              // Detect tool calls in text
-              const toolMatches = content.match(/\[([a-z_]+)\]/g);
-              if (toolMatches) {
-                for (const match of toolMatches) {
-                  const toolName = match.slice(1, -1);
-                  if (!toolCalls.find((t) => t.name === toolName)) {
-                    toolCalls.push({
-                      name: toolName,
-                      status: "success",
-                    });
-                  }
-                }
-              }
+              // D4 fix: REMOVED fragile regex tool detection from plain text.
+              // Tool calls are now only tracked via structured events (tool_start/tool_result)
+              // from the bridge, not from bracket patterns like [example].
             }
           } catch {
             // Skip malformed JSON
@@ -3101,17 +3119,24 @@ export default function AgentLocalInterface() {
     });
     responseTimesRef.current = [];
     setExpandedThinking({});
-    // Reset both agent memory and conversation context (B2 + B8 fix)
+    // D6 fix: Consistent clear - always try both memory clear and reset
+    let clearSuccess = true;
     try {
-      if (useAgent) {
-        await fetch("/api/memory/clear", { method: "POST" });
+      const [memRes, resetRes] = await Promise.allSettled([
+        fetch("/api/memory/clear", { method: "POST" }),
+        fetch("/api/reset", { method: "POST" }),
+      ]);
+      if (memRes.status === "rejected" && resetRes.status === "rejected") {
+        clearSuccess = false;
       }
-      // Also reset bridge conversation context to sync AGENT/CHAT modes (B8)
-      await fetch("/api/reset", { method: "POST" });
     } catch {
-      // Bridge not available - local clear is sufficient
+      clearSuccess = false;
     }
-    toast.success("Chat cleared");
+    if (clearSuccess) {
+      toast.success("Chat cleared");
+    } else {
+      toast.warning("Chat cleared locally — could not reach bridge");
+    }
   };
 
   // ─── Save Config ─────────────────────────────────────────────────────
@@ -3174,25 +3199,67 @@ export default function AgentLocalInterface() {
 
   // ─── Execute Tool with Confirmation ──────────────────────────────────
 
+  // D3 fix: Comprehensive dangerous tool detection (EN + ES)
+  const DANGEROUS_TOOL_PATTERNS = [
+    // Spanish tool prefixes (from Python agent)
+    { prefix: "ejecutar_", label: "Execute command" },
+    { prefix: "matar_", label: "Kill process" },
+    // Spanish tool exact names
+    { exact: "escribir_archivo", label: "Write file" },
+    { exact: "buscar_reemplazar", label: "Search & replace" },
+    { exact: "eliminar_archivo", label: "Delete file" },
+    { exact: "mover_archivo", label: "Move file" },
+    // English equivalents
+    { exact: "execute_command", label: "Execute command" },
+    { exact: "run_command", label: "Run command" },
+    { exact: "write_file", label: "Write file" },
+    { exact: "delete_file", label: "Delete file" },
+    { exact: "shell_exec", label: "Shell execute" },
+    { exact: "bash_exec", label: "Bash execute" },
+  ];
+
+  const DANGEROUS_GIT_OPS = ["push", "reset", "checkout", "clean", "rebase", "cherry-pick", "stash drop", "branch -D"];
+
   const executeTool = useCallback(async (
     toolName: string,
     args: Record<string, unknown>,
     skipConfirm?: boolean
   ): Promise<string> => {
+    // D3 fix: Check both ES and EN dangerous patterns
     const isDangerous = !skipConfirm && (
-      toolName.startsWith("ejecutar_") ||
-      toolName.startsWith("matar_") ||
-      toolName === "escribir_archivo" ||
-      toolName === "buscar_reemplazar" ||
-      (toolName === "git_operacion" && (args.operacion === "push" || args.operacion === "reset" || args.operacion === "checkout"))
+      DANGEROUS_TOOL_PATTERNS.some(p =>
+        p.prefix ? toolName.startsWith(p.prefix) : toolName === p.exact
+      ) ||
+      (toolName === "git_operacion" && DANGEROUS_GIT_OPS.some(op =>
+        String(args.operacion || "").includes(op)
+      )) ||
+      (toolName === "git_operation" && DANGEROUS_GIT_OPS.some(op =>
+        String(args.operation || args.operacion || "").includes(op)
+      ))
     );
 
+    // D9 fix: Add timeout to confirmation promise (5 min auto-deny)
     if (isDangerous && !sessionRemembered.has(toolName)) {
       return new Promise<string>((resolve) => {
+        const CONFIRMATION_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+        let resolved = false;
+
+        const timeoutId = setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+            setPendingConfirmation(null);
+            resolve(JSON.stringify({ error: "Action timed out — confirmation dismissed" }));
+            toast.warning(`Tool "${toolName}" timed out waiting for confirmation`);
+          }
+        }, CONFIRMATION_TIMEOUT);
+
         setPendingConfirmation({
           toolName,
           arguments: args,
           resolve: (allowed: boolean) => {
+            if (resolved) return; // Already timed out
+            resolved = true;
+            clearTimeout(timeoutId);
             if (!allowed) {
               resolve(JSON.stringify({ error: "Action denied by user" }));
             } else {
@@ -3341,6 +3408,8 @@ export default function AgentLocalInterface() {
         selectedModel={selectedModel}
         bridgeConfig={bridgeConfig}
         onSaveConfig={saveConfig}
+        userLanguage={userLanguage}
+        setUserLanguage={setUserLanguage}
       />
 
       {/* ─── Memory Viewer Dialog ───────────────────────────────────────── */}
