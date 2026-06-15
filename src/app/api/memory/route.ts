@@ -8,8 +8,8 @@ export async function GET(request: NextRequest) {
     const type = searchParams.get('type')
     const category = searchParams.get('category')
     const keyword = searchParams.get('keyword')
-    const limit = parseInt(searchParams.get('limit') || '50')
-    const offset = parseInt(searchParams.get('offset') || '0')
+    const limit = Math.max(1, parseInt(searchParams.get('limit') || '50') || 50)
+    const offset = Math.max(0, parseInt(searchParams.get('offset') || '0') || 0)
 
     const where: Record<string, unknown> = {}
     if (type) where.type = type

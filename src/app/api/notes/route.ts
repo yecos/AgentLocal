@@ -6,7 +6,7 @@ export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url)
     const pinned = searchParams.get('pinned')
-    const limit = parseInt(searchParams.get('limit') || '50')
+    const limit = Math.max(1, parseInt(searchParams.get('limit') || '50') || 50)
 
     const where: Record<string, unknown> = {}
     if (pinned !== null && pinned !== undefined) {
@@ -30,7 +30,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { title, content, userId, pinned } = body
+    const { title, content, pinned, tags } = body
 
     if (!title || typeof title !== 'string') {
       return NextResponse.json(
@@ -50,8 +50,8 @@ export async function POST(request: NextRequest) {
       data: {
         title,
         content,
-        userId: userId || null,
         pinned: pinned ?? false,
+        tags: tags || null,
       },
     })
 

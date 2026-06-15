@@ -1467,7 +1467,7 @@ function FileExplorerPanel({ onExecuteTool }: { onExecuteTool: (toolName: string
         <FolderOpen size={13} className="text-[var(--zai-accent)]" />
         <span className="text-[11px] tracking-[0.15em] text-[var(--zai-text)] uppercase font-bold">FILES</span>
         <div className="flex-1" />
-        <button onClick={loadRoot} className="p-1 text-[var(--zai-text-dim)] hover:text-[var(--zai-accent)] transition-colors" title="Refresh">
+        <button onClick={loadRoot} className="p-1 text-[var(--zai-text-dim)] hover:text-[var(--zai-accent)] transition-colors" title="Refresh" aria-label="Refresh file explorer">
           <RefreshCw size={12} />
         </button>
       </div>
@@ -1605,10 +1605,10 @@ function GitPanel({ onExecuteTool }: { onExecuteTool: (toolName: string, args: R
         {statusCounts.modified > 0 && <Badge variant="outline" className="text-[8px] px-1.5 h-4 border-[#ffd93d] text-[#ffd93d]">{statusCounts.modified}M</Badge>}
         {statusCounts.staged > 0 && <Badge variant="outline" className="text-[8px] px-1.5 h-4 border-[#00ff88] text-[#00ff88]">{statusCounts.staged}S</Badge>}
         {statusCounts.untracked > 0 && <Badge variant="outline" className="text-[8px] px-1.5 h-4 border-[#888] text-[#888]">{statusCounts.untracked}U</Badge>}
-        <button onClick={clearOutput} className="p-1 text-[var(--zai-text-dim)] hover:text-[var(--zai-text)] transition-colors" title="Clear output">
+        <button onClick={clearOutput} className="p-1 text-[var(--zai-text-dim)] hover:text-[var(--zai-text)] transition-colors" title="Clear output" aria-label="Clear output">
           <Trash2 size={11} />
         </button>
-        <button onClick={commitChanges} className="flex items-center gap-1 px-2 py-0.5 border border-[var(--zai-border-accent)] text-[9px] text-[var(--zai-accent)] hover:bg-[var(--zai-accent-dim)] transition-colors tracking-wider" title="Stage all and commit">
+        <button onClick={commitChanges} className="flex items-center gap-1 px-2 py-0.5 border border-[var(--zai-border-accent)] text-[9px] text-[var(--zai-accent)] hover:bg-[var(--zai-accent-dim)] transition-colors tracking-wider" title="Stage all and commit" aria-label="Stage all and commit">
           <GitCommit size={9} />
           COMMIT
         </button>
@@ -1719,7 +1719,7 @@ function TerminalPanel({ onExecuteTool }: { onExecuteTool: (toolName: string, ar
         <Terminal size={13} className="text-[var(--zai-accent)]" />
         <span className="text-[11px] tracking-[0.15em] text-[var(--zai-text)] uppercase font-bold">TERMINAL</span>
         <div className="flex-1" />
-        <button onClick={clearOutput} className="p-1 text-[var(--zai-text-dim)] hover:text-[var(--zai-text)] transition-colors" title="Clear terminal">
+        <button onClick={clearOutput} className="p-1 text-[var(--zai-text-dim)] hover:text-[var(--zai-text)] transition-colors" title="Clear terminal" aria-label="Clear terminal">
           <Trash2 size={11} />
         </button>
       </div>
@@ -1750,6 +1750,7 @@ function TerminalPanel({ onExecuteTool }: { onExecuteTool: (toolName: string, ar
           onChange={(e) => setCmdInput(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder="Enter command..."
+          aria-label="Terminal command input"
           disabled={loading}
           className="flex-1 bg-transparent text-[12px] text-[#e0e0e0] placeholder-[#3a3a3a] outline-none font-mono disabled:opacity-30"
           style={{ fontFamily: "inherit" }}
@@ -1926,7 +1927,7 @@ function TaskPlannerPanel({ onExecuteTool }: { onExecuteTool: (toolName: string,
         <span className="text-[11px] tracking-[0.15em] text-[var(--zai-text)] uppercase font-bold">TASKS</span>
         <span className="text-[9px] text-[var(--zai-text-dim)] ml-1">{tasks.length}</span>
         <div className="flex-1" />
-        <button onClick={fetchTasks} className="p-1 text-[var(--zai-text-dim)] hover:text-[var(--zai-accent)] transition-colors" title="Refresh tasks">
+        <button onClick={fetchTasks} className="p-1 text-[var(--zai-text-dim)] hover:text-[var(--zai-accent)] transition-colors" title="Refresh tasks" aria-label="Refresh tasks">
           <RefreshCw size={12} />
         </button>
       </div>
@@ -1938,12 +1939,14 @@ function TaskPlannerPanel({ onExecuteTool }: { onExecuteTool: (toolName: string,
           onChange={(e) => setNewTaskTitle(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && createTask()}
           placeholder="New task..."
+          aria-label="New task title"
           className="h-7 text-[11px] bg-[var(--zai-bg)] border-[var(--zai-border)] text-[var(--zai-text)] placeholder:text-[var(--zai-text-dim)]"
           style={{ fontFamily: "inherit" }}
         />
         <select
           value={newTaskStatus}
           onChange={(e) => setNewTaskStatus(e.target.value)}
+          aria-label="Task status"
           className="bg-transparent text-[10px] text-[var(--zai-text-dim)] outline-none cursor-pointer border border-[var(--zai-border)] px-2 py-1"
           style={{ fontFamily: "inherit" }}
         >

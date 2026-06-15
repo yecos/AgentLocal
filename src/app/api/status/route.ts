@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { BRIDGE_BASE, bridgeHeaders } from "@/lib/bridge";
+import { BRIDGE_BASE, OLLAMA_BASE, bridgeHeaders } from "@/lib/bridge";
 
 export async function GET() {
   // Try bridge first (has agent status + Ollama status)
@@ -25,7 +25,7 @@ export async function GET() {
 
   // Direct Ollama check
   try {
-    const response = await fetch(`http://localhost:11434/api/tags`, {
+    const response = await fetch(`${OLLAMA_BASE}/api/tags`, {
       signal: AbortSignal.timeout(5000),
     });
 

@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-
-const OLLAMA_BASE = "http://localhost:11434";
+import { OLLAMA_BASE } from "@/lib/bridge";
 
 export async function GET() {
   try {

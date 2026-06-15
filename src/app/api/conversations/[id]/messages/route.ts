@@ -9,7 +9,7 @@ export async function GET(
   try {
     const { id } = await params
     const { searchParams } = new URL(request.url)
-    const limit = parseInt(searchParams.get('limit') || '50')
+    const limit = Math.max(1, parseInt(searchParams.get('limit') || '50') || 50)
     const cursor = searchParams.get('cursor')
 
     const conversation = await prisma.conversation.findUnique({ where: { id } })

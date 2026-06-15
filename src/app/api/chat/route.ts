@@ -1,7 +1,5 @@
 import { NextRequest } from "next/server";
-import { BRIDGE_BASE, bridgeHeaders } from "@/lib/bridge";
-
-const OLLAMA_BASE = "http://localhost:11434";
+import { BRIDGE_BASE, OLLAMA_BASE, bridgeHeaders } from "@/lib/bridge";
 
 export async function POST(request: NextRequest) {
   try {

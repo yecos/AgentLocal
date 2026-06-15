@@ -7,6 +7,8 @@ const BRIDGE_BASE = process.env.BRIDGE_HOST
   ? `http://${process.env.BRIDGE_HOST}:${process.env.BRIDGE_PORT || "8000"}`
   : `http://localhost:${process.env.BRIDGE_PORT || "8000"}`;
 
+const OLLAMA_BASE = process.env.OLLAMA_HOST || "http://localhost:11434";
+
 /**
  * Build headers for bridge requests, including Authorization if BRIDGE_TOKEN is set.
  * This fixes B6: auth headers were missing from frontend API calls.
@@ -33,4 +35,4 @@ export function sanitizeFilename(filename: string): string {
     .substring(0, 255);            // Limit length
 }
 
-export { BRIDGE_BASE };
+export { BRIDGE_BASE, OLLAMA_BASE };
