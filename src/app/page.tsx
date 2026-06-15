@@ -337,8 +337,14 @@ function ToolCallCard({ toolCall }: { toolCall: ToolCall }) {
   };
 
   const resultText = toolCall.result || "";
-  const isTruncated = resultText.length > 500;
-  const displayResult = expanded ? resultText : resultText.slice(0, 500);
+  // R26 fix: Detect binary/base64 content and show placeholder instead of garbage
+  const isBinaryLike = /^[A-Za-z0-9+/=]{100,}$/.test(resultText.slice(0, 200)) && resultText.length > 500;
+  const displayResult = isBinaryLike
+    ? `[Binary/Base64 data — ${resultText.length} chars]`
+    : expanded
+      ? resultText
+      : resultText.slice(0, 500);
+  const isTruncated = !isBinaryLike && resultText.length > 500;
 
   return (
     <div
@@ -2444,8 +2450,29 @@ export default function AgentLocalInterface() {
     return () => clearInterval(timer);
   }, []);
 
+  // R27 fix: Only auto-scroll if user is near the bottom (within 150px)
+  // If user scrolled up to read earlier messages, don't force scroll down
+  const chatContainerRef = useRef<HTMLDivElement>(null);
+  const userScrolledUpRef = useRef(false);
+
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const container = chatContainerRef.current;
+    if (!container) return;
+
+    const handleScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = container;
+      // User is "near bottom" if within 150px of the bottom
+      userScrolledUpRef.current = scrollHeight - scrollTop - clientHeight > 150;
+    };
+
+    container.addEventListener("scroll", handleScroll, { passive: true });
+    return () => container.removeEventListener("scroll", handleScroll);
+  }, []);
+
+  useEffect(() => {
+    if (!userScrolledUpRef.current) {
+      chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
   }, [messages]);
 
   // ─── Auto-select first model ────────────────────────────────────────────
@@ -3540,7 +3567,7 @@ export default function AgentLocalInterface() {
           {panelMode === "chat" ? (
             <>
               {/* Messages */}
-              <div className="flex-1 overflow-y-auto px-6 py-6 space-y-5">
+              <div ref={chatContainerRef} className="flex-1 overflow-y-auto px-6 py-6 space-y-5">
                 {messages.length === 0 && (
                   <WelcomeScreen
                     status={status}
