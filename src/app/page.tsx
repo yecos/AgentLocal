@@ -172,6 +172,8 @@ interface MemoryEntryItem {
   type: string;
   category?: string | null;
   content: string;
+  context?: string | null;
+  tags?: string | null;
   confidence: number;
   source?: string | null;
   createdAt: string;
@@ -926,7 +928,7 @@ function SettingsDialog({
   onOpenChange: (open: boolean) => void;
   selectedModel: string;
   bridgeConfig: BridgeConfig | null;
-  onSaveConfig: (key: string, value: string | number | boolean, category?: string) => void;
+  onSaveConfig: (key: string, value: string, category?: string) => void;
   userLanguage: string;
   setUserLanguage: (lang: string) => void;
 }) {
@@ -2236,6 +2238,7 @@ export default function AgentLocalInterface() {
   const [selectedModel, setSelectedModel] = useState<string>("qwen3:4b");
   const [status, setStatus] = useState<SystemStatus>({
     connected: false,
+    agentAvailable: false,
     models: [],
     modelCount: 0,
   });
