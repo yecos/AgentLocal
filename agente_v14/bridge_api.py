@@ -29,6 +29,8 @@ Puerto: 8000
 =============================================================
 """
 
+from __future__ import annotations
+
 import sys
 import os
 import json
@@ -758,6 +760,9 @@ async def execute_tool(request: ExecuteRequest, auth=Depends(verify_token)):
 
     tool_name = request.tool
     params = request.params
+
+    if ReactAgent._LLM_BLOCKED_PARAMS.intersection(params):
+        raise HTTPException(status_code=403, detail="La solicitud contiene parámetros reservados.")
 
     if tool_name not in TOOL_FUNCTIONS:
         raise HTTPException(status_code=404, detail=f"Herramienta '{tool_name}' no encontrada.")

@@ -117,8 +117,8 @@ def _tts_edge(texto, ruta, voz, velocidad):
         if len(voz) == 2 and voz in voice_map:
             voice_name = voice_map[voz]
 
-        rate = f"{'+'
-                       if velocidad >= 1.0 else ''}{int((velocidad - 1.0) * 100)}%"
+        rate_prefix = "+" if velocidad >= 1.0 else ""
+        rate = f"{rate_prefix}{int((velocidad - 1.0) * 100)}%"
 
         try:
             import edge_tts
