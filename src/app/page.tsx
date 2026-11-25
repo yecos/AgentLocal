@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { CodexConnection, type CodexStatus } from "@/components/codex-connection";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
@@ -817,7 +818,9 @@ function WelcomeScreen({
         Local AI agent interface.
         <br />
         <span className="text-[#333333]">
-          All processing runs on your machine via Ollama. 100% local, no cloud.
+          {selectedModel.startsWith("codex/")
+            ? "Codex usa tu cuenta de ChatGPT y procesa las solicitudes con OpenAI."
+            : "Ollama ejecuta el modelo en tu equipo."}
         </span>
       </div>
       <div className="flex items-center gap-4 mt-2">
@@ -831,7 +834,9 @@ function WelcomeScreen({
             }
           />
           <span className="text-[10px] text-[#444444]">
-            {status.connected ? "OLLAMA CONNECTED" : "OLLAMA OFFLINE"}
+            {selectedModel.startsWith("codex/")
+              ? (status.connected ? "CHATGPT CONNECTED" : "CHATGPT DISCONNECTED")
+              : (status.connected ? "OLLAMA CONNECTED" : "OLLAMA OFFLINE")}
           </span>
         </div>
         <span className="text-[10px] text-[#333333]">│</span>
@@ -843,7 +848,9 @@ function WelcomeScreen({
       </div>
       {!status.connected && (
         <div className="mt-1 px-4 py-2 border border-[rgba(255,51,51,0.15)] text-[9px] text-[#ff3333]">
-          Start Ollama: ollama serve
+          {selectedModel.startsWith("codex/")
+            ? "Inicia sesión con ChatGPT en el selector Motor."
+            : "Start Ollama: ollama serve"}
         </div>
       )}
       {useAgent && !status.agentAvailable && status.connected && (
@@ -2236,12 +2243,29 @@ export default function AgentLocalInterface() {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [selectedModel, setSelectedModel] = useState<string>("qwen3:4b");
-  const [status, setStatus] = useState<SystemStatus>({
+  const [ollamaStatus, setStatus] = useState<SystemStatus>({
     connected: false,
     agentAvailable: false,
     models: [],
     modelCount: 0,
   });
+  const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null);
+  const usingCodex = selectedModel.startsWith("codex/");
+  const status: SystemStatus = usingCodex ? {
+    connected: Boolean(codexStatus?.authenticated),
+    agentAvailable: Boolean(codexStatus?.authenticated),
+    models: (codexStatus?.models || []).map((item) => ({ name: "codex/" + item.id, size: 0, modified_at: "", family: "OpenAI", parameter_size: "", quantization_level: "" })),
+    modelCount: codexStatus?.models.length || 0,
+  } : ollamaStatus;
+
+  const updateCodexStatus = useCallback((next: CodexStatus) => {
+    setCodexStatus(next);
+    if (next.models.length) {
+      setSelectedModel((current) => current === "codex/default"
+        ? "codex/" + (next.models.find((item) => item.isDefault)?.id || next.models[0].id)
+        : current);
+    }
+  }, []);
   const [uptime, setUptime] = useState(0);
   const [sessionStats, setSessionStats] = useState<SessionStats>({
     messageCount: 0,
@@ -2324,6 +2348,7 @@ export default function AgentLocalInterface() {
       setStatus(data);
       if (data.connected && data.models.length > 0) {
         setSelectedModel((prev) => {
+          if (prev.startsWith("codex/")) return prev;
           if (data.models.find((m: OllamaModel) => m.name === prev))
             return prev;
           return data.models[0].name;
@@ -2796,11 +2821,11 @@ export default function AgentLocalInterface() {
     setIsLoading(false);
     // Also request server-side cancellation (B7)
     try {
-      await fetch("/api/chat/cancel", { method: "POST" });
+      if (!usingCodex) await fetch("/api/chat/cancel", { method: "POST" });
     } catch {
       // Cancel request failed - client abort already sent
     }
-  }, []);
+  }, [usingCodex]);
 
   // ─── Send Message ───────────────────────────────────────────────────────
 
@@ -2978,7 +3003,7 @@ export default function AgentLocalInterface() {
                 // D2: Internal JSON filtering now done server-side.
                 // Client receives pre-filtered text from backend.
                 let content = parsed.data || "";
-                if (!content.trim()) continue;
+                if (!content.trim() && !usingCodex) continue;
                 if (content.includes("<think")) {
                   isThinking = true;
                 }
@@ -3241,6 +3266,10 @@ export default function AgentLocalInterface() {
     });
     responseTimesRef.current = [];
     setExpandedThinking({});
+    if (usingCodex) {
+      toast.success("Chat cleared");
+      return;
+    }
     // D6 fix: Consistent clear - always try both memory clear and reset
     let clearSuccess = true;
     try {
@@ -3283,6 +3312,7 @@ export default function AgentLocalInterface() {
 
   const switchModel = useCallback(async (modelName: string) => {
     setSelectedModel(modelName);
+    if (modelName.startsWith("codex/")) return;
     try {
       await fetch("/api/models/switch", {
         method: "POST",
@@ -3523,6 +3553,10 @@ export default function AgentLocalInterface() {
         </div>
       </header>
 
+      <CodexConnection model={selectedModel} disabled={isLoading}
+        ollamaModel={ollamaStatus.models[0]?.name || "qwen3:4b"}
+        onModel={setSelectedModel} onStatus={updateCodexStatus} />
+
       {/* ─── Settings Dialog ────────────────────────────────────────────── */}
       <SettingsDialog
         open={settingsOpen}
@@ -3682,7 +3716,7 @@ export default function AgentLocalInterface() {
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={handleKeyDown}
                     placeholder={
-                      status.connected ? "Enter message..." : "Ollama not connected"
+                      status.connected ? "Enter message..." : usingCodex ? "Conecta tu cuenta de ChatGPT" : "Ollama not connected"
                     }
                     disabled={!status.connected}
                     rows={1}
@@ -3969,7 +4003,7 @@ export default function AgentLocalInterface() {
                 <div className="flex justify-between items-center">
                   <span className="text-[10px] text-[var(--zai-text-dim)]">HOST</span>
                   <span className="text-[11px] text-[var(--zai-text-dim)]">
-                    localhost:11434
+                    {usingCodex ? "Codex · ChatGPT" : "localhost:11434"}
                   </span>
                 </div>
                 <div className="flex justify-between items-center">
@@ -4248,7 +4282,7 @@ export default function AgentLocalInterface() {
                   <div className="text-[10px] text-[var(--zai-text-dim)] px-2 py-1">
                     {status.connected
                       ? "No models found"
-                      : "Cannot connect to Ollama"}
+                      : usingCodex ? "Conecta tu cuenta de ChatGPT" : "Cannot connect to Ollama"}
                   </div>
                 )}
               </div>

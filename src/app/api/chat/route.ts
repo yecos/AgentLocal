@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { BRIDGE_BASE, OLLAMA_BASE, bridgeHeaders } from "@/lib/bridge";
+import { codexStream, localRequest } from "@/lib/codex";
 
 /**
  * Internal agent JSON keys that should be filtered from the stream.
@@ -50,6 +51,16 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const { messages, model, useAgent } = body;
+
+    if (typeof model === "string" && model.startsWith("codex/")) {
+      if (!localRequest(request)) return Response.json({ error: "Acceso local requerido." }, { status: 403 });
+      if (!Array.isArray(messages) || !messages.length || messages.length > 100 ||
+          messages.some((message) => !message || !["user", "assistant", "system"].includes(message.role) ||
+            typeof message.content !== "string") || JSON.stringify(messages).length > 200_000) {
+        return Response.json({ error: "La conversación no es válida o es demasiado larga." }, { status: 400 });
+      }
+      return await codexStream(messages, model.slice(6), Boolean(useAgent), request.signal);
+    }
 
     // If useAgent is true, route to the Python bridge (full ReAct agent)
     if (useAgent) {
