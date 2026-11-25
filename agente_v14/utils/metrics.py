@@ -412,10 +412,10 @@ def timed(category: str) -> Callable[[Callable], Callable]:
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             metrics = MetricsCollector.get()
-            start = time.monotonic()
+            start = time.perf_counter()
             try:
                 result = func(*args, **kwargs)
-                elapsed_ms = (time.monotonic() - start) * 1000.0
+                elapsed_ms = (time.perf_counter() - start) * 1000.0
 
                 if category == "llm":
                     metrics.record_llm_call(elapsed_ms)
@@ -438,7 +438,7 @@ def timed(category: str) -> Callable[[Callable], Callable]:
                 return result
 
             except Exception as e:
-                elapsed_ms = (time.monotonic() - start) * 1000.0
+                elapsed_ms = (time.perf_counter() - start) * 1000.0
                 metrics.record_error(category)
                 raise
 

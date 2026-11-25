@@ -8,6 +8,7 @@ import time
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 
 # Ensure parent dir is in path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -187,6 +188,17 @@ class TestTimedDecorator(unittest.TestCase):
 
     def setUp(self):
         MetricsCollector._instance = None
+
+    def test_timed_uses_high_resolution_clock(self):
+        @timed("llm")
+        def fake_generate():
+            return "result"
+
+        with patch("utils.metrics.time.monotonic", return_value=10.0), patch(
+            "utils.metrics.time.perf_counter", side_effect=[10.0, 10.005]
+        ):
+            self.assertEqual(fake_generate(), "result")
+            self.assertAlmostEqual(get_metrics().get_summary()["llm_latency_ms"], 5.0)
 
     def test_timed_llm(self):
         @timed("llm")
