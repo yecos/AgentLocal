@@ -16,7 +16,7 @@ export async function POST(request: NextRequest) {
     const response = await fetch(`${BRIDGE_BASE}/api/execute`, {
       method: "POST",
       headers: bridgeHeaders(true),
-      body: JSON.stringify({ tool_name, arguments: toolArgs || {} }),
+      body: JSON.stringify({ tool: tool_name, params: toolArgs ?? {} }),
       signal: AbortSignal.timeout(30000),
     });
 

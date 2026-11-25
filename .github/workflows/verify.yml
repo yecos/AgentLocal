@@ -1,0 +1,51 @@
+name: Verify local stack
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Build and smoke test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install web dependencies
+        run: npm ci --legacy-peer-deps --no-audit --no-fund
+      - name: Install Python dependencies for verification
+        run: python -m pip install fastapi uvicorn ollama python-multipart pytest requests numpy
+      - name: Compile Python
+        run: python -m compileall -q agente_v14
+      - name: Test Bridge, configuration, models, memory and metrics
+        working-directory: agente_v14
+        run: python -m pytest -q tests/test_bridge_api.py tests/test_config.py tests/test_llm.py tests/test_memory.py tests/test_metrics.py
+      - name: Generate Prisma client
+        run: npm run db:generate
+      - name: Build production web app
+        run: npm run build
+      - name: Verify the local stack
+        run: python scripts/verify_local_stack.py

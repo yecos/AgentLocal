@@ -737,6 +737,9 @@ def crear_proyecto_web(
 
 def _generate_nextjs_project(nombre, ext, extx, ts, tailwind, prisma):
     """Genera estructura de proyecto Next.js."""
+    main_class = ' className="min-h-screen p-8"' if tailwind else ""
+    heading_class = ' className="text-4xl font-bold"' if tailwind else ""
+    metadata_import = 'import type { Metadata } from "next";\n' if ts else ""
     files = {
         "package.json": json.dumps({
             "name": nombre,
@@ -761,20 +764,19 @@ def _generate_nextjs_project(nombre, ext, extx, ts, tailwind, prisma):
         }, indent=2),
 
         f"app/layout{extx}": (
-            f"{'import type { Metadata } from \"next\";' + chr(10) if ts else ''}"
-            f"import './globals.css';\n\n"
-            f"{'export const metadata: Metadata = ' if ts else 'export const metadata = '}"
+            f"{metadata_import}import './globals.css';\n\n"
+            f"export const metadata{': Metadata' if ts else ''} = "
             f"{{\n  title: '{nombre}',\n  description: 'Created with Agente Local',\n}};\n\n"
-            f"export default function RootLayout({{ children }}: "
-            f"{{' children: React.ReactNode' if ts else ' children'}}) {{\n"
+            f"export default function RootLayout({{ children }}"
+            f"{': { children: React.ReactNode }' if ts else ''}) {{\n"
             f"  return (\n    <html lang=\"es\">\n      <body>{{children}}</body>\n"
             f"    </html>\n  );\n}}\n"
         ),
 
         f"app/page{extx}": (
             f"export default function Home() {{\n"
-            f"  return (\n    <main{' className=\"min-h-screen p-8\"' if tailwind else ''}>\n"
-            f"      <h1{' className=\"text-4xl font-bold\"' if tailwind else ''}>"
+            f'  return (\n    <main{main_class}>\n'
+            f'      <h1{heading_class}>'
             f"{nombre}</h1>\n"
             f"      <p>Bienvenido a {nombre}</p>\n"
             f"    </main>\n  );\n}}\n"
@@ -833,6 +835,8 @@ def _generate_nextjs_project(nombre, ext, extx, ts, tailwind, prisma):
 
 def _generate_react_project(nombre, ext, extx, ts, tailwind):
     """Genera estructura de proyecto React (Vite)."""
+    content_class = ' className="min-h-screen p-8"' if tailwind else ""
+    heading_class = ' className="text-4xl font-bold"' if tailwind else ""
     return {
         "package.json": json.dumps({
             "name": nombre, "version": "0.1.0", "type": "module",
@@ -859,8 +863,8 @@ def _generate_react_project(nombre, ext, extx, ts, tailwind):
         ),
         f"src/App{extx}": (
             f"export default function App() {{\n"
-            f"  return (\n    <div{' className=\"min-h-screen p-8\"' if tailwind else ''}>\n"
-            f"      <h1{' className=\"text-4xl font-bold\"' if tailwind else ''}>"
+            f"  return (\n    <div{content_class}>\n"
+            f"      <h1{heading_class}>"
             f"{nombre}</h1>\n"
             f"      <p>Aplicacion React creada con Agente Local</p>\n"
             f"    </div>\n  );\n}}\n"
