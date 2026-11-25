@@ -818,7 +818,9 @@ function WelcomeScreen({
         Local AI agent interface.
         <br />
         <span className="text-[#333333]">
-          All processing runs on your machine via Ollama. 100% local, no cloud.
+          {selectedModel.startsWith("codex/")
+            ? "Codex usa tu cuenta de ChatGPT y procesa las solicitudes con OpenAI."
+            : "Ollama ejecuta el modelo en tu equipo."}
         </span>
       </div>
       <div className="flex items-center gap-4 mt-2">
@@ -832,7 +834,9 @@ function WelcomeScreen({
             }
           />
           <span className="text-[10px] text-[#444444]">
-            {status.connected ? "OLLAMA CONNECTED" : "OLLAMA OFFLINE"}
+            {selectedModel.startsWith("codex/")
+              ? (status.connected ? "CHATGPT CONNECTED" : "CHATGPT DISCONNECTED")
+              : (status.connected ? "OLLAMA CONNECTED" : "OLLAMA OFFLINE")}
           </span>
         </div>
         <span className="text-[10px] text-[#333333]">│</span>
@@ -844,7 +848,9 @@ function WelcomeScreen({
       </div>
       {!status.connected && (
         <div className="mt-1 px-4 py-2 border border-[rgba(255,51,51,0.15)] text-[9px] text-[#ff3333]">
-          Start Ollama: ollama serve
+          {selectedModel.startsWith("codex/")
+            ? "Inicia sesión con ChatGPT en el selector Motor."
+            : "Start Ollama: ollama serve"}
         </div>
       )}
       {useAgent && !status.agentAvailable && status.connected && (
@@ -3710,7 +3716,7 @@ export default function AgentLocalInterface() {
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={handleKeyDown}
                     placeholder={
-                      status.connected ? "Enter message..." : "Ollama not connected"
+                      status.connected ? "Enter message..." : usingCodex ? "Conecta tu cuenta de ChatGPT" : "Ollama not connected"
                     }
                     disabled={!status.connected}
                     rows={1}
@@ -4276,7 +4282,7 @@ export default function AgentLocalInterface() {
                   <div className="text-[10px] text-[var(--zai-text-dim)] px-2 py-1">
                     {status.connected
                       ? "No models found"
-                      : "Cannot connect to Ollama"}
+                      : usingCodex ? "Conecta tu cuenta de ChatGPT" : "Cannot connect to Ollama"}
                   </div>
                 )}
               </div>

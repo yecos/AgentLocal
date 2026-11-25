@@ -4,7 +4,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "AgentLocal — Agente IA Local",
-  description: "Interfaz de agente IA 100% local con Ollama. Sin nube, sin API keys. Procesamiento privado en tu máquina.",
+  description: "Interfaz de agente de IA con Ollama local o Codex conectado a tu cuenta de ChatGPT.",
   icons: {
     icon: "/favicon.svg",
   },
