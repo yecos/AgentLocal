@@ -2252,11 +2252,14 @@ export default function AgentLocalInterface() {
     modelCount: codexStatus?.models.length || 0,
   } : ollamaStatus;
 
-  useEffect(() => {
-    if (selectedModel === "codex/default" && codexStatus?.models.length) {
-      setSelectedModel("codex/" + (codexStatus.models.find((item) => item.isDefault)?.id || codexStatus.models[0].id));
+  const updateCodexStatus = useCallback((next: CodexStatus) => {
+    setCodexStatus(next);
+    if (next.models.length) {
+      setSelectedModel((current) => current === "codex/default"
+        ? "codex/" + (next.models.find((item) => item.isDefault)?.id || next.models[0].id)
+        : current);
     }
-  }, [selectedModel, codexStatus]);
+  }, []);
   const [uptime, setUptime] = useState(0);
   const [sessionStats, setSessionStats] = useState<SessionStats>({
     messageCount: 0,
@@ -3546,7 +3549,7 @@ export default function AgentLocalInterface() {
 
       <CodexConnection model={selectedModel} disabled={isLoading}
         ollamaModel={ollamaStatus.models[0]?.name || "qwen3:4b"}
-        onModel={setSelectedModel} onStatus={setCodexStatus} />
+        onModel={setSelectedModel} onStatus={updateCodexStatus} />
 
       {/* ─── Settings Dialog ────────────────────────────────────────────── */}
       <SettingsDialog

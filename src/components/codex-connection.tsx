@@ -42,9 +42,9 @@ export function CodexConnection({ model, disabled, ollamaModel, onModel, onStatu
 
   useEffect(() => {
     if (!active) return;
-    void refresh();
+    const initial = setTimeout(refresh, 0);
     const interval = setInterval(refresh, 3000);
-    return () => clearInterval(interval);
+    return () => { clearTimeout(initial); clearInterval(interval); };
   }, [active, refresh]);
 
   const action = async (body: object) => {
