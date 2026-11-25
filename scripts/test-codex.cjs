@@ -69,6 +69,8 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const stream = (text, signal = new AbortController().signal) => codexStream([{ role: "user", content: text }], "fixture", true, signal);
   try {
     assert.equal(localRequest(new Request("http://localhost:3000/api/codex")), true);
+    assert.equal(localRequest(new Request("http://localhost:3000/api/codex", { headers: { host: "127.0.0.1:3020", origin: "http://127.0.0.1:3020" } })), true);
+    assert.equal(localRequest(new Request("http://localhost:3000/api/codex", { headers: { host: "outside.example" } })), false);
     assert.equal(localRequest(new Request("http://localhost:3000/api/codex", { headers: { origin: "https://outside.example" } })), false);
     assert.equal(localRequest(new Request("https://remote.example/api/codex")), false);
     assert.equal((await codex.status()).authenticated, false);

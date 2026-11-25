@@ -190,10 +190,15 @@ const globals = globalThis as typeof globalThis & { agentLocalCodex?: CodexClien
 export const codex = globals.agentLocalCodex ??= new CodexClient();
 
 export function localRequest(request: Request): boolean {
-  const url = new URL(request.url);
-  const origin = request.headers.get("origin");
-  return ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)
-    && (!origin || origin === url.origin);
+  try {
+    const url = new URL(request.url);
+    // Next.js may normalize request.url to its internal hostname. Browsers use Host.
+    const host = request.headers.get("host");
+    const address = host ? new URL(url.protocol + "//" + host) : url;
+    const origin = request.headers.get("origin");
+    return ["localhost", "127.0.0.1", "[::1]"].includes(address.hostname)
+      && (!origin || origin === address.origin);
+  } catch { return false; }
 }
 
 export async function codexStream(messages: Array<{ role: string; content: string }>, model: string, useAgent: boolean, signal: AbortSignal) {
