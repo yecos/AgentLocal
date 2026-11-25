@@ -1,6 +1,17 @@
 # AgentLocal - Agente de IA Autonomo Local
 
-Agente de IA que vive en tu computadora. Usa Ollama localmente (sin API keys, sin cloud) con arquitectura ReAct + Triple Memory + Metacognicion + Interfaz Web.
+Agente de IA que vive en tu computadora. Usa Ollama para inferencia local o Codex con tu cuenta de ChatGPT. Incluye arquitectura ReAct, memoria e interfaz web.
+
+## Conectar ChatGPT mediante Codex
+
+1. Instala Codex CLI con `npm install -g @openai/codex` y comprueba `codex --version`.
+2. Abre AgentLocal desde `http://127.0.0.1:3000` y selecciona **Codex · ChatGPT** en el selector Motor.
+3. Pulsa **Iniciar sesión con ChatGPT** y completa el acceso en la página de OpenAI. Si el navegador bloquea la ventana, usa **Continuar inicio de sesión**.
+4. Elige uno de los modelos disponibles para tu cuenta. Codex requiere internet y consume el cupo de tu plan.
+
+AgentLocal guarda esta sesión en `~/.agentlocal/codex`. Puedes cambiar la ubicación con `AGENTLOCAL_CODEX_HOME` y configurar el ejecutable con `AGENTLOCAL_CODEX_BIN`. La carpeta de trabajo se toma de `AGENT_REPOS_DIR` y su valor predeterminado es `~/AgentLocal-projects`.
+
+El modo Chat solicita una respuesta conversacional. El modo Agent usa las herramientas de Codex en la carpeta de trabajo y presenta las solicitudes de aprobación compatibles en la interfaz. Las solicitudes interactivas adicionales devuelven un error explícito. El historial visible se envía en cada turno, con el límite de memoria de la interfaz. Puedes volver a Ollama con el selector Motor.
 
 ## Que hace
 
