@@ -196,7 +196,10 @@ export function localRequest(request: Request): boolean {
     const host = request.headers.get("host");
     const address = host ? new URL(url.protocol + "//" + host) : url;
     const origin = request.headers.get("origin");
+    const forwarded = [request.headers.get("x-forwarded-for"), request.headers.get("x-real-ip")]
+      .filter(Boolean).flatMap((value) => value!.split(",").map((ip) => ip.trim()));
     return ["localhost", "127.0.0.1", "[::1]"].includes(address.hostname)
+      && forwarded.every((ip) => ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(ip))
       && (!origin || origin === address.origin);
   } catch { return false; }
 }

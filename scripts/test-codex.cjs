@@ -71,6 +71,8 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(localRequest(new Request("http://localhost:3000/api/codex")), true);
     assert.equal(localRequest(new Request("http://localhost:3000/api/codex", { headers: { host: "127.0.0.1:3020", origin: "http://127.0.0.1:3020" } })), true);
     assert.equal(localRequest(new Request("http://localhost:3000/api/codex", { headers: { host: "outside.example" } })), false);
+    assert.equal(localRequest(new Request("http://localhost:3000/api/codex", { headers: { "x-forwarded-for": "192.0.2.1" } })), false);
+    assert.equal(localRequest(new Request("http://localhost:3000/api/codex", { headers: { "x-forwarded-for": "127.0.0.1" } })), true);
     assert.equal(localRequest(new Request("http://localhost:3000/api/codex", { headers: { origin: "https://outside.example" } })), false);
     assert.equal(localRequest(new Request("https://remote.example/api/codex")), false);
     assert.equal((await codex.status()).authenticated, false);
